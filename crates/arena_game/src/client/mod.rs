@@ -183,9 +183,6 @@ pub fn run_windowed_client() {
 /// It logs every replicated `NetworkedPlayer` it receives (with the owner's client_id) so the
 /// late-joiner check can confirm each client sees the OTHER client's player.
 pub fn run_headless_client() {
-    use crate::net::protocol::{NetworkOwner, NetworkedPlayer};
-    use obelisk_bevy::prelude::ObeliskId;
-
     let root = arena_root();
     let mut app = App::new();
 
@@ -214,28 +211,44 @@ pub fn run_headless_client() {
     });
     add_avian_with_lightyear(&mut app);
 
-    // Temp logging (plan Task 9): trace every replicated NetworkedPlayer this client receives so
-    // the late-joiner check can confirm each client sees the OTHER client's player. Keyed by the
-    // owner's client_id (and ObeliskNetId once it arrives via replication).
-    app.add_observer(
-        |trigger: On<Add, NetworkedPlayer>,
-         owners: Query<&NetworkOwner>,
-         ids: Query<&ObeliskId>| {
-            let owner = owners.get(trigger.entity).map(|o| o.0);
-            let obelisk_id = ids.get(trigger.entity).ok().map(|i| i.0.clone());
+    // Temp logging (plan Task 9 / the M2.1 GATE): trace every replicated NetworkedPlayer this
+    // client receives so the late-joiner check can confirm each client sees the OTHER client's
+    // player. Polled (not an Add observer) because the owner/obelisk_id components arrive in
+    // separate replication packets — the poll waits until NetworkOwner is present, then logs once
+    // per entity. Keyed by NetworkOwner.client_id.
+    app.add_systems(Update, log_received_players);
+
+    app.run();
+}
+
+/// Polling logger for the M2.1 GATE: emit `replicated_player` once per replicated `NetworkedPlayer`
+/// (keyed by `NetworkOwner.client_id`), waiting until the owner component has replicated in. The
+/// `ObeliskNetId` is logged too when present. Temp scaffolding — superseded when the client
+/// materializes bodies for replicated players (M2.2+).
+fn log_received_players(
+    players: Query<
+        (
+            Entity,
+            &crate::net::protocol::NetworkOwner,
+            Option<&crate::net::protocol::ObeliskNetId>,
+        ),
+        With<crate::net::protocol::NetworkedPlayer>,
+    >,
+    mut seen: Local<std::collections::HashSet<u64>>,
+) {
+    for (entity, owner, obelisk_id) in &players {
+        if seen.insert(owner.0) {
+            let obelisk_id = obelisk_id.map(|o| o.0.clone());
             bevy::log::info!(
-                "client received replicated NetworkedPlayer: owner={:?} obelisk_id={:?}",
-                owner,
-                obelisk_id
+                "client received replicated NetworkedPlayer: entity={entity:?} owner={} obelisk_id={obelisk_id:?}",
+                owner.0
             );
             crate::trace::event(
                 "replicated_player",
-                serde_json::json!({ "owner": owner.ok(), "obelisk_id": obelisk_id }),
+                serde_json::json!({ "owner": owner.0, "obelisk_id": obelisk_id }),
             );
-        },
-    );
-
-    app.run();
+        }
+    }
 }
 
 /// Spawn a minimal 3D scene: a camera looking at the origin, a directional
