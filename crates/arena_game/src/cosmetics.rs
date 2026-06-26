@@ -8,10 +8,19 @@
 //! `Hitbox`/`Projectile`; these cosmetics only react to the cues it fires.
 
 use crate::trace;
-use arena_skills::CueMessage;
+use arena_skills::{CueKind, CueMessage};
 use bevy::prelude::*;
 use serde_json::json;
 use std::collections::HashMap;
+
+/// Chest/wand-height lift applied to the **OnCast** lane only. The OnCast cue's `position` is the
+/// caster's origin (y≈0, at the feet), so the muzzle particle + projectile would spawn inside the
+/// robe and be occluded. Raising them ~1.2m reads the muzzle at hand height and flies the projectile
+/// from chest height. The OnHit/impact lane keeps the target's actual hit position (no lift).
+///
+/// This fixed offset is the M1-appropriate stand-in; a real `wand_tip` socket on the rig is later
+/// polish.
+const MUZZLE_HEIGHT_OFFSET: Vec3 = Vec3::new(0.0, 1.2, 0.0);
 
 /// Per-caster aim direction (normalized), recorded when a cast is issued.
 ///
@@ -72,6 +81,14 @@ pub fn spawn_cue_cosmetics(
             }),
         );
 
+        // Spawn position: raise the OnCast lane (muzzle + projectile) to wand/chest height so it
+        // clears the robe; leave OnHit (impact) and any other lane at the cue's reported position.
+        let spawn_pos = if m.kind == CueKind::OnCast {
+            m.position + MUZZLE_HEIGHT_OFFSET
+        } else {
+            m.position
+        };
+
         // 1) Particle burst (emissive billboard stand-in).
         if let Some(p) = &m.event.particle {
             let c = LinearRgba::rgb(p.color[0], p.color[1], p.color[2]);
@@ -85,7 +102,7 @@ pub fn spawn_cue_cosmetics(
             commands.spawn((
                 Mesh3d(meshes.add(Rectangle::new(0.25, 0.25))),
                 MeshMaterial3d(material),
-                Transform::from_translation(m.position),
+                Transform::from_translation(spawn_pos),
                 ParticleLifetime {
                     elapsed: 0.0,
                     duration: p.lifetime,
@@ -107,7 +124,7 @@ pub fn spawn_cue_cosmetics(
                     unlit: true,
                     ..default()
                 })),
-                Transform::from_translation(m.position),
+                Transform::from_translation(spawn_pos),
                 CosmeticProjectile {
                     velocity: dir * proj.speed,
                     speed: proj.speed,

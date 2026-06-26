@@ -74,10 +74,7 @@ pub struct RigAssets {
 impl RigAssets {
     /// Construct from a `character.glb` handle (`AssetServer::load`).
     pub fn new(gltf: Handle<Gltf>) -> Self {
-        Self {
-            gltf,
-            ..default()
-        }
+        Self { gltf, ..default() }
     }
 
     /// The graph is built and the idle clip resolved.

@@ -366,11 +366,7 @@ struct PendingCastAssets(Vec<(String, Handle<CastTimeline>)>);
 /// Kick off loading a `.cast.ron` for every registered skill. `DefaultPlugins` sets
 /// `AssetPlugin::file_path = "assets"`, so paths are relative to that folder
 /// (e.g. "skills/firebolt.cast.ron").
-fn load_cast_assets(
-    mut commands: Commands,
-    assets: Res<AssetServer>,
-    skills: Res<SkillRegistry>,
-) {
+fn load_cast_assets(mut commands: Commands, assets: Res<AssetServer>, skills: Res<SkillRegistry>) {
     let mut ids: Vec<String> = skills.0.keys().cloned().collect();
     ids.sort();
 
@@ -574,9 +570,7 @@ fn autocast_system(
         );
         // Stash the aim direction (caster → target) for the cosmetic projectile. The OnCast cue
         // carries only the caster's position, so `spawn_cue_cosmetics` reads this by `msg.source`.
-        let dir = (dummy_pos - player_pos)
-            .try_normalize()
-            .unwrap_or(Vec3::Z);
+        let dir = (dummy_pos - player_pos).try_normalize().unwrap_or(Vec3::Z);
         aim_dirs.0.insert(player, dir);
         commands.entity(player).cast_skill_at("firebolt", dummy);
         cfg.fired = true;

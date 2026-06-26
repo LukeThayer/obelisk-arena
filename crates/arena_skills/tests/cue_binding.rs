@@ -16,8 +16,8 @@ use arena_skills::{register_skill_cues, ArenaSkillsPlugin, CueKind, CueMessage, 
 use bevy::prelude::*;
 use obelisk_bevy::prelude::*;
 use obelisk_bevy::testkit::init_test_obelisk;
-use std::time::Duration;
 use stat_core::StatBlock;
+use std::time::Duration;
 
 /// Re-root the process onto the sibling `obelisk-bevy` crate so the testkit's CWD-relative fixture
 /// IO and its `AssetServer` reads both resolve (see `cast_smoke.rs::enter_obelisk_root`).
@@ -70,8 +70,8 @@ fn load_firebolt_skillfx() -> SkillFx {
         .nth(2)
         .unwrap()
         .join("assets/skills/firebolt.skillfx.ron");
-    let bytes = std::fs::read(&path)
-        .unwrap_or_else(|e| panic!("read {} failed: {e}", path.display()));
+    let bytes =
+        std::fs::read(&path).unwrap_or_else(|e| panic!("read {} failed: {e}", path.display()));
     ron::de::from_bytes::<SkillFx>(&bytes)
         .unwrap_or_else(|e| panic!("deserialize firebolt.skillfx.ron failed: {e}"))
 }
@@ -185,10 +185,7 @@ fn casting_firebolt_emits_lane_cue_messages() {
 
     // --- assert the binding layer surfaced the lanes ---
     let log = &app.world().resource::<CueLog>().0;
-    let summary: Vec<(String, CueKind)> = log
-        .iter()
-        .map(|m| (m.lane_id.clone(), m.kind))
-        .collect();
+    let summary: Vec<(String, CueKind)> = log.iter().map(|m| (m.lane_id.clone(), m.kind)).collect();
     assert!(
         !log.is_empty(),
         "expected CueMessages from the firebolt cast, got none ({summary:?})"

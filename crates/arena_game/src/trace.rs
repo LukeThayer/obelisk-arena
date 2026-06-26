@@ -34,11 +34,7 @@ fn sink() -> &'static Option<Mutex<File>> {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        match OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
+        match OpenOptions::new().create(true).append(true).open(&path) {
             Ok(f) => Some(Mutex::new(f)),
             Err(e) => {
                 eprintln!("arena::trace: failed to open {:?}: {e}", path);

@@ -22,11 +22,11 @@ fn firebolt_skillfx_ron_round_trips() {
         "expected the firebolt skillfx fixture at {}",
         path.display()
     );
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
 
-    let fx: SkillFx = ron::de::from_str(&text)
-        .unwrap_or_else(|e| panic!("deserialize {}: {e}", path.display()));
+    let fx: SkillFx =
+        ron::de::from_str(&text).unwrap_or_else(|e| panic!("deserialize {}: {e}", path.display()));
 
     assert_eq!(fx.skill_id, "firebolt");
     assert!(
@@ -48,8 +48,14 @@ fn firebolt_skillfx_ron_round_trips() {
         cast.projectile.is_some(),
         "firebolt_cast lane should declare a cosmetic projectile"
     );
-    assert!(cast.particle.is_some(), "firebolt_cast lane has a muzzle particle");
-    assert!(cast.anim.is_some(), "firebolt_cast lane has a cast_release anim");
+    assert!(
+        cast.particle.is_some(),
+        "firebolt_cast lane has a muzzle particle"
+    );
+    assert!(
+        cast.anim.is_some(),
+        "firebolt_cast lane has a cast_release anim"
+    );
 
     let impact = &fx.lanes["firebolt_impact"];
     assert_eq!(impact.kind, CueKind::OnHit);
@@ -57,5 +63,8 @@ fn firebolt_skillfx_ron_round_trips() {
         impact.projectile.is_none(),
         "firebolt_impact lane should NOT spawn a projectile"
     );
-    assert!(impact.particle.is_some(), "firebolt_impact lane has an impact particle");
+    assert!(
+        impact.particle.is_some(),
+        "firebolt_impact lane has an impact particle"
+    );
 }
