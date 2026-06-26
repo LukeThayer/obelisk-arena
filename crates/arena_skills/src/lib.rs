@@ -153,6 +153,32 @@ pub struct CueMessage {
     pub kind: CueKind,
 }
 
+/// The **egress** half of the cue binding: build a serde [`CueMessage`] from a fired cue's parts.
+///
+/// Pure (no bevy/lightyear), so it's testable headlessly and keeps `arena_skills` engine-neutral.
+/// The obelisk side supplies `source_id` by resolving the `CueEvent.source` `Entity` to its stable
+/// `ObeliskId` (via `ObeliskEntityIndex`) — `arena_game` does that lookup and calls this.
+pub fn cue_event_to_message(
+    cue_id: &str,
+    source_id: &str,
+    position: Vec3,
+    kind: CueKind,
+) -> CueMessage {
+    CueMessage {
+        cue_id: cue_id.into(),
+        source_id: source_id.into(),
+        position,
+        kind,
+    }
+}
+
+/// The **consumer** half of the cue binding: resolve the [`LaneEvent`]s a [`CueMessage`] should play
+/// by re-looking-up the [`SkillFxRegistry`] on `cue_id`. An unbound cue resolves to an empty slice
+/// (the consumer no-ops — spec §12: never crash on missing content). Pure + lightyear-free.
+pub fn resolve_cue<'a>(reg: &'a SkillFxRegistry, m: &CueMessage) -> &'a [LaneEvent] {
+    reg.lanes(&m.cue_id).unwrap_or(&[])
+}
+
 /// RON loader for `*.skillfx.ron`. Mirrors obelisk's hand-rolled `CastTimelineLoader`
 /// (`obelisk-bevy/src/assets/mod.rs`): a `ron`-crate `AssetLoader` matched on the extension, with a
 /// `thiserror` error enum that stringifies the IO / RON errors (those types aren't `Send + Sync`

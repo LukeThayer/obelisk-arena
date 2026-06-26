@@ -7,13 +7,14 @@
 //! fires, the `source_id` is the source combatant's stable `ObeliskId` (NOT a local `Entity`).
 //!
 //! This test casts firebolt through the real obelisk sim, observes every `CueEvent`, builds the
-//! serde `CueMessage` from each (resolving `source` → `ObeliskId` exactly as the `arena_game` egress
-//! does), and asserts both the on-cast (`firebolt_cast`, anchored on the caster) and on-hit
-//! (`firebolt_impact`, anchored on the target) wire cues surface with the right ids.
+//! serde `CueMessage` from each via the egress helper [`arena_skills::cue_event_to_message`]
+//! (resolving `source` → `ObeliskId` exactly as the `arena_game` egress does), and asserts both the
+//! on-cast (`firebolt_cast`, anchored on the caster) and on-hit (`firebolt_impact`, anchored on the
+//! target) wire cues surface with the right ids.
 //!
 //! See `cast_smoke.rs` for the full rationale on the `set_current_dir` + `BEVY_ASSET_ROOT` re-root.
 
-use arena_skills::{ArenaSkillsPlugin, CueKind, CueMessage};
+use arena_skills::{cue_event_to_message, ArenaSkillsPlugin, CueKind, CueMessage};
 use bevy::prelude::*;
 use obelisk_bevy::prelude::*;
 use obelisk_bevy::testkit::init_test_obelisk;
@@ -169,12 +170,7 @@ fn casting_firebolt_emits_serde_cue_messages() {
     };
     let msgs: Vec<CueMessage> = raw
         .into_iter()
-        .map(|(src, cue_id, pos, kind)| CueMessage {
-            cue_id,
-            source_id: id_of(src),
-            position: pos,
-            kind,
-        })
+        .map(|(src, cue_id, pos, kind)| cue_event_to_message(&cue_id, &id_of(src), pos, kind))
         .collect();
 
     let summary: Vec<(&str, &str, CueKind)> = msgs
