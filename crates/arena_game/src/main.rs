@@ -1,6 +1,7 @@
 mod trace;
 
 use bevy::prelude::*;
+use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use obelisk_bevy::prelude::*;
 use stat_core::StatBlock;
 use std::path::PathBuf;
@@ -78,6 +79,20 @@ fn main() {
             count: 0,
         });
         app.add_systems(Update, smoke_exit_after_frames);
+    }
+
+    // Visual-verification harness (inert unless its env vars are set):
+    //   ARENA_SHOT=<path>  -> save a PNG of the primary window, then exit.
+    //   ARENA_AUTOCAST=1   -> fire one firebolt from player at dummy.
+    // Both are env-gated inside their systems, so they're always registered but
+    // no-op when the env var is absent. See `screenshot_config`/`autocast_config`.
+    if let Some(cfg) = ScreenshotConfig::from_env() {
+        app.insert_resource(cfg);
+        app.add_systems(Update, screenshot_system);
+    }
+    if let Some(cfg) = AutocastConfig::from_env() {
+        app.insert_resource(cfg);
+        app.add_systems(Update, autocast_system);
     }
 
     app.run();
@@ -259,5 +274,144 @@ fn smoke_exit_after_frames(mut smoke: ResMut<SmokeExit>, mut exit: MessageWriter
     if smoke.count >= smoke.target {
         info!("arena_game smoke: reached {} frames, exiting", smoke.count);
         exit.write(AppExit::Success);
+    }
+}
+
+/// Parse a `u64` env var, falling back to `default` if unset or unparseable.
+fn env_frame(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+/// Screenshot-harness config, present as a resource only when `ARENA_SHOT` is set.
+///
+/// At `shot_frame` it spawns `Screenshot::primary_window()` with a `save_to_disk(path)`
+/// observer (Bevy 0.18's built-in async capture); `shot_frame + 12` frames later it sends
+/// `AppExit::Success`, giving the async readback time to flush the PNG to disk. This lets
+/// later visual tasks render the scene to a file and diff it without a human in the loop.
+#[derive(Resource)]
+struct ScreenshotConfig {
+    /// Output PNG path (the value of `ARENA_SHOT`).
+    path: PathBuf,
+    /// Frame on which to spawn the screenshot capture (`ARENA_SHOT_FRAME`, default 120).
+    shot_frame: u64,
+    /// Frames elapsed so far (incremented every `Update`).
+    count: u64,
+    /// Whether the capture has already been spawned (fire-once latch).
+    fired: bool,
+}
+
+impl ScreenshotConfig {
+    /// Build from env, or `None` if `ARENA_SHOT` is unset (the harness stays inert).
+    fn from_env() -> Option<Self> {
+        let path = std::env::var_os("ARENA_SHOT")?;
+        Some(Self {
+            path: PathBuf::from(path),
+            shot_frame: env_frame("ARENA_SHOT_FRAME", 120),
+            count: 0,
+            fired: false,
+        })
+    }
+}
+
+/// At `shot_frame`, capture the primary window to `path`; at `shot_frame + 12`, exit.
+///
+/// Only registered when `ARENA_SHOT` is set (see `main`), so it never runs in normal play.
+fn screenshot_system(
+    mut commands: Commands,
+    mut cfg: ResMut<ScreenshotConfig>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    cfg.count += 1;
+
+    if !cfg.fired && cfg.count >= cfg.shot_frame {
+        let path = cfg.path.clone();
+        info!(
+            "arena_game shot: frame {}, capturing primary window -> {}",
+            cfg.count,
+            path.display()
+        );
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(save_to_disk(path));
+        cfg.fired = true;
+    }
+
+    // Give the async screenshot save ~12 frames to flush before exiting.
+    if cfg.fired && cfg.count >= cfg.shot_frame + 12 {
+        info!("arena_game shot: capture flushed, exiting");
+        exit.write(AppExit::Success);
+    }
+}
+
+/// Auto-cast-harness config, present as a resource only when `ARENA_AUTOCAST=1`.
+///
+/// At `cast_frame` it fires one `firebolt` from the player at the dummy so later tasks can
+/// capture a cast in progress. At this stage (pre-Task 9) there are no cosmetics, so the
+/// cast just resolves obelisk damage — that's expected.
+#[derive(Resource)]
+struct AutocastConfig {
+    /// Frame on which to fire the cast (`ARENA_AUTOCAST_FRAME`, default 30).
+    cast_frame: u64,
+    /// Frames elapsed so far.
+    count: u64,
+    /// Fire-once latch.
+    fired: bool,
+}
+
+impl AutocastConfig {
+    /// Build from env, or `None` unless `ARENA_AUTOCAST == "1"` (the harness stays inert).
+    fn from_env() -> Option<Self> {
+        if std::env::var("ARENA_AUTOCAST").ok().as_deref() != Some("1") {
+            return None;
+        }
+        Some(Self {
+            cast_frame: env_frame("ARENA_AUTOCAST_FRAME", 30),
+            count: 0,
+            fired: false,
+        })
+    }
+}
+
+/// At `cast_frame`, find the player + dummy combatants and cast `firebolt` from player at dummy.
+///
+/// Only registered when `ARENA_AUTOCAST=1` (see `main`). Identifies combatants by their stable
+/// `ObeliskId` ("player" / "dummy") set by `make_combatant`.
+fn autocast_system(
+    mut commands: Commands,
+    mut cfg: ResMut<AutocastConfig>,
+    combatants: Query<(Entity, &ObeliskId), With<Combatant>>,
+) {
+    cfg.count += 1;
+    if cfg.fired || cfg.count < cfg.cast_frame {
+        return;
+    }
+
+    let mut player = None;
+    let mut dummy = None;
+    for (entity, id) in &combatants {
+        match id.0.as_str() {
+            "player" => player = Some(entity),
+            "dummy" => dummy = Some(entity),
+            _ => {}
+        }
+    }
+
+    if let (Some(player), Some(dummy)) = (player, dummy) {
+        info!(
+            "arena_game autocast: frame {}, player casts firebolt at dummy",
+            cfg.count
+        );
+        commands.entity(player).cast_skill_at("firebolt", dummy);
+        cfg.fired = true;
+    } else {
+        warn!(
+            "arena_game autocast: frame {}, player/dummy not found yet (player={:?}, dummy={:?})",
+            cfg.count,
+            player.is_some(),
+            dummy.is_some()
+        );
     }
 }
