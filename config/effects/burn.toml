@@ -1,0 +1,11 @@
+id = "burn"
+name = "Burn"
+duration = 5.0
+is_debuff = true
+stacking = "strongest_only"
+damage_type = "fire"
+base_damage_percent = 0.5
+tick_rate = 0.5
+max_stacks = 1
+[application]
+type = "chance"

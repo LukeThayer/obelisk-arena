@@ -1,0 +1,12 @@
+(
+  skill_id: "firebolt",
+  phase_durations: ( windup: 0.3, active: 0.1, recovery: 0.2 ),
+  collision_windows: [
+    ( id: "bolt", spawn_phase: Active, spawn_offset: 0.0, active_duration: 2.0,
+      shape: Sphere( radius: 0.5 ), motion: Linear( speed: 20.0 ),
+      hit_filter: Enemies, hit_mode: FirstOnly ),
+  ],
+  targeting: SingleEntity( range: 15.0 ),
+  delivery: Projectile( speed: 20.0 ),
+  vfx_cues: { "on_cast": "firebolt_cast", "on_hit": "firebolt_impact" },
+)

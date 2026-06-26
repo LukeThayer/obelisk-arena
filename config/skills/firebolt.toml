@@ -1,0 +1,16 @@
+id = "firebolt"
+name = "Firebolt"
+tags = ["spell", "fire"]
+targeting = "single_enemy"
+delivery = "projectile"
+mana_cost = 5.0
+
+[[effect_applications]]
+effect_id = "burn"
+target = "target"
+apply_chance = "always"
+[effect_applications.scaling.damage_driven]
+conversions = { fire = 0.5 }
+
+[damage]
+base_damages = [{ type = "fire", min = 20.0, max = 20.0 }]
