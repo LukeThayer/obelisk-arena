@@ -1,3 +1,4 @@
+mod controller;
 mod cosmetics;
 mod rig;
 mod trace;
@@ -5,6 +6,7 @@ mod trace;
 use arena_skills::SkillFx;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+use controller::{ArenaControllerPlugin, FollowCamera, PlayerController};
 use cosmetics::{age_lifetimes, fly_cosmetic_projectiles, spawn_cue_cosmetics, AimDirs};
 use obelisk_bevy::prelude::*;
 use rig::ArenaBody;
@@ -62,6 +64,10 @@ fn main() {
     // The arena cosmetic-binding layer: registers the SkillFx asset + loader + the CueMessage
     // message channel that `register_skill_cues` (below) writes into.
     app.add_plugins(arena_skills::ArenaSkillsPlugin);
+    // Third-person controller: follow camera + camera-relative WASD movement +
+    // the chest_joint aim spine-pitch (scheduled PostUpdate, between animation
+    // and transform propagation). Registers CameraYaw/AimPitch/PlayerVelocity.
+    app.add_plugins(ArenaControllerPlugin);
     app.add_plugins(trace::TracePlugin);
     // Obelisk runs its sim on the 60 Hz fixed timestep.
     app.insert_resource(Time::<Fixed>::from_hz(60.0));
@@ -107,11 +113,16 @@ fn main() {
         ),
     );
 
-    // Character rig: build the AnimationGraph once `character.glb` loads, then attach an
-    // AnimationPlayer (playing idle) to the scene's animation-target entity once it spawns.
+    // Character rig: build the AnimationGraph once `character.glb` loads, attach an
+    // AnimationPlayer (playing idle) to the scene's animation-target entity once it spawns, and
+    // costume-cull the unified rig down to ONE outfit (Witch/wizard) once its meshes appear.
     app.add_systems(
         Update,
-        (rig::build_graph_when_loaded, rig::attach_animation_graph),
+        (
+            rig::build_graph_when_loaded,
+            rig::attach_animation_graph,
+            rig::cull_costume,
+        ),
     );
 
     // Cosmetics: consume CueMessages → spawn emissive bursts + flying projectiles, fly them, age
@@ -159,12 +170,13 @@ fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Frame the player rig at the origin head-on so the rigged character (idle pose) fills the
-    // shot. Temporary framing for the rig-verification task; the real follow cam lands in Task 11.
-    // Camera at (0,2,5) looking at (0,1,0) centers on the character's torso.
+    // Over-the-shoulder follow camera. `FollowCamera` marks it so the controller can place it
+    // behind + above the player each frame (it follows the player's translation + camera yaw).
+    // The initial transform just frames the spawn origin head-on before the controller takes over.
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 2.0, 5.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        FollowCamera,
+        Transform::from_xyz(0.0, 2.0, 4.0).looking_at(Vec3::new(0.0, 1.5, 0.0), Vec3::Y),
     ));
     commands.spawn((
         DirectionalLight::default(),
@@ -222,6 +234,9 @@ fn spawn_combatants(
         .make_combatant(StatBlock::with_id("player"))
         .insert((
             Faction::Player,
+            // `PlayerController` marks the combatant root the third-person controller drives
+            // (camera-relative WASD writes this Transform directly; the follow cam tracks it).
+            PlayerController,
             Transform::from_xyz(0.0, 0.0, 0.0),
             Visibility::default(),
         ))
