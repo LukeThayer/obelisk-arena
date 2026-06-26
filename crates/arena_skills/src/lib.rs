@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use obelisk_bevy::prelude::CueKind as ObeliskCueKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Authored cosmetic layer for one skill, loaded from `<skill>.skillfx.ron`.
 /// Mirrors obelisk's `CastTimeline`: a serde-deserialized RON asset keyed by `skill_id`.
@@ -20,6 +21,48 @@ pub struct SkillFx {
     /// `"firebolt_impact"`, from the `.cast.ron` `vfx_cues` map) — to a lane reaction.
     #[serde(default)]
     pub lanes: HashMap<String, LaneEvent>,
+}
+
+/// The runtime cue → lanes index, flattened from every `.skillfx.ron` in a directory.
+///
+/// Each `SkillFx.lanes` is a `cue_id -> LaneEvent` map (one lane per cue id per skill file); this
+/// registry flattens *all* of them into `cue_id -> Vec<LaneEvent>` so a single cue id fired by
+/// obelisk resolves every cosmetic lane bound to it across all skills. The serde `CueMessage` wire
+/// type carries only the `cue_id` (not the lane); the consumer re-looks-up the lanes here via
+/// [`resolve_cue`], keeping the wire payload small and `arena_skills` engine-neutral.
+#[derive(Resource, Default)]
+pub struct SkillFxRegistry {
+    /// cue_id (the obelisk cue VALUE, e.g. `"firebolt_cast"`) → the lanes that react to it.
+    pub by_cue: HashMap<String, Vec<LaneEvent>>,
+}
+
+impl SkillFxRegistry {
+    /// Load every `*.skillfx.ron` in `dir` and flatten its lanes into the `by_cue` index. Missing
+    /// dirs / unreadable / malformed files are skipped silently (spec §12: never crash on content),
+    /// so a partial asset set still yields a usable registry.
+    pub fn load_dir(dir: &Path) -> Self {
+        let mut by_cue: HashMap<String, Vec<LaneEvent>> = HashMap::default();
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.to_string_lossy().ends_with(".skillfx.ron") {
+                    if let Ok(s) = std::fs::read_to_string(&p) {
+                        if let Ok(fx) = ron::de::from_str::<SkillFx>(&s) {
+                            for (cue_id, lane) in fx.lanes {
+                                by_cue.entry(cue_id).or_default().push(lane);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Self { by_cue }
+    }
+
+    /// The lanes bound to `cue_id`, or `None` if no `.skillfx.ron` bound that cue.
+    pub fn lanes(&self, cue_id: &str) -> Option<&[LaneEvent]> {
+        self.by_cue.get(cue_id).map(|v| &v[..])
+    }
 }
 
 /// One cosmetic reaction bound to a cue slot. The game turns this into particles / projectile /
