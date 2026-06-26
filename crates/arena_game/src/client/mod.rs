@@ -8,6 +8,7 @@
 pub mod controller;
 pub mod cosmetics;
 pub mod net;
+pub mod replication;
 pub mod rig;
 
 use arena_skills::{cue_event_to_message, SkillFxRegistry};
@@ -177,6 +178,7 @@ pub fn run_windowed_client() {
     // movement is driven by real input. The M1 co-located local player/dummy still spawn for the
     // single-process regression; the net layer runs alongside and drives the replicated players.
     app.add_plugins(net::ClientNetPlayerPlugin);
+    app.add_plugins(replication::ReplicationSmoothingPlugin);
     app.add_systems(Update, bridge_windowed_input_to_local_input);
 
     app.run();
@@ -255,6 +257,7 @@ pub fn run_headless_client() {
     // (Task 11) interpolate remote players. Also traces replicated/materialized players for the
     // late-joiner check.
     app.add_plugins(net::ClientNetPlayerPlugin);
+    app.add_plugins(replication::ReplicationSmoothingPlugin);
     app.add_systems(Update, trace_replicated_players);
 
     // [H] AUTOMOVE hook: feed a constant forward movement input so the headless movement-replication
