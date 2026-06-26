@@ -9,7 +9,7 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use controller::{ArenaControllerPlugin, FollowCamera, PlayerController};
 use cosmetics::{age_lifetimes, fly_cosmetic_projectiles, spawn_cue_cosmetics, AimDirs};
 use obelisk_bevy::prelude::*;
-use rig::ArenaBody;
+use rig::{ArenaBody, LocalAnimBlend};
 use stat_core::StatBlock;
 use std::path::PathBuf;
 
@@ -122,6 +122,11 @@ fn main() {
             rig::build_graph_when_loaded,
             rig::attach_animation_graph,
             rig::cull_costume,
+            // Per-frame blend driver: locomotion (PlayerVelocity) + casting layer
+            // (player's ActiveCast.phase). Ordered after the graph is attached so the
+            // AnimationPlayer exists; its weights are read by the animation systems in
+            // PostUpdate this same frame.
+            rig::drive_animation.after(rig::attach_animation_graph),
         ),
     );
 
@@ -131,6 +136,10 @@ fn main() {
         Update,
         (spawn_cue_cosmetics, fly_cosmetic_projectiles, age_lifetimes),
     );
+
+    // The real cast bind: Space or left-mouse casts firebolt at the nearest enemy (via the
+    // obelisk `ObeliskSpatial` facade), recording the aim dir for the cosmetic projectile.
+    app.add_systems(Update, cast_on_input);
 
     // Non-interactive smoke verification: if ARENA_SMOKE_FRAMES is set, exit
     // after that many rendered frames so the renderer can be verified without a
@@ -237,6 +246,9 @@ fn spawn_combatants(
             // `PlayerController` marks the combatant root the third-person controller drives
             // (camera-relative WASD writes this Transform directly; the follow cam tracks it).
             PlayerController,
+            // Persisted cast-animation blend state, eased toward the `ActiveCast.phase` target
+            // each frame by `drive_animation` so the casting layer cross-fades in/out.
+            LocalAnimBlend::default(),
             Transform::from_xyz(0.0, 0.0, 0.0),
             Visibility::default(),
         ))
@@ -295,6 +307,55 @@ fn confirm_combatants_once(
         );
         *done = true;
     }
+}
+
+/// The real cast bind (Task 12 GATE): on `Space` or left-mouse, cast the player's first granted
+/// skill (firebolt) at the nearest enemy, found via the obelisk `ObeliskSpatial` facade.
+///
+/// Mirrors `examples/playground.rs::free_cast_on_space`: pick the Player-faction combatant with a
+/// skill, `nearest_enemy(origin, range, faction)`, then `cast_skill_at`. The aim direction
+/// (player → target) is recorded into [`AimDirs`] (keyed by the caster) so `spawn_cue_cosmetics`
+/// flies the cosmetic projectile the right way — the `OnCast` cue carries only the caster position.
+/// Skips while a cast is already active (obelisk rejects concurrent casts anyway).
+#[allow(clippy::type_complexity)]
+fn cast_on_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut commands: Commands,
+    spatial: ObeliskSpatial,
+    mut aim_dirs: ResMut<AimDirs>,
+    players: Query<
+        (Entity, &Transform, &Faction, &SkillSlots),
+        (With<PlayerController>, Without<ActiveCast>),
+    >,
+    transforms: Query<&Transform, With<Combatant>>,
+) {
+    if !keys.just_pressed(KeyCode::Space) && !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Ok((player, tf, faction, slots)) = players.single() else {
+        return;
+    };
+    let Some(skill) = slots.0.first().cloned() else {
+        return;
+    };
+    // firebolt's `.cast.ron` targeting range is 15.0; use a slightly wider acquisition radius so a
+    // target just at the edge is still picked, then obelisk's `validate_casts` enforces the rule.
+    let Some(target) = spatial.nearest_enemy(tf.translation, 20.0, *faction) else {
+        info!("cast {skill}: no enemy in range");
+        return;
+    };
+    // Stash the aim dir (caster → target) for the cosmetic projectile.
+    let target_pos = transforms
+        .get(target)
+        .map(|t| t.translation)
+        .unwrap_or(tf.translation + Vec3::Z);
+    let dir = (target_pos - tf.translation)
+        .try_normalize()
+        .unwrap_or(Vec3::Z);
+    aim_dirs.0.insert(player, dir);
+    info!("cast {skill} at nearest enemy");
+    commands.entity(player).cast_skill_at(skill, target);
 }
 
 /// The cast-timeline handles being polled to load (skill id -> handle). Drained into

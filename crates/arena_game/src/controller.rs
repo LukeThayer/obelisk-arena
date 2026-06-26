@@ -105,7 +105,16 @@ impl Plugin for ArenaControllerPlugin {
             .map(|p| (p, true))
             .unwrap_or((0.0, false));
 
-        app.init_resource::<CameraYaw>()
+        // Initial camera yaw. `ARENA_CAM_YAW` (radians) seeds a 3/4 view for headless
+        // screenshot verification so the cast pose + muzzle particle + flying projectile
+        // are all legible (a straight-behind shot hides them behind the character).
+        // Default 0 → straight behind; mouse-X drives it from there in normal play.
+        let yaw0 = std::env::var("ARENA_CAM_YAW")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
+
+        app.insert_resource(CameraYaw(yaw0))
             .insert_resource(AimPitch(pitch0))
             .insert_resource(AimPitchLocked(locked))
             .init_resource::<PlayerVelocity>()

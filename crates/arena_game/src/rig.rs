@@ -10,6 +10,7 @@
 
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::{gltf::Gltf, prelude::*};
+use obelisk_bevy::prelude::{ActiveCast, SkillPhase};
 
 /// Animation clip names baked into `character.glb`. Verified against the
 /// glb's `gltf.named_animations` keys: `idle`, `walk_forward`,
@@ -23,6 +24,24 @@ const WALK_B_CLIP: &str = "walk_backward";
 const WALK_L_CLIP: &str = "walk_left";
 const WALK_R_CLIP: &str = "walk_right";
 const FALL_CLIP: &str = "falling";
+/// Casting variants — the spell-cast pose overlaid (blended) on top of the
+/// matching locomotion clip when the player has an `ActiveCast`. Copied from
+/// wisp's `visuals.rs:77-81`. `casting_idle` is the load-bearing one (the
+/// standing cast pose); the `casting_walk_*` set is loaded so a cast issued
+/// while moving keeps the directional read, and is silently skipped if absent.
+const CAST_IDLE_CLIP: &str = "casting_idle";
+const CAST_WALK_F_CLIP: &str = "casting_walk_forward";
+const CAST_WALK_B_CLIP: &str = "casting_walk_backward";
+const CAST_WALK_L_CLIP: &str = "casting_walk_left";
+const CAST_WALK_R_CLIP: &str = "casting_walk_right";
+
+/// Walk speed at which the locomotion clips play at their authored cadence
+/// (weight ramps to 1). Below this the blend eases toward idle. Mirrors wisp's
+/// `LOCOMOTION_REF_SPEED` (3.5), ~80% of the controller's `MOVE_SPEED` (4.0).
+const LOCOMOTION_REF_SPEED: f32 = 3.5;
+/// Below this planar speed the rig is treated as standing (idle / casting_idle
+/// only). Mirrors wisp's `WALK_MIN_SPEED`.
+const WALK_MIN_SPEED: f32 = 0.2;
 
 /// Marker for the player's rigged body scene root (the `SceneRoot` of
 /// `character.glb`). Renamed from wisp's `LocalWizardBody`. Spawned as a
@@ -45,6 +64,11 @@ pub struct RigAssets {
     pub(crate) walk_l: Option<AnimationNodeIndex>,
     pub(crate) walk_r: Option<AnimationNodeIndex>,
     pub(crate) falling: Option<AnimationNodeIndex>,
+    pub(crate) cast_idle: Option<AnimationNodeIndex>,
+    pub(crate) cast_walk_f: Option<AnimationNodeIndex>,
+    pub(crate) cast_walk_b: Option<AnimationNodeIndex>,
+    pub(crate) cast_walk_l: Option<AnimationNodeIndex>,
+    pub(crate) cast_walk_r: Option<AnimationNodeIndex>,
 }
 
 impl RigAssets {
@@ -97,6 +121,11 @@ pub fn build_graph_when_loaded(
     rig.walk_l = add(WALK_L_CLIP);
     rig.walk_r = add(WALK_R_CLIP);
     rig.falling = add(FALL_CLIP);
+    rig.cast_idle = add(CAST_IDLE_CLIP);
+    rig.cast_walk_f = add(CAST_WALK_F_CLIP);
+    rig.cast_walk_b = add(CAST_WALK_B_CLIP);
+    rig.cast_walk_l = add(CAST_WALK_L_CLIP);
+    rig.cast_walk_r = add(CAST_WALK_R_CLIP);
 
     if rig.idle.is_none() {
         warn!("character.glb is missing animation \"{IDLE_CLIP}\"");
@@ -244,10 +273,175 @@ pub fn attach_animation_graph(
         let Ok(mut player) = players.get_mut(entity) else {
             continue;
         };
-        // Play the idle clip on a loop at full weight.
-        player.play(idle).repeat().set_weight(1.0);
+        // Start every clip looping muted-at-rest so the per-frame `drive_animation`
+        // blend can set weights without first having to `play` each one. `play` is
+        // idempotent (entry-or-default), so every clip is started exactly once here.
+        for node in [
+            rig.idle,
+            rig.walk_f,
+            rig.walk_b,
+            rig.walk_l,
+            rig.walk_r,
+            rig.falling,
+            rig.cast_idle,
+            rig.cast_walk_f,
+            rig.cast_walk_b,
+            rig.cast_walk_l,
+            rig.cast_walk_r,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            player.play(node).repeat().set_weight(0.0);
+        }
+        // Seed idle at full weight so the character isn't a T-pose for the single
+        // frame before any blend driver runs.
+        player.play(idle).set_weight(1.0);
         commands
             .entity(entity)
             .insert(AnimationGraphHandle(graph.clone()));
+    }
+}
+
+/// Smoothly-eased casting factor for the player rig, persisted across frames so the
+/// cast wind-up/recovery cross-fades between the plain locomotion clips and the
+/// casting variants instead of popping. Inserted on the player combatant root in
+/// `spawn_combatants`; read+written by [`drive_animation`].
+#[derive(Component, Default)]
+pub struct LocalAnimBlend {
+    /// 0 = plain locomotion, 1 = full casting layer. Eased toward the
+    /// phase-driven target each frame by [`step_casting_blend`].
+    pub casting: f32,
+}
+
+/// Per-frame exponential follow toward the target casting blend. `ALPHA` 0.2
+/// reaches ~95% in ~14 frames (~230ms at 60Hz) — fast enough to read with the
+/// cast but slow enough that the cross-fade doesn't pop. Copied from wisp's
+/// `step_casting_blend` (`visuals.rs:521`), generalized to follow a continuous
+/// target (not just a 0/1 bool) so `SkillPhase::Recovery` can ease toward 0.5.
+fn step_casting_blend(current: f32, target: f32) -> f32 {
+    const ALPHA: f32 = 0.2;
+    current + (target - current) * ALPHA
+}
+
+/// Compute per-clip blend weights from world velocity + the eased casting factor.
+///
+/// `casting_blend` (0..1) cross-fades the locomotion side between the plain clips
+/// (idle / walk_*) and the casting variants (casting_idle / casting_walk_*):
+/// 0 = plain, 1 = casting. A missing casting variant silently drops that direction's
+/// casting weight (the plain clip stays visible), so the rig degrades gracefully if
+/// only `casting_idle` is authored. Adapted from wisp's `locomotion_blend`
+/// (`visuals.rs:438+`), dropping the airborne/`falling` term (the arena is grounded).
+fn locomotion_blend(
+    rig: &RigAssets,
+    world_velocity: Vec3,
+    yaw: f32,
+    casting_blend: f32,
+) -> Vec<(AnimationNodeIndex, f32)> {
+    let mut out: Vec<(AnimationNodeIndex, f32)> = Vec::with_capacity(10);
+    let push = |out: &mut Vec<_>, node: Option<AnimationNodeIndex>, w: f32| {
+        if let Some(n) = node {
+            out.push((n, w));
+        }
+    };
+
+    let casting_blend = casting_blend.clamp(0.0, 1.0);
+    let cast_factor = casting_blend;
+    let plain_factor = 1.0 - casting_blend;
+
+    let planar = Vec3::new(world_velocity.x, 0.0, world_velocity.z);
+    let speed = planar.length();
+
+    if speed < WALK_MIN_SPEED {
+        // Standing: all weight on idle / casting_idle.
+        push(&mut out, rig.idle, plain_factor);
+        push(&mut out, rig.cast_idle, cast_factor);
+        return out;
+    }
+
+    let locomotion = (speed / LOCOMOTION_REF_SPEED).clamp(0.0, 1.0);
+    let idle_share = 1.0 - locomotion;
+    push(&mut out, rig.idle, idle_share * plain_factor);
+    push(&mut out, rig.cast_idle, idle_share * cast_factor);
+
+    // World velocity → local frame (character forward = -Z in the body's frame).
+    let local = (Quat::from_axis_angle(Vec3::Y, -yaw) * planar) / speed;
+    let forward = -local.z;
+    let right = local.x;
+    let f_w = locomotion * forward.max(0.0);
+    let b_w = locomotion * (-forward).max(0.0);
+    let r_w = locomotion * right.max(0.0);
+    let l_w = locomotion * (-right).max(0.0);
+
+    push(&mut out, rig.walk_f, f_w * plain_factor);
+    push(&mut out, rig.walk_b, b_w * plain_factor);
+    push(&mut out, rig.walk_r, r_w * plain_factor);
+    push(&mut out, rig.walk_l, l_w * plain_factor);
+    push(&mut out, rig.cast_walk_f, f_w * cast_factor);
+    push(&mut out, rig.cast_walk_b, b_w * cast_factor);
+    push(&mut out, rig.cast_walk_r, r_w * cast_factor);
+    push(&mut out, rig.cast_walk_l, l_w * cast_factor);
+    out
+}
+
+/// Per-frame animation driver for the player rig (the `drive_animation` shape from
+/// wisp's `visuals.rs:548+`, adapted for obelisk + the arena controller).
+///
+/// Drives two layers:
+///   - **Locomotion** from [`PlayerVelocity`] (Task 11) + the camera yaw, blending
+///     idle / directional-walk clips.
+///   - **Casting** from the player's `Option<&ActiveCast>` (obelisk's cast state
+///     machine): the `ActiveCast.phase` maps to a casting blend target —
+///     `Windup`/`Active` → 1.0, `Recovery` → 0.5, none/`Done` → 0.0 — eased by
+///     [`step_casting_blend`] so the pose doesn't pop. The casting clips are
+///     overlaid on the locomotion layer underneath.
+///
+/// `world_velocity` is in world space and `yaw` is the camera/body yaw, so the
+/// directional-walk split reads the same regardless of which way the camera faces.
+/// The `AnimationPlayer` lives on an entity DEEP inside the rig scene tree, so we
+/// walk the `ChildOf` chain up to the `PlayerController` root to find the player's
+/// `ActiveCast` + `LocalAnimBlend`.
+pub fn drive_animation(
+    rig: Res<RigAssets>,
+    mut anim: Query<(Entity, &mut AnimationPlayer)>,
+    parents: Query<&ChildOf>,
+    body_marker: Query<(), With<ArenaBody>>,
+    mut player_state: Query<(Option<&ActiveCast>, &mut LocalAnimBlend)>,
+    velocity: Res<crate::controller::PlayerVelocity>,
+    yaw: Res<crate::controller::CameraYaw>,
+) {
+    if !rig.ready() {
+        return;
+    }
+
+    // Find the player's cast phase + the persisted blend state. The
+    // `LocalAnimBlend` + `ActiveCast` live on the `PlayerController` root; there is
+    // exactly one player, so take the single matching entity.
+    let Ok((active_cast, mut blend)) = player_state.single_mut() else {
+        return;
+    };
+
+    // Map the obelisk cast phase to a casting-layer blend target (guide §4).
+    let casting_target = match active_cast.map(|c| c.phase) {
+        Some(SkillPhase::Windup) => 1.0,
+        Some(SkillPhase::Active) => 1.0,
+        Some(SkillPhase::Recovery) => 0.5,
+        // No cast, or it has finished (`Done`) → fade the casting layer out.
+        _ => 0.0,
+    };
+    blend.casting = step_casting_blend(blend.casting, casting_target);
+
+    let world_velocity = velocity.0;
+    let body_yaw = yaw.0;
+
+    for (anim_entity, mut player) in &mut anim {
+        // Only drive `AnimationPlayer`s that belong to the player's rig (a
+        // descendant of an `ArenaBody`); ignore any other rigs.
+        if !ancestor_has_body_marker(anim_entity, &parents, &body_marker) {
+            continue;
+        }
+        for (node, weight) in locomotion_blend(&rig, world_velocity, body_yaw, blend.casting) {
+            player.play(node).repeat().set_weight(weight);
+        }
     }
 }
