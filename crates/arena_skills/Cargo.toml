@@ -1,0 +1,17 @@
+[package]
+name = "arena_skills"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bevy.workspace = true
+obelisk-bevy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ron.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+obelisk-bevy = { path = "../../../obelisk-bevy", features = ["test-support"] }
