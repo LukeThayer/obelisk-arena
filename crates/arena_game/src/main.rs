@@ -1,4 +1,5 @@
 mod cosmetics;
+mod rig;
 mod trace;
 
 use arena_skills::SkillFx;
@@ -6,6 +7,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use cosmetics::{age_lifetimes, fly_cosmetic_projectiles, spawn_cue_cosmetics, AimDirs};
 use obelisk_bevy::prelude::*;
+use rig::ArenaBody;
 use stat_core::StatBlock;
 use std::path::PathBuf;
 
@@ -85,9 +87,11 @@ fn main() {
 
     // `spawn_combatants` runs after `setup_scene` (mesh/material assets + camera) and after the
     // skill wiring above, so the player can be granted "firebolt" once the registry is populated.
+    // `load_rig` kicks off the async `character.glb` load + inserts `RigAssets` before
+    // `spawn_combatants` reads the gltf scene handle for the player's `SceneRoot`.
     app.add_systems(
         Startup,
-        (setup_scene, load_cast_assets, spawn_combatants).chain(),
+        (setup_scene, load_rig, load_cast_assets, spawn_combatants).chain(),
     );
     // Per-caster aim direction, written when a cast is issued (autocast / real cast) and read by
     // `spawn_cue_cosmetics` to fly the cosmetic projectile in the right direction.
@@ -101,6 +105,13 @@ fn main() {
             log_registered_skills_once,
             confirm_combatants_once,
         ),
+    );
+
+    // Character rig: build the AnimationGraph once `character.glb` loads, then attach an
+    // AnimationPlayer (playing idle) to the scene's animation-target entity once it spawns.
+    app.add_systems(
+        Update,
+        (rig::build_graph_when_loaded, rig::attach_animation_graph),
     );
 
     // Cosmetics: consume CueMessages → spawn emissive bursts + flying projectiles, fly them, age
@@ -148,11 +159,12 @@ fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Frame the player→dummy axis (origin → +Z(6)) from the side, looking at the flight-path
-    // midpoint, so the muzzle burst, the flying projectile, and the impact burst are all on-screen.
+    // Frame the player rig at the origin head-on so the rigged character (idle pose) fills the
+    // shot. Temporary framing for the rig-verification task; the real follow cam lands in Task 11.
+    // Camera at (0,2,5) looking at (0,1,0) centers on the character's torso.
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(9.0, 5.0, 3.0).looking_at(Vec3::new(0.0, 0.5, 3.0), Vec3::Y),
+        Transform::from_xyz(0.0, 2.0, 5.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
     ));
     commands.spawn((
         DirectionalLight::default(),
@@ -162,6 +174,15 @@ fn setup_scene(
         Mesh3d(meshes.add(Plane3d::default().mesh().size(20.0, 20.0))),
         MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))),
     ));
+}
+
+/// Kick off the async load of the player character rig (`character.glb`) and insert
+/// `RigAssets` holding the `Handle<Gltf>`. `build_graph_when_loaded` polls this handle each
+/// frame and builds the `AnimationGraph` once the gltf resolves. Runs in the Startup chain
+/// before `spawn_combatants` so the rig resource exists when the player's `SceneRoot` is spawned.
+fn load_rig(mut commands: Commands, assets: Res<AssetServer>) {
+    let gltf: Handle<bevy::gltf::Gltf> = assets.load("character.glb");
+    commands.insert_resource(rig::RigAssets::new(gltf));
 }
 
 /// Spawn the two combatants the arena starts with: a `Player`-faction "player" at the origin,
@@ -174,20 +195,38 @@ fn spawn_combatants(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    assets: Res<AssetServer>,
 ) {
     let capsule = meshes.add(Capsule3d::new(0.3, 1.0));
 
-    // Player: id "player", origin, blue, granted firebolt.
+    // Player: id "player", origin, rendered as the rigged character (idle clip). The body is a
+    // child entity carrying the `SceneRoot` of `character.glb` + the `ArenaBody` marker — mirrors
+    // wisp's `spawn_player` body hierarchy. The glTF's default forward is +Z but Bevy uses -Z, so
+    // the body is yawed by π to face the camera. The combatant root sits at y=0 and the character
+    // glTF's origin is at its feet, so no vertical offset is needed for the feet to rest on the
+    // ground plane.
+    let player_scene: Handle<Scene> =
+        assets.load(GltfAssetLabel::Scene(0).from_asset("character.glb"));
+    let player_body = commands
+        .spawn((
+            Name::new("ArenaBody"),
+            ArenaBody,
+            SceneRoot(player_scene),
+            Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+            Visibility::default(),
+        ))
+        .id();
+
     let player = commands
         .spawn_empty()
         .make_combatant(StatBlock::with_id("player"))
         .insert((
             Faction::Player,
             Transform::from_xyz(0.0, 0.0, 0.0),
-            Mesh3d(capsule.clone()),
-            MeshMaterial3d(materials.add(Color::srgb(0.2, 0.5, 1.0))),
+            Visibility::default(),
         ))
         .id();
+    commands.entity(player).add_child(player_body);
     commands.entity(player).grant_skill("firebolt");
 
     // Dummy: id "dummy", 6 units down +Z, red, no skills.
