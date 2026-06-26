@@ -7,8 +7,8 @@
 
 use bevy::asset::{io::Reader, AssetLoader, LoadContext};
 use bevy::prelude::*;
-use obelisk_bevy::prelude::{CueEvent, CueKind as ObeliskCueKind, ObeliskCueExt};
-use serde::Deserialize;
+use obelisk_bevy::prelude::CueKind as ObeliskCueKind;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Authored cosmetic layer for one skill, loaded from `<skill>.skillfx.ron`.
@@ -24,7 +24,7 @@ pub struct SkillFx {
 
 /// One cosmetic reaction bound to a cue slot. The game turns this into particles / projectile /
 /// anim-layer changes. Authored, not code.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaneEvent {
     /// Stable lane id for tracing / debugging (e.g. "firebolt_muzzle").
     pub lane_id: String,
@@ -44,14 +44,14 @@ pub struct LaneEvent {
 /// Arena's OWN mirror of obelisk's `CueKind` so `.skillfx.ron` can declare which moment a lane
 /// reacts to. We do NOT re-use obelisk's `CueKind` in the RON to keep the authoring format
 /// decoupled from the sim crate; the dispatcher maps obelisk `CueKind` -> this 1:1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CueKind {
     OnCast,
     OnWindow,
     OnHit,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParticleSpec {
     pub count: u32,
     #[serde(default = "default_lifetime")]
@@ -69,7 +69,7 @@ fn default_speed() -> f32 {
     3.0
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectileCosmetic {
     /// World units/sec. MUST match the `.cast.ron` window motion speed so the cosmetic mesh tracks
     /// the authoritative hitbox (firebolt = 20.0). NOT speed-scaled.
@@ -83,21 +83,31 @@ fn default_proj_radius() -> f32 {
     0.2
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnimLayer {
     /// Logical anim state name, mapped to a clip node in arena_game's AnimationGraph.
     pub state: String,
 }
 
-/// A dispatched lane reaction, surfaced as a Bevy `Message` the game's spawn systems read.
-/// Carries the resolved world position + source entity so the consumer has no obelisk dependency.
-#[derive(Message, Debug, Clone)]
+/// The serde **wire shape** for a fired cue (M2).
+///
+/// This is the engine-neutral payload that crosses the network: the obelisk `cue_id` VALUE (the
+/// value the `.cast.ron` `vfx_cues` map fires, e.g. `"firebolt_cast"`), the **stable** `ObeliskId`
+/// of the source (NOT a local `Entity` — entity ids differ per peer), the world `position`, and the
+/// cue `kind`. It deliberately does NOT embed a `LaneEvent`: the consumer re-looks-up the lanes from
+/// a [`SkillFxRegistry`] by `cue_id` (see [`resolve_cue`]). `arena_skills` stays lightyear-free —
+/// `arena_game` owns the lightyear `CueWireMessage` wrapper (and, single-process, a `LocalCue`
+/// wrapper) around this plain serde type.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CueMessage {
-    pub lane_id: String,
-    pub kind: CueKind,
-    pub source: Entity,
+    /// The obelisk cue VALUE (e.g. `"firebolt_cast"` / `"firebolt_impact"`) — the registry key.
+    pub cue_id: String,
+    /// The source's stable `ObeliskId` string (caster for OnCast/OnWindow, target for OnHit).
+    pub source_id: String,
+    /// World position to spawn cosmetics at. `Vec3` serdes via bevy's `serialize` feature.
     pub position: Vec3,
-    pub event: LaneEvent,
+    /// Which timeline moment fired the cue.
+    pub kind: CueKind,
 }
 
 /// RON loader for `*.skillfx.ron`. Mirrors obelisk's hand-rolled `CastTimelineLoader`
@@ -139,15 +149,18 @@ pub enum SkillFxLoadError {
     Ron(String),
 }
 
-/// Registers the `SkillFx` asset + its `.skillfx.ron` loader and the `CueMessage` message channel.
-/// Render-free: the actual cue→message dispatch + VFX spawning live in later tasks / `arena_game`.
+/// Registers the `SkillFx` asset + its `.skillfx.ron` loader.
+///
+/// Render-free. The cue → wire dispatch is no longer a `CueMessage` bevy `Message` (M2 made
+/// `CueMessage` a plain serde wire type); the egress + consumer halves are the pure
+/// [`cue_event_to_message`] / [`resolve_cue`] helpers, wired up by `arena_game` (which owns the
+/// lightyear / `LocalCue` message wrappers — keeping `arena_skills` lightyear-free).
 pub struct ArenaSkillsPlugin;
 
 impl Plugin for ArenaSkillsPlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<SkillFx>()
-            .register_asset_loader(SkillFxLoader)
-            .add_message::<CueMessage>(); // bevy 0.18: add_message, not add_event
+            .register_asset_loader(SkillFxLoader);
     }
 }
 
@@ -163,34 +176,3 @@ impl From<ObeliskCueKind> for CueKind {
     }
 }
 
-/// The cue **binding layer**: for every `(cue_id, lane)` in each `SkillFx`, register an obelisk
-/// `observe_cue` handler that, when obelisk fires the matching `CueEvent`, emits a `CueMessage`
-/// carrying the resolved lane + world position + source entity. The game's spawn systems then read
-/// `Messages<CueMessage>` with no obelisk dependency.
-///
-/// The lane map keys ARE the obelisk `cue_id` VALUEs (e.g. `"firebolt_cast"`), i.e. the values in
-/// the `.cast.ron` `vfx_cues` map that obelisk fires `CueEvent` with — NOT the `vfx_cues` slot keys
-/// (`"on_cast"`). Register this BEFORE any cast so the observers are installed when cues fire.
-pub fn register_skill_cues(app: &mut App, fxs: &[SkillFx]) {
-    for fx in fxs {
-        for (cue_id, lane) in &fx.lanes {
-            let lane = lane.clone();
-            app.observe_cue(
-                cue_id.clone(),
-                move |cue: &CueEvent, commands: &mut Commands| {
-                    let msg = CueMessage {
-                        lane_id: lane.lane_id.clone(),
-                        kind: cue.kind.into(),
-                        source: cue.source,
-                        position: cue.position,
-                        event: lane.clone(),
-                    };
-                    // The observer closure can't take resources, so defer the message write onto
-                    // the world. `Commands::write_message` (bevy 0.18) buffers it for the next
-                    // `Messages<CueMessage>` flush.
-                    commands.write_message(msg);
-                },
-            );
-        }
-    }
-}

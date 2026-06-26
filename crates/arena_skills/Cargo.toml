@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-bevy.workspace = true
+# `serialize` enables bevy_math's `glam/serde`, which is what gives `Vec3` its
+# `Serialize`/`Deserialize` impls — required so the serde `CueMessage` (which carries a `Vec3`
+# `position`) round-trips on the wire. Not a default bevy feature.
+bevy = { workspace = true, features = ["serialize"] }
 obelisk-bevy.workspace = true
 serde.workspace = true
 ron.workspace = true
@@ -16,3 +19,5 @@ obelisk-bevy = { path = "../../../obelisk-bevy", features = ["test-support"] }
 # The cast-smoke test builds combatants with `StatBlock` directly (obelisk-bevy doesn't
 # re-export it), mirroring obelisk-bevy's own integration tests.
 stat_core.workspace = true
+# `cue_wire.rs` round-trips the serde `CueMessage` through JSON.
+serde_json.workspace = true

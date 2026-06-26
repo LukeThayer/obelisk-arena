@@ -1,18 +1,19 @@
-//! Cue-binding integration test: prove the `register_skill_cues` binding layer turns obelisk
-//! `CueEvent`s into arena `CueMessage`s end-to-end.
+//! Cue-egress integration test: prove that casting firebolt fires obelisk `CueEvent`s that map
+//! cleanly onto the M2 serde [`CueMessage`] wire shape.
 //!
-//! We mirror the M0 `cast_smoke.rs` harness exactly (`ObeliskTestApp`, the same re-root onto the
-//! sibling `obelisk-bevy` crate, the same firebolt geometry) and then add the cosmetic layer on
-//! top: deserialize firebolt's `.skillfx.ron` straight into a `SkillFx`, register its lanes via
-//! `arena_skills::register_skill_cues`, and assert that casting firebolt produces a
-//! `CueMessage { lane_id: "firebolt_muzzle", .. }` (the on-cast lane) — and, since the cast
-//! resolves a hit, a `firebolt_impact` on-hit `CueMessage` too.
+//! M1 routed cues through a `register_skill_cues` binding that emitted an embedded-`LaneEvent`,
+//! `Entity`-keyed bevy `Message`. M2.0 replaced that with a plain serde `CueMessage`
+//! `{ cue_id, source_id, position, kind }`: the `cue_id` is the obelisk cue VALUE the `.cast.ron`
+//! fires, the `source_id` is the source combatant's stable `ObeliskId` (NOT a local `Entity`).
 //!
-//! See `cast_smoke.rs` for the full rationale on why we `set_current_dir` + set `BEVY_ASSET_ROOT`
-//! to the obelisk-bevy crate root (the testkit resolves both its fixture file IO and its
-//! `AssetServer` `.cast.ron` reads against that crate, not the `arena_skills` crate).
+//! This test casts firebolt through the real obelisk sim, observes every `CueEvent`, builds the
+//! serde `CueMessage` from each (resolving `source` → `ObeliskId` exactly as the `arena_game` egress
+//! does), and asserts both the on-cast (`firebolt_cast`, anchored on the caster) and on-hit
+//! (`firebolt_impact`, anchored on the target) wire cues surface with the right ids.
+//!
+//! See `cast_smoke.rs` for the full rationale on the `set_current_dir` + `BEVY_ASSET_ROOT` re-root.
 
-use arena_skills::{register_skill_cues, ArenaSkillsPlugin, CueKind, CueMessage, SkillFx};
+use arena_skills::{ArenaSkillsPlugin, CueKind, CueMessage};
 use bevy::prelude::*;
 use obelisk_bevy::prelude::*;
 use obelisk_bevy::testkit::init_test_obelisk;
@@ -49,48 +50,18 @@ fn make_block(id: &str, life: f64, mana: f64) -> StatBlock {
     b
 }
 
-/// Accumulates every `CueMessage` emitted over the whole run. `Messages<T>` double-buffers and
-/// drops messages older than ~2 frames, so a single end-of-run read would miss the on-cast cue
-/// (fired ~tick 0) by the time the on-hit cue fires (~tick 20). This collector drains the reader
-/// every `Update` so nothing is lost.
+/// Accumulates every serde [`CueMessage`] derived from an observed obelisk `CueEvent`. Built in an
+/// observer (which can't take `Res`), so it stores the raw `CueEvent` fields and the test resolves
+/// `source` → `ObeliskId` afterwards via the world query.
 #[derive(Resource, Default)]
-struct CueLog(Vec<CueMessage>);
-
-fn collect_cues(mut log: ResMut<CueLog>, mut reader: MessageReader<CueMessage>) {
-    for m in reader.read() {
-        log.0.push(m.clone());
-    }
-}
-
-/// Load firebolt's `.skillfx.ron` straight into a `SkillFx` from the arena's own fixture (the
-/// authoring artifact this crate owns), independent of the obelisk-bevy re-root used for the sim.
-fn load_firebolt_skillfx() -> SkillFx {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .unwrap()
-        .join("assets/skills/firebolt.skillfx.ron");
-    let bytes =
-        std::fs::read(&path).unwrap_or_else(|e| panic!("read {} failed: {e}", path.display()));
-    ron::de::from_bytes::<SkillFx>(&bytes)
-        .unwrap_or_else(|e| panic!("deserialize firebolt.skillfx.ron failed: {e}"))
-}
+struct CueLog(Vec<(Entity, String, Vec3, CueKind)>);
 
 #[test]
-fn casting_firebolt_emits_lane_cue_messages() {
-    // SkillFx must load from the arena fixture BEFORE we re-root the process onto obelisk-bevy
-    // (after the re-root, CARGO_MANIFEST_DIR still points at arena_skills so the relative join
-    // below is unaffected, but reading first keeps the two concerns independent).
-    let fx = load_firebolt_skillfx();
-    assert_eq!(fx.skill_id, "firebolt");
-
+fn casting_firebolt_emits_serde_cue_messages() {
     enter_obelisk_root();
 
-    // Build the headless app manually rather than via `ObeliskTestApp::new` — the testkit calls
-    // `app.finish()`/`app.cleanup()` inside `new()`, after which plugins/observers (which
-    // `register_skill_cues`/`ArenaSkillsPlugin` add) can no longer be installed. We mirror the
-    // testkit recipe (`obelisk-bevy/src/testkit.rs::new`) verbatim, then add the cosmetic layer,
-    // THEN finalize. `init_test_obelisk()` is the same `Once`-guarded global init the testkit uses.
+    // Mirror the testkit recipe (`obelisk-bevy/src/testkit.rs::new`) so we can install observers
+    // BEFORE `finish()`/`cleanup()`. `init_test_obelisk()` is the same `Once`-guarded global init.
     init_test_obelisk();
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
@@ -110,13 +81,17 @@ fn casting_firebolt_emits_lane_cue_messages() {
     )));
     app.seed_combat_rng(0xC0FFEE);
 
-    // Cosmetic layer: the SkillFx asset/loader/message channel + the cue->message binding observers.
     app.add_plugins(ArenaSkillsPlugin);
     app.init_resource::<CueLog>();
-    app.add_systems(Update, collect_cues);
-    // Install the observers BEFORE the cast (and before finalize) so they're live when obelisk
-    // fires CueEvent.
-    register_skill_cues(&mut app, std::slice::from_ref(&fx));
+    // Observe every obelisk CueEvent and stash its raw fields (source Entity, cue_id, pos, kind).
+    app.add_observer(|cue: On<CueEvent>, mut log: ResMut<CueLog>| {
+        log.0.push((
+            cue.source,
+            cue.cue_id.clone(),
+            cue.position,
+            cue.kind.into(),
+        ));
+    });
 
     app.finish();
     app.cleanup();
@@ -183,48 +158,55 @@ fn casting_firebolt_emits_lane_cue_messages() {
         app.update();
     }
 
-    // --- assert the binding layer surfaced the lanes ---
-    let log = &app.world().resource::<CueLog>().0;
-    let summary: Vec<(String, CueKind)> = log.iter().map(|m| (m.lane_id.clone(), m.kind)).collect();
+    // Resolve each observed CueEvent's `source` Entity → its stable ObeliskId, exactly as the
+    // arena_game egress does, then build the serde CueMessage via the egress helper.
+    let raw = std::mem::take(&mut app.world_mut().resource_mut::<CueLog>().0);
+    let id_of = |e: Entity| -> String {
+        app.world()
+            .get::<ObeliskId>(e)
+            .map(|o| o.0.clone())
+            .unwrap_or_default()
+    };
+    let msgs: Vec<CueMessage> = raw
+        .into_iter()
+        .map(|(src, cue_id, pos, kind)| CueMessage {
+            cue_id,
+            source_id: id_of(src),
+            position: pos,
+            kind,
+        })
+        .collect();
+
+    let summary: Vec<(&str, &str, CueKind)> = msgs
+        .iter()
+        .map(|m| (m.cue_id.as_str(), m.source_id.as_str(), m.kind))
+        .collect();
     assert!(
-        !log.is_empty(),
-        "expected CueMessages from the firebolt cast, got none ({summary:?})"
+        !msgs.is_empty(),
+        "expected serde CueMessages from the firebolt cast, got none ({summary:?})"
     );
 
-    let muzzle = log
+    // The on-cast cue: cue_id == "firebolt_cast", anchored on the caster's ObeliskId.
+    let cast = msgs
         .iter()
-        .find(|m| m.lane_id == "firebolt_muzzle")
-        .unwrap_or_else(|| {
-            panic!("expected a `firebolt_muzzle` (on-cast) CueMessage; got {summary:?}")
-        });
+        .find(|m| m.cue_id == "firebolt_cast")
+        .unwrap_or_else(|| panic!("expected a `firebolt_cast` (on-cast) CueMessage; got {summary:?}"));
+    assert_eq!(cast.kind, CueKind::OnCast, "firebolt_cast is an on-cast cue");
     assert_eq!(
-        muzzle.kind,
-        CueKind::OnCast,
-        "the firebolt_muzzle lane reacts to the on-cast cue"
-    );
-    assert_eq!(
-        muzzle.source, caster,
-        "the on-cast cue is anchored to the caster"
-    );
-    assert_eq!(
-        muzzle.event.lane_id, "firebolt_muzzle",
-        "the carried LaneEvent is the muzzle lane"
+        cast.source_id, "caster",
+        "the on-cast cue's source_id is the caster's ObeliskId"
     );
 
-    // Bonus: the cast resolves a hit, so the on-hit `firebolt_impact` lane fires too.
-    let impact = log
+    // The on-hit cue: cue_id == "firebolt_impact", anchored on the hit target's ObeliskId.
+    let impact = msgs
         .iter()
-        .find(|m| m.lane_id == "firebolt_impact")
+        .find(|m| m.cue_id == "firebolt_impact")
         .unwrap_or_else(|| {
             panic!("expected a `firebolt_impact` (on-hit) CueMessage; got {summary:?}")
         });
+    assert_eq!(impact.kind, CueKind::OnHit, "firebolt_impact is an on-hit cue");
     assert_eq!(
-        impact.kind,
-        CueKind::OnHit,
-        "the firebolt_impact lane reacts to the on-hit cue"
-    );
-    assert_eq!(
-        impact.source, target,
-        "the on-hit cue is anchored to the hit target"
+        impact.source_id, "target",
+        "the on-hit cue's source_id is the target's ObeliskId"
     );
 }
