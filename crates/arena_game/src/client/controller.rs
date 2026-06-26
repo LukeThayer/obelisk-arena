@@ -23,7 +23,7 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
-use crate::rig::ArenaBody;
+use super::rig::ArenaBody;
 
 /// Marker on the player combatant root that this controller drives. Spawned in
 /// `main::spawn_combatants` alongside the `Combatant`. Separate from `ArenaBody`

@@ -9,12 +9,18 @@ authors = ["Luke"]
 
 [workspace.dependencies]
 bevy = "0.18"
-avian3d = "0.5"
+# `serialize` enables avian's serde for Position/Rotation/LinearVelocity — required by lightyear's
+# avian3d feature (it replicates those components). 0.5 is PINNED by lightyear_avian3d 0.26 (Cargo
+# treats 0.5 and 0.6 as distinct crates; can't bump until lightyear does).
+avian3d = { version = "0.5", features = ["default", "serialize"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ron = "0.8"
 thiserror = "1"
 anyhow = "1"
+# lightyear 0.26.4: the transport + replication + interpolation layer. NO `input_bei` (the arena
+# hand-rolls input messages; bei is a version-mismatch dead weight per the netcode guide §1.1).
+lightyear = { version = "0.26.4", features = ["netcode", "udp", "avian3d", "interpolation"] }
 obelisk-bevy = { path = "../obelisk-bevy" }
 # The pure-Rust stat library obelisk-bevy wraps; arena_game names `StatBlock` directly when
 # building combatants (obelisk-bevy doesn't re-export it). Same path the plugin uses.

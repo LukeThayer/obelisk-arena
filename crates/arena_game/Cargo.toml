@@ -3,15 +3,36 @@ name = "arena_game"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+default-run = "arena-client"
+
+# M2: arena_game is split into a shared lib (protocol, net plugins, helpers) + three bins:
+# arena-server (headless authority), arena-client (windowed present), arena-observer (M2.5 trace
+# client). Mirrors wisp's two-bin-plus-observer layout (netcode guide §2.1).
+[lib]
+name = "arena_game"
+path = "src/lib.rs"
+
+[[bin]]
+name = "arena-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "arena-client"
+path = "src/bin/client.rs"
+
+[[bin]]
+name = "arena-observer"
+path = "src/bin/observer.rs"
 
 [dependencies]
 bevy.workspace = true
-avian3d.workspace = true # (unused at M1; M2 server needs add_avian_with_lightyear)
+# `serialize` is inherited from the workspace avian3d dep (lightyear replicates avian Position).
+avian3d.workspace = true
 obelisk-bevy.workspace = true
 stat_core.workspace = true
 arena_skills.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-# Synchronously read assets/skills/firebolt.skillfx.ron at app build to register cue observers
-# (observers must be added at build time, before run()). The async SkillFxLoader stays available
-# for future hot-reload but is not the M1 registration path.
 ron.workspace = true
+# lightyear 0.26.4 transport/replication/interpolation (workspace pin; features set there).
+lightyear.workspace = true

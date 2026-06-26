@@ -154,7 +154,7 @@ const KEEP_MESHES: &[&str] = &[
 /// Marker placed on every rig mesh once we've decided its costume visibility,
 /// so we don't re-evaluate it every frame.
 #[derive(Component)]
-pub(crate) struct CostumeCulled;
+pub struct CostumeCulled;
 
 /// Newly-spawned skinned meshes not yet costume-evaluated, with their optional `Name`.
 /// Aliased to keep [`cull_costume`]'s signature under clippy's `type_complexity` bar.
@@ -409,8 +409,8 @@ pub fn drive_animation(
     parents: Query<&ChildOf>,
     body_marker: Query<(), With<ArenaBody>>,
     mut player_state: Query<(Option<&ActiveCast>, &mut LocalAnimBlend)>,
-    velocity: Res<crate::controller::PlayerVelocity>,
-    yaw: Res<crate::controller::CameraYaw>,
+    velocity: Res<super::controller::PlayerVelocity>,
+    yaw: Res<super::controller::CameraYaw>,
 ) {
     if !rig.ready() {
         return;
