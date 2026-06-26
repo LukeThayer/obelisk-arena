@@ -15,3 +15,6 @@ anyhow.workspace = true
 
 [dev-dependencies]
 obelisk-bevy = { path = "../../../obelisk-bevy", features = ["test-support"] }
+# The cast-smoke test builds combatants with `StatBlock` directly (obelisk-bevy doesn't
+# re-export it), mirroring obelisk-bevy's own integration tests.
+stat_core.workspace = true
