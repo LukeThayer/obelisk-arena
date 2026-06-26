@@ -8,10 +8,21 @@
 //! `Hitbox`/`Projectile`; these cosmetics only react to the cues it fires.
 
 use crate::trace;
-use arena_skills::{CueKind, CueMessage};
+use arena_skills::{resolve_cue, CueKind, CueMessage, SkillFxRegistry};
 use bevy::prelude::*;
 use serde_json::json;
 use std::collections::HashMap;
+
+/// `arena_game`-local bevy `Message` wrapping the engine-neutral serde [`CueMessage`].
+///
+/// M2.0 made `arena_skills::CueMessage` a plain serde wire type (no bevy `Message` derive), so
+/// `arena_skills` stays lightyear-free. The single-process M1 path still needs a Bevy channel to
+/// carry cues from the egress observer (which resolves `CueEvent.source` → `ObeliskId`) to the
+/// cosmetics consumer (which needs `Res` access). This local wrapper IS that channel. In M2.3 the
+/// networked path replaces this with a `CueWireMessage` lightyear message + a predicted `LocalCue`
+/// stream feeding the same consumer.
+#[derive(Message, Clone, Debug)]
+pub struct LocalCue(pub CueMessage);
 
 /// Chest/wand-height lift applied to the **OnCast** lane only. The OnCast cue's `position` is the
 /// caster's origin (y≈0, at the feet), so the muzzle particle + projectile would spawn inside the
@@ -22,14 +33,20 @@ use std::collections::HashMap;
 /// polish.
 const MUZZLE_HEIGHT_OFFSET: Vec3 = Vec3::new(0.0, 1.2, 0.0);
 
-/// Per-caster aim direction (normalized), recorded when a cast is issued.
+/// Per-caster aim direction (normalized), recorded when a cast is issued, keyed by the caster's
+/// stable `ObeliskId` string.
 ///
 /// The `OnCast` `CueEvent` carries only the caster's position (no direction), so the cosmetic
 /// projectile can't know which way to fly from the cue alone. The cast system stashes
-/// `(target_pos - caster_pos).normalize()` here keyed by the caster `Entity`; `spawn_cue_cosmetics`
-/// looks it up by `msg.source` (the caster for an `OnCast` lane). Absent ⇒ default `Vec3::Z`.
+/// `(target_pos - caster_pos).normalize()` here keyed by the caster's `ObeliskId`;
+/// `spawn_cue_cosmetics` looks it up by `msg.source_id` (the caster for an `OnCast` lane). Absent ⇒
+/// default `Vec3::Z`.
+///
+/// **M2.0 re-key:** M1 keyed this by caster `Entity` — silently wrong the moment two peers exist
+/// (replicated entity ids differ per process). The stable `ObeliskId` is the only key both ends
+/// agree on, matching the serde `CueMessage.source_id`.
 #[derive(Resource, Default)]
-pub struct AimDirs(pub HashMap<Entity, Vec3>);
+pub struct AimDirs(pub HashMap<String, Vec3>);
 
 /// A short-lived cosmetic entity (particle billboard or cosmetic projectile). Despawned by
 /// `age_lifetimes` once `elapsed >= duration`.
@@ -47,37 +64,27 @@ pub struct CosmeticProjectile {
     pub velocity: Vec3,
 }
 
-/// Read every `CueMessage` dispatched this frame and spawn its cosmetics:
+/// Read every [`LocalCue`] dispatched this frame, resolve its lanes from the [`SkillFxRegistry`]
+/// (`resolve_cue` re-looks-up by `cue_id` — the serde `CueMessage` carries no embedded lane), and
+/// spawn each lane's cosmetics:
 /// - if the lane has a `particle`, an emissive `Rectangle` billboard at `position`;
 /// - if the lane has a `projectile`, an emissive `Sphere` at `position` flown along the caster's
-///   stashed aim direction (`AimDirs`, defaulting to `Vec3::Z`).
+///   stashed aim direction (`AimDirs`, keyed by `source_id`, defaulting to `Vec3::Z`).
 ///
-/// Emits a `lane_event` trace line per message (guide §6) so the cue dispatch is observable
-/// headlessly.
+/// Emits one `lane_event` trace line per resolved lane (guide §6) so the cue dispatch is observable
+/// headlessly — the M1 regression gate greps the trace for these.
 pub fn spawn_cue_cosmetics(
-    mut msgs: MessageReader<CueMessage>,
+    mut msgs: MessageReader<LocalCue>,
+    registry: Res<SkillFxRegistry>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     aim: Res<AimDirs>,
 ) {
-    for m in msgs.read() {
-        // Observability: one trace line per dispatched cue (guide §6 sample). The cue kind is
-        // emitted as `cue_kind` rather than `kind` so it doesn't clobber the trace harness's own
-        // top-level `"kind":"lane_event"` (the harness merges `extra` over the base object).
-        trace::event(
-            "lane_event",
-            json!({
-                "lane_id": m.lane_id,
-                "cue_kind": format!("{:?}", m.kind),
-                "source": format!("{:?}", m.source),
-                "pos_x": m.position.x,
-                "pos_y": m.position.y,
-                "pos_z": m.position.z,
-                "has_particle": m.event.particle.is_some(),
-                "has_projectile": m.event.projectile.is_some(),
-            }),
-        );
+    for LocalCue(m) in msgs.read() {
+        // Re-look-up the lanes bound to this cue id (an unbound cue resolves to an empty slice and
+        // no-ops — spec §12: never crash on missing content).
+        let lanes = resolve_cue(&registry, m);
 
         // Spawn position: raise the OnCast lane (muzzle + projectile) to wand/chest height so it
         // clears the robe; leave OnHit (impact) and any other lane at the cue's reported position.
@@ -87,50 +94,70 @@ pub fn spawn_cue_cosmetics(
             m.position
         };
 
-        // 1) Particle burst (emissive billboard stand-in).
-        if let Some(p) = &m.event.particle {
-            let c = LinearRgba::rgb(p.color[0], p.color[1], p.color[2]);
-            let material = materials.add(StandardMaterial {
-                emissive: c * 2.0,
-                base_color: Color::from(c),
-                alpha_mode: AlphaMode::Blend,
-                unlit: true,
-                ..default()
-            });
-            commands.spawn((
-                Mesh3d(meshes.add(Rectangle::new(0.25, 0.25))),
-                MeshMaterial3d(material),
-                Transform::from_translation(spawn_pos),
-                ParticleLifetime {
-                    elapsed: 0.0,
-                    duration: p.lifetime,
-                },
-            ));
-        }
+        for lane in lanes {
+            // Observability: one trace line per dispatched lane (guide §6 sample). The cue kind is
+            // emitted as `cue_kind` rather than `kind` so it doesn't clobber the trace harness's own
+            // top-level `"kind":"lane_event"` (the harness merges `extra` over the base object).
+            trace::event(
+                "lane_event",
+                json!({
+                    "lane_id": lane.lane_id,
+                    "cue_id": m.cue_id,
+                    "cue_kind": format!("{:?}", m.kind),
+                    "source_id": m.source_id,
+                    "pos_x": m.position.x,
+                    "pos_y": m.position.y,
+                    "pos_z": m.position.z,
+                    "has_particle": lane.particle.is_some(),
+                    "has_projectile": lane.projectile.is_some(),
+                }),
+            );
 
-        // 2) Cosmetic flying projectile (OnCast lane only, for firebolt).
-        if let Some(proj) = &m.event.projectile {
-            // Direction: the caster's stashed aim (set when the cast was issued). The OnCast cue's
-            // `source` IS the caster, so look it up by `m.source`. Default to +Z if unknown.
-            let dir = aim.0.get(&m.source).copied().unwrap_or(Vec3::Z);
-            let c = LinearRgba::rgb(proj.color[0], proj.color[1], proj.color[2]);
-            commands.spawn((
-                Mesh3d(meshes.add(Sphere::new(proj.radius))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    emissive: c * 3.0,
+            // 1) Particle burst (emissive billboard stand-in).
+            if let Some(p) = &lane.particle {
+                let c = LinearRgba::rgb(p.color[0], p.color[1], p.color[2]);
+                let material = materials.add(StandardMaterial {
+                    emissive: c * 2.0,
                     base_color: Color::from(c),
+                    alpha_mode: AlphaMode::Blend,
                     unlit: true,
                     ..default()
-                })),
-                Transform::from_translation(spawn_pos),
-                CosmeticProjectile {
-                    velocity: dir * proj.speed,
-                },
-                ParticleLifetime {
-                    elapsed: 0.0,
-                    duration: 2.0, // matches the .cast.ron window active_duration
-                },
-            ));
+                });
+                commands.spawn((
+                    Mesh3d(meshes.add(Rectangle::new(0.25, 0.25))),
+                    MeshMaterial3d(material),
+                    Transform::from_translation(spawn_pos),
+                    ParticleLifetime {
+                        elapsed: 0.0,
+                        duration: p.lifetime,
+                    },
+                ));
+            }
+
+            // 2) Cosmetic flying projectile (OnCast lane only, for firebolt).
+            if let Some(proj) = &lane.projectile {
+                // Direction: the caster's stashed aim (set when the cast was issued), keyed by the
+                // caster's `ObeliskId` — the OnCast cue's `source_id` IS the caster. Default +Z.
+                let dir = aim.0.get(&m.source_id).copied().unwrap_or(Vec3::Z);
+                let c = LinearRgba::rgb(proj.color[0], proj.color[1], proj.color[2]);
+                commands.spawn((
+                    Mesh3d(meshes.add(Sphere::new(proj.radius))),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        emissive: c * 3.0,
+                        base_color: Color::from(c),
+                        unlit: true,
+                        ..default()
+                    })),
+                    Transform::from_translation(spawn_pos),
+                    CosmeticProjectile {
+                        velocity: dir * proj.speed,
+                    },
+                    ParticleLifetime {
+                        elapsed: 0.0,
+                        duration: 2.0, // matches the .cast.ron window active_duration
+                    },
+                ));
+            }
         }
     }
 }

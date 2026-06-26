@@ -3,11 +3,11 @@ mod cosmetics;
 mod rig;
 mod trace;
 
-use arena_skills::SkillFx;
+use arena_skills::{cue_event_to_message, SkillFxRegistry};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use controller::{ArenaControllerPlugin, FollowCamera, PlayerController};
-use cosmetics::{age_lifetimes, fly_cosmetic_projectiles, spawn_cue_cosmetics, AimDirs};
+use cosmetics::{age_lifetimes, fly_cosmetic_projectiles, spawn_cue_cosmetics, AimDirs, LocalCue};
 use obelisk_bevy::prelude::*;
 use rig::{ArenaBody, LocalAnimBlend};
 use stat_core::StatBlock;
@@ -30,23 +30,56 @@ fn arena_root() -> PathBuf {
     }
 }
 
-/// Read `assets/skills/firebolt.skillfx.ron` off disk and register its cue observers on `app`.
+/// Wire the M2 co-located cue path: load the [`SkillFxRegistry`] (cue_id → lanes) from
+/// `assets/skills`, register the [`LocalCue`] message channel, and install the egress observer that
+/// converts every obelisk `CueEvent` into a serde `CueMessage` (wrapped in `LocalCue`).
 ///
-/// Done synchronously at build time because `register_skill_cues` → `App::observe_cue` adds
-/// observers, which can't be added after `run()`. A missing/malformed fixture is logged and skipped
-/// (the sim still runs; cosmetics just won't fire) rather than panicking the binary.
-fn register_cues_synchronously(app: &mut App, root: &std::path::Path) {
-    let path = root.join("assets/skills/firebolt.skillfx.ron");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => match ron::de::from_str::<SkillFx>(&text) {
-            Ok(fx) => {
-                arena_skills::register_skill_cues(app, &[fx]);
-                info!("registered cue observers from {}", path.display());
-            }
-            Err(e) => warn!("failed to parse {}: {e}", path.display()),
+/// This replaces M1's `register_skill_cues` build-time closure binding. The egress observer resolves
+/// `CueEvent.source` (a local `Entity`) → the source's stable `ObeliskId` (via `ObeliskEntityIndex`)
+/// so the serde `CueMessage.source_id` is process-independent — the same shape that crosses the wire
+/// in M2.3. The cosmetics consumer (`spawn_cue_cosmetics`) reads `LocalCue`, re-looks-up the lanes
+/// from the registry, and spawns. `arena_skills` stays lightyear-free: this `arena_game` glue owns
+/// the bevy `Message` wrapper + the obelisk lookup.
+///
+/// A missing/empty `assets/skills` dir yields an empty registry (cues then no-op) rather than
+/// panicking the binary.
+fn register_cue_egress(app: &mut App, root: &std::path::Path) {
+    let skills_dir = root.join("assets/skills");
+    let registry = SkillFxRegistry::load_dir(&skills_dir);
+    let bound: Vec<String> = {
+        let mut k: Vec<String> = registry.by_cue.keys().cloned().collect();
+        k.sort();
+        k
+    };
+    app.insert_resource(registry);
+    app.add_message::<LocalCue>();
+    // The egress observer: one observer for ALL CueEvents (filters happen in the consumer via the
+    // registry lookup). It needs `Res<ObeliskEntityIndex>` to resolve the source Entity → ObeliskId,
+    // which a bevy observer can take as a system param.
+    app.add_observer(
+        |cue: On<CueEvent>,
+         index: Res<ObeliskEntityIndex>,
+         mut writer: MessageWriter<LocalCue>| {
+            let cue = cue.event();
+            // The source's stable ObeliskId (caster for OnCast/OnWindow, target for OnHit). If the
+            // source has no ObeliskId, skip + warn rather than emit an empty-string id (mirrors
+            // obelisk's NetEvent mirror invariant).
+            let Some(source_id) = index.id(cue.source) else {
+                warn!(
+                    "cue {} source {:?} has no ObeliskId — skipping",
+                    cue.cue_id, cue.source
+                );
+                return;
+            };
+            let msg = cue_event_to_message(&cue.cue_id, source_id, cue.position, cue.kind.into());
+            writer.write(LocalCue(msg));
         },
-        Err(e) => warn!("failed to read {}: {e}", path.display()),
-    }
+    );
+    info!(
+        "cue egress wired from {} (bound cues: {:?})",
+        skills_dir.display(),
+        bound
+    );
 }
 
 fn main() {
@@ -61,8 +94,8 @@ fn main() {
     }));
     // The headless authoritative simulation (assets + spatial + core + combat + net + vfx + loot).
     app.add_plugins(ObeliskSimPlugin);
-    // The arena cosmetic-binding layer: registers the SkillFx asset + loader + the CueMessage
-    // message channel that `register_skill_cues` (below) writes into.
+    // The arena cosmetic-binding layer: registers the SkillFx asset + its `.skillfx.ron` loader.
+    // The cue egress (CueEvent → serde CueMessage → LocalCue) is wired by `register_cue_egress`.
     app.add_plugins(arena_skills::ArenaSkillsPlugin);
     // Third-person controller: follow camera + camera-relative WASD movement +
     // the chest_joint aim spine-pitch (scheduled PostUpdate, between animation
@@ -72,12 +105,11 @@ fn main() {
     // Obelisk runs its sim on the 60 Hz fixed timestep.
     app.insert_resource(Time::<Fixed>::from_hz(60.0));
 
-    // Register the firebolt cue → CueMessage observers SYNCHRONOUSLY at app build.
-    // `register_skill_cues` calls `App::observe_cue`, which adds observers — those can ONLY be
-    // installed before `run()`. The async `SkillFxLoader` would resolve too late (post-run), so we
-    // read the `.skillfx.ron` directly off disk here and register from the deserialized value. The
-    // loader stays available for a future hot-reload path, but this is the M1 registration route.
-    register_cues_synchronously(&mut app, &root);
+    // Wire the M2 cue egress: the SkillFxRegistry (cue_id → lanes), the LocalCue message channel,
+    // and the CueEvent → serde-CueMessage egress observer (all installed before `run()`). The
+    // egress observer resolves source Entity → ObeliskId so the cue is process-independent — the
+    // exact shape that crosses the wire in M2.3. The cosmetics consumer re-looks-up the lanes.
+    register_cue_egress(&mut app, &root);
 
     // Obelisk global config: stat constants + the effect/skill registries + a fixed RNG seed.
     // (Mirrors examples/playground.rs's real recipe; `add_obelisk_effects` is the arena-level
@@ -326,7 +358,7 @@ fn cast_on_input(
     spatial: ObeliskSpatial,
     mut aim_dirs: ResMut<AimDirs>,
     players: Query<
-        (Entity, &Transform, &Faction, &SkillSlots),
+        (Entity, &ObeliskId, &Transform, &Faction, &SkillSlots),
         (With<PlayerController>, Without<ActiveCast>),
     >,
     transforms: Query<&Transform, With<Combatant>>,
@@ -334,7 +366,7 @@ fn cast_on_input(
     if !keys.just_pressed(KeyCode::Space) && !mouse.just_pressed(MouseButton::Left) {
         return;
     }
-    let Ok((player, tf, faction, slots)) = players.single() else {
+    let Ok((player, player_id, tf, faction, slots)) = players.single() else {
         return;
     };
     let Some(skill) = slots.0.first().cloned() else {
@@ -346,7 +378,8 @@ fn cast_on_input(
         info!("cast {skill}: no enemy in range");
         return;
     };
-    // Stash the aim dir (caster → target) for the cosmetic projectile.
+    // Stash the aim dir (caster → target) for the cosmetic projectile, keyed by the caster's
+    // stable ObeliskId (matching the serde CueMessage.source_id the OnCast cue carries).
     let target_pos = transforms
         .get(target)
         .map(|t| t.translation)
@@ -354,7 +387,7 @@ fn cast_on_input(
     let dir = (target_pos - tf.translation)
         .try_normalize()
         .unwrap_or(Vec3::Z);
-    aim_dirs.0.insert(player, dir);
+    aim_dirs.0.insert(player_id.0.clone(), dir);
     info!("cast {skill} at nearest enemy");
     commands.entity(player).cast_skill_at(skill, target);
 }
@@ -570,10 +603,11 @@ fn autocast_system(
             "arena_game autocast: frame {}, player casts firebolt at dummy",
             cfg.count
         );
-        // Stash the aim direction (caster → target) for the cosmetic projectile. The OnCast cue
-        // carries only the caster's position, so `spawn_cue_cosmetics` reads this by `msg.source`.
+        // Stash the aim direction (caster → target) for the cosmetic projectile, keyed by the
+        // caster's stable ObeliskId ("player") — `spawn_cue_cosmetics` reads this by the OnCast
+        // cue's `source_id`.
         let dir = (dummy_pos - player_pos).try_normalize().unwrap_or(Vec3::Z);
-        aim_dirs.0.insert(player, dir);
+        aim_dirs.0.insert("player".to_string(), dir);
         commands.entity(player).cast_skill_at("firebolt", dummy);
         cfg.fired = true;
     } else {
