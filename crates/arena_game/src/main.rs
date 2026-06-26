@@ -288,7 +288,8 @@ fn confirm_combatants_once(
     let mut summary: Vec<String> = Vec::new();
     for (id, attrs, slots) in &combatants {
         // The invariant make_combatant enforces: the stable string id equals the StatBlock id.
-        assert_eq!(
+        // debug_assert so a shipping build can't panic here — make_combatant already guarantees it.
+        debug_assert_eq!(
             id.0, attrs.0.id,
             "ObeliskId ({}) must equal StatBlock.id ({})",
             id.0, attrs.0.id
@@ -511,9 +512,10 @@ fn screenshot_system(
 
 /// Auto-cast-harness config, present as a resource only when `ARENA_AUTOCAST=1`.
 ///
-/// At `cast_frame` it fires one `firebolt` from the player at the dummy so later tasks can
-/// capture a cast in progress. At this stage (pre-Task 9) there are no cosmetics, so the
-/// cast just resolves obelisk damage — that's expected.
+/// At `cast_frame` it fires one `firebolt` from the player at the dummy so a cast can be
+/// captured in progress. It drives the full cosmetics pipeline: the system stashes the
+/// caster → target aim into [`AimDirs`], and the resulting cues fire the particle burst +
+/// cosmetic projectile alongside the obelisk damage resolution.
 #[derive(Resource)]
 struct AutocastConfig {
     /// Frame on which to fire the cast (`ARENA_AUTOCAST_FRAME`, default 30).

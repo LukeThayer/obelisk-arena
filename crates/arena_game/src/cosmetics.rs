@@ -45,8 +45,6 @@ pub struct ParticleLifetime {
 #[derive(Component)]
 pub struct CosmeticProjectile {
     pub velocity: Vec3,
-    #[allow(dead_code)]
-    pub speed: f32,
 }
 
 /// Read every `CueMessage` dispatched this frame and spawn its cosmetics:
@@ -127,7 +125,6 @@ pub fn spawn_cue_cosmetics(
                 Transform::from_translation(spawn_pos),
                 CosmeticProjectile {
                     velocity: dir * proj.speed,
-                    speed: proj.speed,
                 },
                 ParticleLifetime {
                     elapsed: 0.0,

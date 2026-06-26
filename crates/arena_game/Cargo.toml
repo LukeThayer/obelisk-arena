@@ -6,11 +6,10 @@ license.workspace = true
 
 [dependencies]
 bevy.workspace = true
-avian3d.workspace = true
+avian3d.workspace = true # (unused at M1; M2 server needs add_avian_with_lightyear)
 obelisk-bevy.workspace = true
 stat_core.workspace = true
 arena_skills.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 # Synchronously read assets/skills/firebolt.skillfx.ron at app build to register cue observers
 # (observers must be added at build time, before run()). The async SkillFxLoader stays available

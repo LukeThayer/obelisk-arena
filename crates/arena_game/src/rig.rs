@@ -156,6 +156,11 @@ const KEEP_MESHES: &[&str] = &[
 #[derive(Component)]
 pub(crate) struct CostumeCulled;
 
+/// Newly-spawned skinned meshes not yet costume-evaluated, with their optional `Name`.
+/// Aliased to keep [`cull_costume`]'s signature under clippy's `type_complexity` bar.
+type PendingCostumeMeshes<'w, 's> =
+    Query<'w, 's, (Entity, Option<&'static Name>), (With<SkinnedMesh>, Without<CostumeCulled>)>;
+
 /// Whether a rig mesh node-name belongs to the single kept (Witch) outfit.
 /// Default-hide: anything not in [`KEEP_MESHES`] is culled. Meshes inside the
 /// glTF that aren't outfit nodes at all (the head/eyes mesh containers named
@@ -177,7 +182,7 @@ fn keep_mesh(name: &str) -> bool {
 /// is stamped [`CostumeCulled`] so it's processed exactly once.
 pub fn cull_costume(
     mut commands: Commands,
-    pending: Query<(Entity, Option<&Name>), (With<SkinnedMesh>, Without<CostumeCulled>)>,
+    pending: PendingCostumeMeshes,
     parents: Query<&ChildOf>,
     names: Query<&Name>,
     body_marker: Query<(), With<ArenaBody>>,

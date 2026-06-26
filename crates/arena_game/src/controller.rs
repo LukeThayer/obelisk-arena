@@ -36,6 +36,16 @@ pub struct PlayerController;
 #[derive(Component)]
 pub struct FollowCamera;
 
+/// The player's read-only `Transform`, disjoint from the camera's. Aliased to keep
+/// [`update_camera_and_aim`]'s signature under clippy's `type_complexity` bar.
+type PlayerTransform<'w, 's> =
+    Single<'w, 's, &'static Transform, (With<PlayerController>, Without<FollowCamera>)>;
+
+/// The follow camera's mutable `Transform`, disjoint from the player's. Aliased to keep
+/// [`update_camera_and_aim`]'s signature under clippy's `type_complexity` bar.
+type CameraTransform<'w, 's> =
+    Single<'w, 's, &'static mut Transform, (With<FollowCamera>, Without<PlayerController>)>;
+
 /// Player horizontal move speed (world units/sec). Roughly matches wisp's
 /// `MAX_SPEED` (4.2) so the locomotion clips read at a sensible cadence later.
 const MOVE_SPEED: f32 = 4.0;
@@ -164,8 +174,8 @@ fn update_camera_and_aim(
     mut yaw: ResMut<CameraYaw>,
     mut pitch: ResMut<AimPitch>,
     pitch_locked: Res<AimPitchLocked>,
-    player: Option<Single<&Transform, (With<PlayerController>, Without<FollowCamera>)>>,
-    cam: Option<Single<&mut Transform, (With<FollowCamera>, Without<PlayerController>)>>,
+    player: Option<PlayerTransform>,
+    cam: Option<CameraTransform>,
 ) {
     let delta = motion.delta;
     yaw.0 -= delta.x * MOUSE_SENSITIVITY;
@@ -273,7 +283,7 @@ pub fn apply_aim_pitch_to_local_spine(
         if let Ok(mut tf) = transforms.get_mut(entity) {
             // Post-multiply so the animation's bone rotation is preserved and the
             // aim pitch is added on top in the bone's local frame.
-            tf.rotation = tf.rotation * pitch_quat;
+            tf.rotation *= pitch_quat;
         }
     }
 }
