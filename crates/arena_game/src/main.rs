@@ -2,6 +2,7 @@ mod trace;
 
 use bevy::prelude::*;
 use obelisk_bevy::prelude::*;
+use stat_core::StatBlock;
 use std::path::PathBuf;
 
 /// The arena workspace root, holding `assets/` (cast timelines) and `config/` (skill + effect
@@ -49,9 +50,21 @@ fn main() {
     // Single deterministic combat RNG seed.
     app.seed_combat_rng(1);
 
-    app.add_systems(Startup, (setup_scene, load_cast_assets));
+    // `spawn_combatants` runs after `setup_scene` (mesh/material assets + camera) and after the
+    // skill wiring above, so the player can be granted "firebolt" once the registry is populated.
+    app.add_systems(
+        Startup,
+        (setup_scene, load_cast_assets, spawn_combatants).chain(),
+    );
     // Poll the pending cast timelines each frame; move loaded ones into CastTimelineHandles.
-    app.add_systems(Update, (poll_cast_assets, log_registered_skills_once));
+    app.add_systems(
+        Update,
+        (
+            poll_cast_assets,
+            log_registered_skills_once,
+            confirm_combatants_once,
+        ),
+    );
 
     // Non-interactive smoke verification: if ARENA_SMOKE_FRAMES is set, exit
     // after that many rendered frames so the renderer can be verified without a
@@ -89,6 +102,78 @@ fn setup_scene(
         Mesh3d(meshes.add(Plane3d::default().mesh().size(20.0, 20.0))),
         MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))),
     ));
+}
+
+/// Spawn the two combatants the arena starts with: a `Player`-faction "player" at the origin,
+/// granted "firebolt" and drawn as a blue capsule; and an `Enemy`-faction "dummy" 6 units down +Z,
+/// no skills, drawn as a red capsule. Mirrors the examples' real spawn pattern
+/// (`spawn_empty().make_combatant(block).insert((...)).id()` then `grant_skill`), building each
+/// `StatBlock` with the real `StatBlock::with_id` constructor (the guide's `make_stat_block(id)`
+/// placeholder). `make_combatant` sets `ObeliskId == block.id`, the netcode invariant.
+fn spawn_combatants(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let capsule = meshes.add(Capsule3d::new(0.3, 1.0));
+
+    // Player: id "player", origin, blue, granted firebolt.
+    let player = commands
+        .spawn_empty()
+        .make_combatant(StatBlock::with_id("player"))
+        .insert((
+            Faction::Player,
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            Mesh3d(capsule.clone()),
+            MeshMaterial3d(materials.add(Color::srgb(0.2, 0.5, 1.0))),
+        ))
+        .id();
+    commands.entity(player).grant_skill("firebolt");
+
+    // Dummy: id "dummy", 6 units down +Z, red, no skills.
+    commands
+        .spawn_empty()
+        .make_combatant(StatBlock::with_id("dummy"))
+        .insert((
+            Faction::Enemy,
+            Transform::from_xyz(0.0, 0.0, 6.0),
+            Mesh3d(capsule),
+            MeshMaterial3d(materials.add(Color::srgb(1.0, 0.3, 0.2))),
+        ));
+}
+
+/// One-shot readback (fires once): confirm both combatants spawned with `ObeliskId == StatBlock.id`
+/// (the `make_combatant` invariant) and log their ids + hp. Runs after the spawn commands have
+/// flushed, so it sees the inserted components.
+fn confirm_combatants_once(
+    mut done: Local<bool>,
+    combatants: Query<(&ObeliskId, &Attributes, &SkillSlots), With<Combatant>>,
+) {
+    if *done {
+        return;
+    }
+    let mut summary: Vec<String> = Vec::new();
+    for (id, attrs, slots) in &combatants {
+        // The invariant make_combatant enforces: the stable string id equals the StatBlock id.
+        assert_eq!(
+            id.0, attrs.0.id,
+            "ObeliskId ({}) must equal StatBlock.id ({})",
+            id.0, attrs.0.id
+        );
+        summary.push(format!(
+            "{:?}(hp={}/{}, skills={:?})",
+            id.0, attrs.0.current_life, attrs.0.max_life.base, slots.0
+        ));
+    }
+    if summary.len() >= 2 {
+        summary.sort();
+        // Single concise confirmation: both combatants spawned, ObeliskId == StatBlock.id each.
+        info!(
+            "combatants spawned, ObeliskId == StatBlock.id confirmed: {}",
+            summary.join(", ")
+        );
+        *done = true;
+    }
 }
 
 /// The cast-timeline handles being polled to load (skill id -> handle). Drained into

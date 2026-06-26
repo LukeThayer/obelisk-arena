@@ -197,6 +197,7 @@ dependencies = [
  "obelisk-bevy",
  "serde",
  "serde_json",
+ "stat_core",
 ]
 
 [[package]]

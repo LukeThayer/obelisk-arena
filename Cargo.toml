@@ -16,6 +16,9 @@ ron = "0.8"
 thiserror = "1"
 anyhow = "1"
 obelisk-bevy = { path = "../obelisk-bevy" }
+# The pure-Rust stat library obelisk-bevy wraps; arena_game names `StatBlock` directly when
+# building combatants (obelisk-bevy doesn't re-export it). Same path the plugin uses.
+stat_core = { path = "../obelisk/stat_core" }
 # bevy_vfx (../bevy_modal_editor/crates/bevy_vfx) deferred to the particle-upgrade milestone;
 # M1 uses a pure-Bevy emissive-billboard particle stand-in.
 arena_skills = { path = "crates/arena_skills" }
