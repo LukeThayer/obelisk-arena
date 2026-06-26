@@ -7,6 +7,7 @@
 
 pub mod controller;
 pub mod cosmetics;
+pub mod net;
 pub mod rig;
 
 use arena_skills::{cue_event_to_message, SkillFxRegistry};
@@ -170,16 +171,57 @@ pub fn run_windowed_client() {
     });
     add_avian_with_lightyear(&mut app);
 
+    // Net-driven player layer (M2.2): materialize a body per replicated NetworkedPlayer, interpolate
+    // remote players, and send local input to the server. The windowed client bridges its existing
+    // third-person controller (CameraYaw + WASD keys) into `LocalInput` so server-authoritative
+    // movement is driven by real input. The M1 co-located local player/dummy still spawn for the
+    // single-process regression; the net layer runs alongside and drives the replicated players.
+    app.add_plugins(net::ClientNetPlayerPlugin);
+    app.add_systems(Update, bridge_windowed_input_to_local_input);
+
     app.run();
 }
 
-/// Run the headless connectivity client: MinimalPlugins + LogPlugin (no window, no rendering, no
-/// gameplay) + the lightyear client net stack + the avian-lightyear physics. Gated by
-/// `ARENA_HEADLESS=1` so two clients can be brought up under the net-test harness to verify
-/// connection + replication without windows (plan Task 8 check; the M2.1 GATE in Task 9).
+/// Bridge the windowed third-person controller's input into [`net::LocalInput`] so the local
+/// player's movement is sent to the server (server-authoritative Stage-A movement). Reads the
+/// camera yaw (mouse-X driven) + WASD keys in the same camera-relative frame the controller uses
+/// (`controller::move_player`): forward = -Z, strafe = +X, both in the camera-yaw frame.
+fn bridge_windowed_input_to_local_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    yaw: Res<controller::CameraYaw>,
+    pitch: Res<controller::AimPitch>,
+    mut local_input: ResMut<net::LocalInput>,
+) {
+    let mut movement = Vec2::ZERO;
+    if keys.pressed(KeyCode::KeyW) {
+        movement.y += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        movement.y -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyD) {
+        movement.x += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyA) {
+        movement.x -= 1.0;
+    }
+    local_input.movement = movement;
+    local_input.yaw = yaw.0;
+    local_input.pitch = pitch.0;
+    // No jump in Stage A (the server controller is kinematic + flat-arena); Space is the cast key.
+    local_input.jump = false;
+}
+
+/// Run the headless connectivity/movement client: MinimalPlugins + LogPlugin (no window, no
+/// rendering, no M1 gameplay) + the lightyear client net stack + the avian-lightyear physics + the
+/// net-driven player layer (materialize bodies + send input). Gated by `ARENA_HEADLESS=1` so two
+/// clients can be brought up under the net-test harness to verify connection + replication +
+/// movement without windows.
 ///
-/// It logs every replicated `NetworkedPlayer` it receives (with the owner's client_id) so the
-/// late-joiner check can confirm each client sees the OTHER client's player.
+/// It materializes a body for every replicated `NetworkedPlayer` (tracing `materialized_player`
+/// with the owner's client_id + local flag so the late-joiner check still passes), runs the M2.2
+/// Task 11 smoothing, and — under `ARENA_AUTOMOVE=1` — feeds a constant forward input so the
+/// movement-replication check can drive the server controller headlessly.
 pub fn run_headless_client() {
     let root = arena_root();
     let mut app = App::new();
@@ -209,21 +251,25 @@ pub fn run_headless_client() {
     });
     add_avian_with_lightyear(&mut app);
 
-    // Temp logging (plan Task 9 / the M2.1 GATE): trace every replicated NetworkedPlayer this
-    // client receives so the late-joiner check can confirm each client sees the OTHER client's
-    // player. Polled (not an Add observer) because the owner/obelisk_id components arrive in
-    // separate replication packets — the poll waits until NetworkOwner is present, then logs once
-    // per entity. Keyed by NetworkOwner.client_id.
-    app.add_systems(Update, log_received_players);
+    // Net-driven player layer: materialize a body per replicated NetworkedPlayer + send input +
+    // (Task 11) interpolate remote players. Also traces replicated/materialized players for the
+    // late-joiner check.
+    app.add_plugins(net::ClientNetPlayerPlugin);
+    app.add_systems(Update, trace_replicated_players);
+
+    // [H] AUTOMOVE hook: feed a constant forward movement input so the headless movement-replication
+    // check can drive the server controller without a keyboard. Off unless ARENA_AUTOMOVE=1.
+    if std::env::var("ARENA_AUTOMOVE").ok().as_deref() == Some("1") {
+        app.add_systems(Update, automove_input);
+    }
 
     app.run();
 }
 
-/// Polling logger for the M2.1 GATE: emit `replicated_player` once per replicated `NetworkedPlayer`
-/// (keyed by `NetworkOwner.client_id`), waiting until the owner component has replicated in. The
-/// `ObeliskNetId` is logged too when present. Temp scaffolding — superseded when the client
-/// materializes bodies for replicated players (M2.2+).
-fn log_received_players(
+/// Polling tracer kept from the M2.1 GATE: emit `replicated_player` once per replicated
+/// `NetworkedPlayer` (keyed by `NetworkOwner.client_id`) so the late-joiner check still has its
+/// signal after the temp scaffolding became real body materialization.
+fn trace_replicated_players(
     players: Query<
         (
             Entity,
@@ -247,6 +293,17 @@ fn log_received_players(
             );
         }
     }
+}
+
+/// [H] AUTOMOVE: write a constant forward movement into [`net::LocalInput`] so the headless client
+/// drives the server controller. `movement.y = 1.0` (full forward), `yaw = 0` (faces -Z). The
+/// server's controller turns this into motion; the resulting NetworkedPosition change is what the
+/// movement-replication check asserts on (server pose changes + the OTHER client observes it).
+fn automove_input(mut input: ResMut<net::LocalInput>) {
+    input.movement = Vec2::new(0.0, 1.0);
+    input.yaw = 0.0;
+    input.pitch = 0.0;
+    input.jump = false;
 }
 
 /// Spawn a minimal 3D scene: a camera looking at the origin, a directional
