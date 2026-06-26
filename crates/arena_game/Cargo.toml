@@ -12,3 +12,7 @@ stat_core.workspace = true
 arena_skills.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Synchronously read assets/skills/firebolt.skillfx.ron at app build to register cue observers
+# (observers must be added at build time, before run()). The async SkillFxLoader stays available
+# for future hot-reload but is not the M1 registration path.
+ron.workspace = true

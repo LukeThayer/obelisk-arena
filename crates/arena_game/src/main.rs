@@ -1,7 +1,10 @@
+mod cosmetics;
 mod trace;
 
+use arena_skills::SkillFx;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+use cosmetics::{age_lifetimes, fly_cosmetic_projectiles, spawn_cue_cosmetics, AimDirs};
 use obelisk_bevy::prelude::*;
 use stat_core::StatBlock;
 use std::path::PathBuf;
@@ -23,6 +26,25 @@ fn arena_root() -> PathBuf {
     }
 }
 
+/// Read `assets/skills/firebolt.skillfx.ron` off disk and register its cue observers on `app`.
+///
+/// Done synchronously at build time because `register_skill_cues` → `App::observe_cue` adds
+/// observers, which can't be added after `run()`. A missing/malformed fixture is logged and skipped
+/// (the sim still runs; cosmetics just won't fire) rather than panicking the binary.
+fn register_cues_synchronously(app: &mut App, root: &std::path::Path) {
+    let path = root.join("assets/skills/firebolt.skillfx.ron");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match ron::de::from_str::<SkillFx>(&text) {
+            Ok(fx) => {
+                arena_skills::register_skill_cues(app, &[fx]);
+                info!("registered cue observers from {}", path.display());
+            }
+            Err(e) => warn!("failed to parse {}: {e}", path.display()),
+        },
+        Err(e) => warn!("failed to read {}: {e}", path.display()),
+    }
+}
+
 fn main() {
     let root = arena_root();
 
@@ -35,9 +57,19 @@ fn main() {
     }));
     // The headless authoritative simulation (assets + spatial + core + combat + net + vfx + loot).
     app.add_plugins(ObeliskSimPlugin);
+    // The arena cosmetic-binding layer: registers the SkillFx asset + loader + the CueMessage
+    // message channel that `register_skill_cues` (below) writes into.
+    app.add_plugins(arena_skills::ArenaSkillsPlugin);
     app.add_plugins(trace::TracePlugin);
     // Obelisk runs its sim on the 60 Hz fixed timestep.
     app.insert_resource(Time::<Fixed>::from_hz(60.0));
+
+    // Register the firebolt cue → CueMessage observers SYNCHRONOUSLY at app build.
+    // `register_skill_cues` calls `App::observe_cue`, which adds observers — those can ONLY be
+    // installed before `run()`. The async `SkillFxLoader` would resolve too late (post-run), so we
+    // read the `.skillfx.ron` directly off disk here and register from the deserialized value. The
+    // loader stays available for a future hot-reload path, but this is the M1 registration route.
+    register_cues_synchronously(&mut app, &root);
 
     // Obelisk global config: stat constants + the effect/skill registries + a fixed RNG seed.
     // (Mirrors examples/playground.rs's real recipe; `add_obelisk_effects` is the arena-level
@@ -57,6 +89,10 @@ fn main() {
         Startup,
         (setup_scene, load_cast_assets, spawn_combatants).chain(),
     );
+    // Per-caster aim direction, written when a cast is issued (autocast / real cast) and read by
+    // `spawn_cue_cosmetics` to fly the cosmetic projectile in the right direction.
+    app.init_resource::<AimDirs>();
+
     // Poll the pending cast timelines each frame; move loaded ones into CastTimelineHandles.
     app.add_systems(
         Update,
@@ -65,6 +101,13 @@ fn main() {
             log_registered_skills_once,
             confirm_combatants_once,
         ),
+    );
+
+    // Cosmetics: consume CueMessages → spawn emissive bursts + flying projectiles, fly them, age
+    // them out. `spawn_cue_cosmetics` reads the messages the cue observers wrote this frame.
+    app.add_systems(
+        Update,
+        (spawn_cue_cosmetics, fly_cosmetic_projectiles, age_lifetimes),
     );
 
     // Non-interactive smoke verification: if ARENA_SMOKE_FRAMES is set, exit
@@ -105,9 +148,11 @@ fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // Frame the player→dummy axis (origin → +Z(6)) from the side, looking at the flight-path
+    // midpoint, so the muzzle burst, the flying projectile, and the impact burst are all on-screen.
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 6.0, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(9.0, 5.0, 3.0).looking_at(Vec3::new(0.0, 0.5, 3.0), Vec3::Y),
     ));
     commands.spawn((
         DirectionalLight::default(),
@@ -146,15 +191,22 @@ fn spawn_combatants(
     commands.entity(player).grant_skill("firebolt");
 
     // Dummy: id "dummy", 6 units down +Z, red, no skills.
-    commands
+    let dummy_pos = Vec3::new(0.0, 0.0, 6.0);
+    let dummy = commands
         .spawn_empty()
         .make_combatant(StatBlock::with_id("dummy"))
         .insert((
             Faction::Enemy,
-            Transform::from_xyz(0.0, 0.0, 6.0),
+            Transform::from_translation(dummy_pos),
             Mesh3d(capsule),
             MeshMaterial3d(materials.add(Color::srgb(1.0, 0.3, 0.2))),
-        ));
+        ))
+        .id();
+    // Give the dummy a hurtbox so the firebolt's moving Sphere(0.5) collision window can overlap it
+    // and obelisk fires the OnHit cue (→ the impact burst). Without this, only the muzzle cue fires.
+    // `insert_hurtbox` (re)sets the entity's Transform to `pos`, so pass the dummy's spawn position
+    // to keep it in place. Radius 0.6 mirrors the examples + the Task 6 smoke test.
+    insert_hurtbox(&mut commands, dummy, 0.6, dummy_pos);
 }
 
 /// One-shot readback (fires once): confirm both combatants spawned with `ObeliskId == StatBlock.id`
@@ -382,7 +434,8 @@ impl AutocastConfig {
 fn autocast_system(
     mut commands: Commands,
     mut cfg: ResMut<AutocastConfig>,
-    combatants: Query<(Entity, &ObeliskId), With<Combatant>>,
+    mut aim_dirs: ResMut<AimDirs>,
+    combatants: Query<(Entity, &ObeliskId, &Transform), With<Combatant>>,
 ) {
     cfg.count += 1;
     if cfg.fired || cfg.count < cfg.cast_frame {
@@ -391,19 +444,25 @@ fn autocast_system(
 
     let mut player = None;
     let mut dummy = None;
-    for (entity, id) in &combatants {
+    for (entity, id, tf) in &combatants {
         match id.0.as_str() {
-            "player" => player = Some(entity),
-            "dummy" => dummy = Some(entity),
+            "player" => player = Some((entity, tf.translation)),
+            "dummy" => dummy = Some((entity, tf.translation)),
             _ => {}
         }
     }
 
-    if let (Some(player), Some(dummy)) = (player, dummy) {
+    if let (Some((player, player_pos)), Some((dummy, dummy_pos))) = (player, dummy) {
         info!(
             "arena_game autocast: frame {}, player casts firebolt at dummy",
             cfg.count
         );
+        // Stash the aim direction (caster → target) for the cosmetic projectile. The OnCast cue
+        // carries only the caster's position, so `spawn_cue_cosmetics` reads this by `msg.source`.
+        let dir = (dummy_pos - player_pos)
+            .try_normalize()
+            .unwrap_or(Vec3::Z);
+        aim_dirs.0.insert(player, dir);
         commands.entity(player).cast_skill_at("firebolt", dummy);
         cfg.fired = true;
     } else {

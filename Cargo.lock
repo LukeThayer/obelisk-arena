@@ -195,6 +195,7 @@ dependencies = [
  "avian3d",
  "bevy",
  "obelisk-bevy",
+ "ron 0.8.1",
  "serde",
  "serde_json",
  "stat_core",
