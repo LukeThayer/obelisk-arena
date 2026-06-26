@@ -19,7 +19,7 @@ use rig::{ArenaBody, LocalAnimBlend};
 use stat_core::StatBlock;
 use std::path::PathBuf;
 
-use crate::arena_root;
+use crate::{add_avian_with_lightyear, arena_root, net::ClientNetPlugin};
 
 /// Wire the M2 co-located cue path: load the [`SkillFxRegistry`] (cue_id → lanes) from
 /// `assets/skills`, register the [`LocalCue`] message channel, and install the egress observer that
@@ -156,6 +156,84 @@ pub fn run_windowed_client() {
         app.insert_resource(cfg);
         app.add_systems(Update, autocast_system);
     }
+
+    // lightyear client stack (ClientPlugins { 1/60 } + ProtocolPlugin + connect), then the
+    // avian-lightyear physics AFTER ClientPlugins (same ordering rule as the server). The windowed
+    // client connects to the dedicated server just like the headless client.
+    app.add_plugins(ClientNetPlugin);
+    let server_addr = crate::net::parse_addr_args(crate::net::default_server_addr());
+    let client_id = app
+        .world()
+        .resource::<crate::net::client::ConnectTo>()
+        .client_id;
+    app.insert_resource(crate::net::client::ConnectTo {
+        server: server_addr,
+        client_id,
+    });
+    add_avian_with_lightyear(&mut app);
+
+    app.run();
+}
+
+/// Run the headless connectivity client: MinimalPlugins + LogPlugin (no window, no rendering, no
+/// gameplay) + the lightyear client net stack + the avian-lightyear physics. Gated by
+/// `ARENA_HEADLESS=1` so two clients can be brought up under the net-test harness to verify
+/// connection + replication without windows (plan Task 8 check; the M2.1 GATE in Task 9).
+///
+/// It logs every replicated `NetworkedPlayer` it receives (with the owner's client_id) so the
+/// late-joiner check can confirm each client sees the OTHER client's player.
+pub fn run_headless_client() {
+    use crate::net::protocol::{NetworkOwner, NetworkedPlayer};
+    use obelisk_bevy::prelude::ObeliskId;
+
+    let root = arena_root();
+    let mut app = App::new();
+
+    app.add_plugins((
+        MinimalPlugins,
+        bevy::log::LogPlugin::default(),
+        AssetPlugin {
+            file_path: root.join("assets").to_string_lossy().into_owned(),
+            ..default()
+        },
+        TransformPlugin,
+        bevy::mesh::MeshPlugin,
+        bevy::scene::ScenePlugin,
+    ));
+    app.insert_resource(Time::<Fixed>::from_hz(60.0));
+
+    app.add_plugins(ClientNetPlugin);
+    let server_addr = crate::net::parse_addr_args(crate::net::default_server_addr());
+    let client_id = app
+        .world()
+        .resource::<crate::net::client::ConnectTo>()
+        .client_id;
+    app.insert_resource(crate::net::client::ConnectTo {
+        server: server_addr,
+        client_id,
+    });
+    add_avian_with_lightyear(&mut app);
+
+    // Temp logging (plan Task 9): trace every replicated NetworkedPlayer this client receives so
+    // the late-joiner check can confirm each client sees the OTHER client's player. Keyed by the
+    // owner's client_id (and ObeliskNetId once it arrives via replication).
+    app.add_observer(
+        |trigger: On<Add, NetworkedPlayer>,
+         owners: Query<&NetworkOwner>,
+         ids: Query<&ObeliskId>| {
+            let owner = owners.get(trigger.entity).map(|o| o.0);
+            let obelisk_id = ids.get(trigger.entity).ok().map(|i| i.0.clone());
+            bevy::log::info!(
+                "client received replicated NetworkedPlayer: owner={:?} obelisk_id={:?}",
+                owner,
+                obelisk_id
+            );
+            crate::trace::event(
+                "replicated_player",
+                serde_json::json!({ "owner": owner.ok(), "obelisk_id": obelisk_id }),
+            );
+        },
+    );
 
     app.run();
 }

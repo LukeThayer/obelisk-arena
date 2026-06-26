@@ -1,6 +1,12 @@
-//! arena-client: the windowed present client. M2.1 keeps the M1 single-process gameplay (firebolt
-//! cast + cosmetics + rig) via `run_windowed_client`; Task 8 layers the lightyear connect on top.
+//! arena-client: the present client (netcode guide §2.3). Two modes:
+//!   - default (windowed): M1 gameplay (firebolt cast + cosmetics + rig) + the lightyear connect.
+//!   - `ARENA_HEADLESS=1`: MinimalPlugins + the net stack only, so connectivity is verifiable
+//!     without a window (the M2.1 GATE in Task 9 brings up two of these).
 
 fn main() {
-    arena_game::client::run_windowed_client();
+    if std::env::var("ARENA_HEADLESS").ok().as_deref() == Some("1") {
+        arena_game::client::run_headless_client();
+    } else {
+        arena_game::client::run_windowed_client();
+    }
 }
