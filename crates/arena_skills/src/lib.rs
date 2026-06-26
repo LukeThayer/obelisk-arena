@@ -7,6 +7,7 @@
 
 use bevy::asset::{io::Reader, AssetLoader, LoadContext};
 use bevy::prelude::*;
+use obelisk_bevy::prelude::{CueEvent, CueKind as ObeliskCueKind, ObeliskCueExt};
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -147,5 +148,49 @@ impl Plugin for ArenaSkillsPlugin {
         app.init_asset::<SkillFx>()
             .register_asset_loader(SkillFxLoader)
             .add_message::<CueMessage>(); // bevy 0.18: add_message, not add_event
+    }
+}
+
+/// Maps obelisk's sim-side `CueKind` to arena's authoring-side `CueKind` (1:1). Keeps the
+/// `.skillfx.ron` authoring format decoupled from the obelisk sim crate.
+impl From<ObeliskCueKind> for CueKind {
+    fn from(k: ObeliskCueKind) -> Self {
+        match k {
+            ObeliskCueKind::OnCast => CueKind::OnCast,
+            ObeliskCueKind::OnWindow => CueKind::OnWindow,
+            ObeliskCueKind::OnHit => CueKind::OnHit,
+        }
+    }
+}
+
+/// The cue **binding layer**: for every `(cue_id, lane)` in each `SkillFx`, register an obelisk
+/// `observe_cue` handler that, when obelisk fires the matching `CueEvent`, emits a `CueMessage`
+/// carrying the resolved lane + world position + source entity. The game's spawn systems then read
+/// `Messages<CueMessage>` with no obelisk dependency.
+///
+/// The lane map keys ARE the obelisk `cue_id` VALUEs (e.g. `"firebolt_cast"`), i.e. the values in
+/// the `.cast.ron` `vfx_cues` map that obelisk fires `CueEvent` with — NOT the `vfx_cues` slot keys
+/// (`"on_cast"`). Register this BEFORE any cast so the observers are installed when cues fire.
+pub fn register_skill_cues(app: &mut App, fxs: &[SkillFx]) {
+    for fx in fxs {
+        for (cue_id, lane) in &fx.lanes {
+            let lane = lane.clone();
+            app.observe_cue(
+                cue_id.clone(),
+                move |cue: &CueEvent, commands: &mut Commands| {
+                    let msg = CueMessage {
+                        lane_id: lane.lane_id.clone(),
+                        kind: cue.kind.into(),
+                        source: cue.source,
+                        position: cue.position,
+                        event: lane.clone(),
+                    };
+                    // The observer closure can't take resources, so defer the message write onto
+                    // the world. `Commands::write_message` (bevy 0.18) buffers it for the next
+                    // `Messages<CueMessage>` flush.
+                    commands.write_message(msg);
+                },
+            );
+        }
     }
 }
