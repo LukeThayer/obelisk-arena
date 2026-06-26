@@ -244,4 +244,3 @@ impl From<ObeliskCueKind> for CueKind {
         }
     }
 }
-

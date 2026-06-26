@@ -13,7 +13,9 @@ use bevy::prelude::*;
 use lightyear::prelude::server::{
     ClientOf, NetcodeConfig, NetcodeServer, ServerPlugins, ServerUdpIo,
 };
-use lightyear::prelude::{Connected, LinkOf, LinkStart, LocalAddr, PeerId, RemoteId, ReplicationSender};
+use lightyear::prelude::{
+    Connected, LinkOf, LinkStart, LocalAddr, PeerId, RemoteId, ReplicationSender,
+};
 use serde_json::json;
 
 use crate::net::{default_server_addr, ProtocolPlugin, NETCODE_KEY, PROTOCOL_ID, TICK_HZ};
@@ -75,7 +77,9 @@ fn on_client_connected(trigger: On<Add, Connected>, clients: Query<&RemoteId, Wi
     };
     info!("Client connected: {:?}", peer_id);
     let id = match peer_id {
-        PeerId::Netcode(id) | PeerId::Steam(id) | PeerId::Local(id) | PeerId::Entity(id) => Some(*id),
+        PeerId::Netcode(id) | PeerId::Steam(id) | PeerId::Local(id) | PeerId::Entity(id) => {
+            Some(*id)
+        }
         _ => None,
     };
     trace::event("client_connected", json!({ "client_id": id }));

@@ -48,9 +48,7 @@ fn register_cue_egress(app: &mut App, root: &std::path::Path) {
     // registry lookup). It needs `Res<ObeliskEntityIndex>` to resolve the source Entity → ObeliskId,
     // which a bevy observer can take as a system param.
     app.add_observer(
-        |cue: On<CueEvent>,
-         index: Res<ObeliskEntityIndex>,
-         mut writer: MessageWriter<LocalCue>| {
+        |cue: On<CueEvent>, index: Res<ObeliskEntityIndex>, mut writer: MessageWriter<LocalCue>| {
             let cue = cue.event();
             // The source's stable ObeliskId (caster for OnCast/OnWindow, target for OnHit). If the
             // source has no ObeliskId, skip + warn rather than emit an empty-string id (mirrors

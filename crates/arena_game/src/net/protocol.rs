@@ -258,11 +258,23 @@ fn lerp_networked_position(
         z: start.z + (end.z - start.z) * t,
         yaw: start.yaw + dyaw * t,
         pitch: start.pitch + (end.pitch - start.pitch) * t,
-        airborne: if t >= 0.5 { end.airborne } else { start.airborne },
+        airborne: if t >= 0.5 {
+            end.airborne
+        } else {
+            start.airborne
+        },
         // Discrete cast phase snaps at the midpoint; elapsed lerps.
-        cast_phase: if t >= 0.5 { end.cast_phase } else { start.cast_phase },
+        cast_phase: if t >= 0.5 {
+            end.cast_phase
+        } else {
+            start.cast_phase
+        },
         cast_elapsed: start.cast_elapsed + (end.cast_elapsed - start.cast_elapsed) * t,
-        cast_skill: if t >= 0.5 { end.cast_skill } else { start.cast_skill },
+        cast_skill: if t >= 0.5 {
+            end.cast_skill
+        } else {
+            start.cast_skill
+        },
     }
 }
 

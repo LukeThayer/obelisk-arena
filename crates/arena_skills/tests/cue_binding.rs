@@ -186,8 +186,14 @@ fn casting_firebolt_emits_serde_cue_messages() {
     let cast = msgs
         .iter()
         .find(|m| m.cue_id == "firebolt_cast")
-        .unwrap_or_else(|| panic!("expected a `firebolt_cast` (on-cast) CueMessage; got {summary:?}"));
-    assert_eq!(cast.kind, CueKind::OnCast, "firebolt_cast is an on-cast cue");
+        .unwrap_or_else(|| {
+            panic!("expected a `firebolt_cast` (on-cast) CueMessage; got {summary:?}")
+        });
+    assert_eq!(
+        cast.kind,
+        CueKind::OnCast,
+        "firebolt_cast is an on-cast cue"
+    );
     assert_eq!(
         cast.source_id, "caster",
         "the on-cast cue's source_id is the caster's ObeliskId"
@@ -200,7 +206,11 @@ fn casting_firebolt_emits_serde_cue_messages() {
         .unwrap_or_else(|| {
             panic!("expected a `firebolt_impact` (on-hit) CueMessage; got {summary:?}")
         });
-    assert_eq!(impact.kind, CueKind::OnHit, "firebolt_impact is an on-hit cue");
+    assert_eq!(
+        impact.kind,
+        CueKind::OnHit,
+        "firebolt_impact is an on-hit cue"
+    );
     assert_eq!(
         impact.source_id, "target",
         "the on-hit cue's source_id is the target's ObeliskId"
