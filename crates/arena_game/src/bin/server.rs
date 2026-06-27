@@ -49,7 +49,12 @@ fn main() {
     app.add_obelisk_skills(SkillSource::Dir(root.join("config/skills")));
     app.seed_combat_rng(arena_game::net::session_seed());
 
-    // 4. Arena server gameplay (player spawning, late-joiner refresh, rounds, egress). Task 9+.
+    // 4. Egress bridge: convert obelisk CueEvents → CueWireMessage + broadcast the authoritative
+    //    NetEvent stream → NetEventMessage, both on the reliable EventChannel to every client
+    //    (guide §5.5). The server does NOT spawn cosmetics; it only converts + broadcasts.
+    arena_game::skills::register_server_cue_egress(&mut app);
+
+    // 5. Arena server gameplay (player spawning, late-joiner refresh, rounds, cast pipeline).
     app.add_plugins(arena_game::server::ArenaServerPlugin);
 
     app.run();

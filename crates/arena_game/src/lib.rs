@@ -12,6 +12,7 @@ use std::path::PathBuf;
 pub mod client;
 pub mod net;
 pub mod server;
+pub mod skills;
 pub mod trace;
 
 /// The arena workspace root, holding `assets/` (cast timelines) and `config/` (skill + effect

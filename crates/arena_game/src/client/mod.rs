@@ -182,6 +182,8 @@ pub fn run_windowed_client() {
     app.add_plugins(replication::ReplicationSmoothingPlugin);
     // Stage-A own-movement prediction (predict-locally-snap-to-server fallback, see prediction.rs).
     app.add_plugins(prediction::LocalPredictionPlugin);
+    // Trace the replicated NetEvent + cue streams (Task 15). Task 16 adds the cosmetics consumer.
+    crate::skills::register_client_event_trace(&mut app);
     app.add_systems(
         Update,
         (
@@ -285,6 +287,9 @@ pub fn run_headless_client() {
     app.add_plugins(replication::ReplicationSmoothingPlugin);
     // Stage-A own-movement prediction (predict-locally-snap-to-server fallback, see prediction.rs).
     app.add_plugins(prediction::LocalPredictionPlugin);
+    // [H] Trace the replicated combat events (NetEventMessage) + cues (CueWireMessage) so the
+    // headless harness can assert both clients receive CastBegan/DamageResolved + a cue (Task 15).
+    crate::skills::register_client_event_trace(&mut app);
     app.add_systems(Update, trace_replicated_players);
 
     // [H] AUTOMOVE hook: feed a constant forward movement input so the headless movement-replication
