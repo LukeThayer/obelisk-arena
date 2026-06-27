@@ -115,4 +115,59 @@ pub fn add_obelisk_sim_headless(app: &mut App) {
             spatial::detect::detect_overlaps.in_set(ObeliskSet::ResolveHits),
         ),
     );
+
+    // Refresh the avian spatial-query pipeline right before obelisk reads it, every FixedUpdate.
+    //
+    // WHY: obelisk's `validate_casts` (LOS raycast + range) and `detect_overlaps`
+    // (`shape_intersections` hitbox↔hurtbox) read the `SpatialQueryPipeline`. Avian normally
+    // refreshes it once per physics step in `PhysicsStepSystems::SpatialQuery`. Under
+    // `LightyearAvianPlugin::Position` (which disables `PhysicsTransformPlugin` and reshuffles the
+    // physics sets into `RunFixedMainLoop`/`FixedPostUpdate`), that auto-refresh no longer lands
+    // before obelisk's `FixedUpdate` sets — empirically the pipeline read by `detect_overlaps` was
+    // EMPTY, so the firebolt window flew straight through the target hurtbox and never resolved
+    // damage (a manual `update_pipeline()` immediately found the hurtboxes). This explicit refresh,
+    // ordered before `ObeliskSet::Validate` (so the whole chain sees a populated pipeline), restores
+    // the M1/M0 invariant that obelisk's spatial queries see the current colliders. Cheap: a BVH
+    // rebuild over the handful of arena colliders each tick. (obelisk's own `ObeliskSpatialPlugin`
+    // — which we deliberately omit to avoid double-adding the physics group — relies on the same
+    // auto-refresh, so re-establishing it here is required for headless authority.)
+    use avian3d::prelude::PhysicsSystems;
+    app.add_systems(
+        FixedUpdate,
+        (
+            // Before validation (LOS raycast + range). Ordered AFTER avian's physics step so our
+            // rebuild isn't immediately clobbered by avian's own pipeline update.
+            refresh_spatial_pipeline
+                .after(PhysicsSystems::StepSimulation)
+                .before(ObeliskSet::Validate),
+            // AND immediately before hit detection (after the projectile moved + after the physics
+            // step), so `detect_overlaps` reads a freshly-built pipeline. Under
+            // `LightyearAvianPlugin` (disabled `PhysicsTransformPlugin`, physics step in
+            // `PhysicsSystems::StepSimulation` within FixedUpdate), avian's own per-step pipeline
+            // refresh produced an EMPTY view for obelisk's reads — the firebolt window flew straight
+            // through the target hurtbox and never resolved damage. Rebuilding the pipeline here,
+            // after the step and right before detect, restores M0/M1's hit detection.
+            refresh_spatial_pipeline_pre_detect
+                .after(PhysicsSystems::StepSimulation)
+                .after(ObeliskSet::Projectiles)
+                .before(ObeliskSet::ResolveHits),
+        ),
+    );
+    // Also refresh in Update: the server's `drain_cast_requests` re-validation (`nearest_enemy`)
+    // runs in Update, where the pipeline would otherwise reflect only the last FixedUpdate.
+    app.add_systems(Update, refresh_spatial_pipeline);
+}
+
+/// Force the avian `SpatialQueryPipeline` to reflect the current collider set. See the call sites in
+/// [`add_obelisk_sim_headless`] for why this explicit refresh is required under
+/// `LightyearAvianPlugin`. Takes `SpatialQuery` mutably so it can call `update_pipeline()`.
+fn refresh_spatial_pipeline(mut spatial: avian3d::prelude::SpatialQuery) {
+    spatial.update_pipeline();
+}
+
+/// Second instance of [`refresh_spatial_pipeline`], a distinct system so it can carry its own
+/// ordering constraints (immediately before `detect_overlaps`) without colliding with the
+/// pre-validation instance.
+fn refresh_spatial_pipeline_pre_detect(mut spatial: avian3d::prelude::SpatialQuery) {
+    spatial.update_pipeline();
 }

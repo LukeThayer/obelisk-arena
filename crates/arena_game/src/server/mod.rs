@@ -28,6 +28,13 @@ impl Plugin for ArenaServerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NetworkedIdAlloc>()
             .init_resource::<ClientPlayerMap>()
+            // Load the `.cast.ron` cast timelines the authoritative sim needs (firebolt). Without
+            // these, obelisk's `validate_casts` rejects every cast with `TimelineMissing`. The
+            // windowed client loads these itself (`client::load_cast_assets`); the headless server
+            // must too — it is the combat authority.
+            .init_resource::<PendingServerCastAssets>()
+            .add_systems(Startup, load_server_cast_assets)
+            .add_systems(Update, (poll_server_cast_assets, trace_server_net_events))
             .add_systems(
                 Update,
                 (
@@ -120,6 +127,16 @@ fn sync_networked_players(
         // players land at the two fixed markers regardless of their netcode ids.
         let slot = client_map.0.len().min(SPAWN_MARKERS.len() - 1);
         let spawn = SPAWN_MARKERS[slot];
+        // OPPOSING factions so firebolt's `hit_filter: Enemies` (target_faction != caster_faction)
+        // can resolve a hit player→player, and `nearest_enemy` acquires the opponent. With obelisk's
+        // 3-faction model (Player/Enemy/Neutral), a 2-player duel puts slot 0 on Player and slot 1
+        // on Enemy — they are mutual enemies. (If both shared `Faction::Player`, every cast would
+        // pass validation but resolve ZERO hits — the filter rejects same-faction targets.)
+        let faction = if slot == 0 {
+            Faction::Player
+        } else {
+            Faction::Enemy
+        };
         let net_id = id_alloc.allocate();
         // Stable obelisk id per client. `make_combatant` enforces ObeliskId == StatBlock.id.
         let obelisk_id = format!("player_{client_id}");
@@ -145,7 +162,7 @@ fn sync_networked_players(
             .make_combatant(StatBlock::with_id(obelisk_id.clone()))
             .insert((
                 Name::new(format!("NetworkedPlayer({client_id})")),
-                Faction::Player,
+                faction,
                 NetworkedPlayer,
                 NetworkOwner(client_id),
                 NetworkedId(net_id),
@@ -376,6 +393,92 @@ fn sync_player_positions(
                     "yaw": netpos.yaw,
                 }),
             );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cast-timeline asset loading (Task 13): the authoritative sim needs the `.cast.ron` timelines in
+// `CastTimelineHandles`, else `validate_casts` rejects every cast with `TimelineMissing`. Mirrors
+// the windowed client's `load_cast_assets`/`poll_cast_assets`, headless. One handle per registered
+// obelisk skill, loaded from `assets/skills/<id>.cast.ron`.
+// ---------------------------------------------------------------------------------------------
+
+/// Cast-timeline handles being polled to finish loading (skill id → handle).
+#[derive(Resource, Default)]
+struct PendingServerCastAssets(Vec<(String, Handle<CastTimeline>)>);
+
+/// Kick off loading a `.cast.ron` for every registered obelisk skill (firebolt).
+fn load_server_cast_assets(
+    mut pending: ResMut<PendingServerCastAssets>,
+    assets: Res<AssetServer>,
+    skills: Res<SkillRegistry>,
+) {
+    let mut ids: Vec<String> = skills.0.keys().cloned().collect();
+    ids.sort();
+    for id in ids {
+        let handle: Handle<CastTimeline> = assets.load(format!("skills/{id}.cast.ron"));
+        pending.0.push((id, handle));
+    }
+}
+
+/// Poll the pending cast assets each frame; move loaded ones into `CastTimelineHandles` so
+/// `validate_casts` can resolve the timeline.
+fn poll_server_cast_assets(
+    mut pending: ResMut<PendingServerCastAssets>,
+    timelines: Res<Assets<CastTimeline>>,
+    mut registry: ResMut<CastTimelineHandles>,
+) {
+    if pending.0.is_empty() {
+        return;
+    }
+    pending.0.retain(|(skill, handle)| {
+        if timelines.get(handle).is_some() {
+            info!("server: cast timeline loaded for {skill}");
+            registry.0.insert(skill.clone(), handle.clone());
+            false
+        } else {
+            true
+        }
+    });
+}
+
+/// Server-side observability: trace every obelisk `NetEvent` the sim mirrors (the same stream the
+/// egress bridge broadcasts). Independent `MessageReader` cursor from `egress_net_events`, so both
+/// see every event. Gives the headless harness the server-authoritative `CastBegan`/`DamageResolved`
+/// to compare the clients' echoed values against.
+fn trace_server_net_events(mut net: MessageReader<obelisk_bevy::net::NetEvent>) {
+    use obelisk_bevy::net::NetEvent;
+    for ev in net.read() {
+        match ev {
+            NetEvent::CastBegan {
+                caster,
+                skill_id,
+                total_duration,
+            } => trace::event(
+                "server_net_cast_began",
+                json!({ "caster": caster, "skill_id": skill_id, "total_duration": total_duration }),
+            ),
+            NetEvent::DamageResolved {
+                caster,
+                target,
+                skill_id,
+                total_damage,
+                is_killing_blow,
+                life_after,
+            } => trace::event(
+                "server_net_damage_resolved",
+                json!({
+                    "caster": caster, "target": target, "skill_id": skill_id,
+                    "total_damage": total_damage, "is_killing_blow": is_killing_blow,
+                    "life_after": life_after,
+                }),
+            ),
+            NetEvent::EntityDied { target, killer } => trace::event(
+                "server_net_entity_died",
+                json!({ "target": target, "killer": killer }),
+            ),
+            other => trace::event("server_net_event", json!({ "event": format!("{other:?}") })),
         }
     }
 }
