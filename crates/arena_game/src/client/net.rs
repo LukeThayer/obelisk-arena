@@ -18,7 +18,10 @@ use bevy::prelude::*;
 use lightyear::prelude::server::ClientOf;
 use lightyear::prelude::{LocalId, MessageSender, PeerId};
 
-use crate::net::protocol::{InputChannel, NetworkOwner, NetworkedPlayer, PlayerInputMessage};
+use crate::net::protocol::{
+    CastChannel, CastRequestMessage, InputChannel, NetworkOwner, NetworkedId, NetworkedPlayer,
+    NetworkedPosition, PlayerInputMessage,
+};
 
 /// The local player's current input, written each frame by whichever input source is active
 /// (the windowed controller, or the headless `ARENA_AUTOMOVE` hook) and read by
@@ -31,6 +34,13 @@ pub struct LocalInput {
     pub pitch: f32,
     pub jump: bool,
 }
+
+/// One-shot request to cast a skill, set by the windowed cast key or the headless `ARENA_AUTOCAST`
+/// hook and consumed by [`send_cast_requests`]. `Some(skill_id)` means "send a cast_request this
+/// frame"; the send system clears it back to `None`. The CLIENT never validates or resolves — it
+/// only requests; the server re-validates + resolves authoritatively (Stage A, guide §5.2).
+#[derive(Resource, Default)]
+pub struct CastIntent(pub Option<String>);
 
 /// Marker on the local player's materialized body — the replicated `NetworkedPlayer` whose
 /// `NetworkOwner` equals our own `LocalId`. The windowed client attaches the follow camera + rig to
@@ -51,14 +61,17 @@ pub struct ClientNetPlayerPlugin;
 
 impl Plugin for ClientNetPlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<LocalInput>().add_systems(
-            Update,
-            (
-                materialize_replicated_players,
-                send_local_player_input,
-                trace_received_remote_pose,
-            ),
-        );
+        app.init_resource::<LocalInput>()
+            .init_resource::<CastIntent>()
+            .add_systems(
+                Update,
+                (
+                    materialize_replicated_players,
+                    send_local_player_input,
+                    send_cast_requests,
+                    trace_received_remote_pose,
+                ),
+            );
     }
 }
 
@@ -152,6 +165,67 @@ fn send_local_player_input(
         pitch: input.pitch,
         jump: input.jump,
     });
+}
+
+/// Send a `CastRequestMessage` on the reliable `CastChannel` when [`CastIntent`] is set. Picks the
+/// nearest OTHER networked player as `target_hint` (its `NetworkedId`) and computes `aim_dir` toward
+/// it from the replicated `NetworkedPosition`s — both are HINTS; the server re-acquires the real
+/// target via `ObeliskSpatial::nearest_enemy` and re-validates (guide §5.2). The client NEVER
+/// validates or resolves. Clears the intent after sending (one cast per intent). `Single` sender
+/// (multiple would panic — guide §1.2); no-op until the sender exists + we own a local player.
+#[allow(clippy::type_complexity)]
+fn send_cast_requests(
+    mut intent: ResMut<CastIntent>,
+    local: Query<
+        (&NetworkOwner, &NetworkedPosition),
+        (With<NetworkedPlayer>, With<LocalNetPlayer>),
+    >,
+    others: Query<
+        (&NetworkOwner, &NetworkedId, &NetworkedPosition),
+        (With<NetworkedPlayer>, Without<LocalNetPlayer>),
+    >,
+    sender: Option<Single<&mut MessageSender<CastRequestMessage>>>,
+) {
+    let Some(skill_id) = intent.0.clone() else {
+        return;
+    };
+    let Ok((_owner, local_pos)) = local.single() else {
+        return; // no local player yet
+    };
+    let Some(mut sender) = sender else {
+        return; // sender not ready (pre-connect)
+    };
+    let here = local_pos.to_vec3();
+
+    // Nearest other player → the target hint + aim direction.
+    let nearest = others
+        .iter()
+        .map(|(_, nid, pos)| (nid.0, pos.to_vec3()))
+        .min_by(|a, b| {
+            a.1.distance_squared(here)
+                .partial_cmp(&b.1.distance_squared(here))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+    let (target_hint, aim_dir) = match nearest {
+        Some((nid, pos)) => {
+            let dir = (pos - here).normalize_or_zero();
+            (Some(nid), [dir.x, dir.y, dir.z])
+        }
+        // No opponent visible yet: still send (server re-acquires); aim straight ahead.
+        None => (None, [0.0, 0.0, 1.0]),
+    };
+
+    sender.send::<CastChannel>(CastRequestMessage {
+        skill_id: skill_id.clone(),
+        target_hint,
+        aim_dir,
+    });
+    crate::trace::event(
+        "cast_request_sent",
+        serde_json::json!({ "skill_id": skill_id, "target_hint": target_hint, "aim_dir": aim_dir }),
+    );
+    intent.0 = None;
 }
 
 /// [H] check support: throttled trace of a REMOTE player's received `NetworkedPosition` (the local

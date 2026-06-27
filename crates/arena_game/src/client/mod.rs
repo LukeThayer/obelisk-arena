@@ -182,9 +182,31 @@ pub fn run_windowed_client() {
     app.add_plugins(replication::ReplicationSmoothingPlugin);
     // Stage-A own-movement prediction (predict-locally-snap-to-server fallback, see prediction.rs).
     app.add_plugins(prediction::LocalPredictionPlugin);
-    app.add_systems(Update, bridge_windowed_input_to_local_input);
+    app.add_systems(
+        Update,
+        (
+            bridge_windowed_input_to_local_input,
+            bridge_windowed_cast_to_intent,
+        ),
+    );
 
     app.run();
+}
+
+/// Bridge the windowed cast key (Space / left-mouse) into [`net::CastIntent`] so the local player's
+/// cast goes over the wire as a `CastRequestMessage` (server re-validates + resolves — Stage A,
+/// Task 14). This is the windowed counterpart of the headless AUTOCAST hook; it replaces M1's direct
+/// `cast_skill_at` for the NET player. (The M1 co-located `cast_on_input` still runs for the
+/// single-process dummy regression, but the authoritative duel cast now flows server-side.)
+fn bridge_windowed_cast_to_intent(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut intent: ResMut<net::CastIntent>,
+) {
+    let pressed = keys.just_pressed(KeyCode::Space) || mouse.just_pressed(MouseButton::Left);
+    if pressed && intent.0.is_none() {
+        intent.0 = Some("firebolt".to_string());
+    }
 }
 
 /// Bridge the windowed third-person controller's input into [`net::LocalInput`] so the local
@@ -271,7 +293,53 @@ pub fn run_headless_client() {
         app.add_systems(Update, automove_input);
     }
 
+    // [H] AUTOCAST hook: once we own a local player AND an opponent is replicated, set the cast
+    // intent once so `net::send_cast_requests` fires a `CastRequestMessage` (Task 14). This is the
+    // headless verification vehicle for M2.3 — a server `CastBegan` (and downstream the egress of
+    // damage + cues) follows. Off unless ARENA_AUTOCAST=1. (Distinct from the windowed/M1 AUTOCAST
+    // which directly `cast_skill_at`s a co-located dummy — the headless one goes over the wire.)
+    if std::env::var("ARENA_AUTOCAST").ok().as_deref() == Some("1") {
+        app.add_systems(Update, headless_autocast);
+    }
+
     app.run();
+}
+
+/// [H] AUTOCAST: set [`net::CastIntent`] to firebolt exactly once, after both the local player and
+/// at least one remote player are materialized, so `send_cast_requests` has a target hint to send.
+/// Repeats the intent until a request is actually sent (the send system clears it), so a transient
+/// "sender not ready" frame doesn't swallow the only cast.
+#[allow(clippy::type_complexity)]
+fn headless_autocast(
+    mut fired: Local<bool>,
+    mut intent: ResMut<net::CastIntent>,
+    local: Query<
+        (),
+        (
+            With<crate::net::protocol::NetworkedPlayer>,
+            With<net::LocalNetPlayer>,
+        ),
+    >,
+    remotes: Query<
+        (),
+        (
+            With<crate::net::protocol::NetworkedPlayer>,
+            Without<net::LocalNetPlayer>,
+        ),
+    >,
+) {
+    if *fired {
+        return;
+    }
+    // Need our own player + an opponent before the request carries a useful target hint.
+    if local.iter().next().is_none() || remotes.iter().next().is_none() {
+        return;
+    }
+    if intent.0.is_none() {
+        intent.0 = Some("firebolt".to_string());
+        info!("headless AUTOCAST: requesting firebolt cast");
+        *fired = true;
+    }
 }
 
 /// Polling tracer kept from the M2.1 GATE: emit `replicated_player` once per replicated

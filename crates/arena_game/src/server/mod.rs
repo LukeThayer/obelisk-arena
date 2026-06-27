@@ -17,8 +17,8 @@ use serde_json::json;
 use stat_core::StatBlock;
 
 use crate::net::protocol::{
-    NetworkOwner, NetworkedHealth, NetworkedId, NetworkedPlayer, NetworkedPosition, ObeliskNetId,
-    PlayerInputMessage,
+    CastRequestMessage, NetworkOwner, NetworkedHealth, NetworkedId, NetworkedPlayer,
+    NetworkedPosition, ObeliskNetId, PlayerInputMessage,
 };
 use crate::trace;
 
@@ -44,6 +44,12 @@ impl Plugin for ArenaServerPlugin {
                     // (FixedUpdate, below) → ship the avian-integrated pose back (Update).
                     drain_player_inputs,
                     sync_player_positions,
+                    // Cast pipeline (Task 14): drain client cast_requests → re-validate
+                    // server-side (re-acquire target) → cast_skill_at → obelisk's validate_casts
+                    // gates the rest. Ordered after `sync_networked_players` so the ClientPlayerMap
+                    // is populated, and after the lib's Update spatial refresh (in
+                    // add_obelisk_sim_headless) so `nearest_enemy` sees a fresh pipeline.
+                    drain_cast_requests,
                 ),
             )
             // The authoritative controller runs in FixedUpdate so it ticks at the fixed 60 Hz the
@@ -337,6 +343,69 @@ fn run_player_controller(
         // the flat arena (no gravity/jump in Stage A; jump is a later cosmetic concern).
         position.0.x += new_planar.x * dt;
         position.0.z += new_planar.z * dt;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cast pipeline (Task 14): client cast_request → server re-validate → cast_skill_at (guide §5.2).
+//
+// The client sends a `CastRequestMessage` on the reliable `CastChannel` (it NEVER validates or
+// resolves — Stage A). The server maps the sender's `RemoteId` → caster entity via the
+// `ClientPlayerMap`, RE-ACQUIRES the real target server-side via `ObeliskSpatial::nearest_enemy`
+// (treating the client's `target_hint` as advisory only — never trusting the client for target
+// selection), and issues `cast_skill_at`. obelisk's `validate_casts` (FixedUpdate) then gates
+// range/LOS/mana/cooldown/already-casting and emits `CastBegan` or `CastRejected`.
+// ---------------------------------------------------------------------------------------------
+
+/// Drain `CastRequestMessage`s from each connected client and issue an authoritative cast.
+///
+/// Server-side re-validation (guide §5.2): the `target_hint` is advisory; the server re-acquires the
+/// nearest enemy via the spatial query (range gated to firebolt's 15u targeting + a margin). If no
+/// enemy is in range the request is dropped (obelisk would reject it as `NoTarget` anyway). Skips a
+/// caster already mid-cast (obelisk would reject `AlreadyCasting`, but skipping avoids the churn).
+#[allow(clippy::type_complexity)]
+fn drain_cast_requests(
+    mut receivers: Query<(&RemoteId, &mut MessageReceiver<CastRequestMessage>), With<ClientOf>>,
+    client_map: Res<ClientPlayerMap>,
+    spatial: ObeliskSpatial,
+    casters: Query<(&Transform, &Faction, &ObeliskId), With<NetworkedPlayer>>,
+    active: Query<(), With<ActiveCast>>,
+    mut commands: Commands,
+) {
+    for (RemoteId(peer_id), mut receiver) in &mut receivers {
+        let Some(client_id) = peer_to_u64(peer_id) else {
+            continue;
+        };
+        for req in receiver.receive() {
+            let Some(&caster) = client_map.0.get(&client_id) else {
+                continue;
+            };
+            if active.get(caster).is_ok() {
+                // Already casting; obelisk would reject. Drop silently.
+                continue;
+            }
+            let Ok((tf, faction, caster_id)) = casters.get(caster) else {
+                continue;
+            };
+            // RE-ACQUIRE the target authoritatively (the client's target_hint is advisory only).
+            // 20u acquisition radius (> firebolt's 15u targeting range so validate_casts owns the
+            // range gate). nearest_enemy filters by opposing faction.
+            let Some(target) = spatial.nearest_enemy(tf.translation, 20.0, *faction) else {
+                trace::event(
+                    "cast_request_no_target",
+                    json!({ "caster": caster_id.0, "skill_id": req.skill_id }),
+                );
+                continue;
+            };
+            trace::event(
+                "cast_request_accepted",
+                json!({ "caster": caster_id.0, "skill_id": req.skill_id,
+                        "target_hint": req.target_hint }),
+            );
+            commands
+                .entity(caster)
+                .cast_skill_at(req.skill_id.clone(), target);
+        }
     }
 }
 
