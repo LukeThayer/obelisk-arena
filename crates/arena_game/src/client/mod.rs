@@ -95,7 +95,9 @@ pub fn run_windowed_client() {
     app.add_plugins(arena_skills::ArenaSkillsPlugin);
     // Third-person controller: follow camera + camera-relative WASD + chest_joint aim lean.
     app.add_plugins(ArenaControllerPlugin);
-    app.add_plugins(crate::trace::TracePlugin);
+    // NB: `TracePlugin` is added by `ClientNetPlugin` (below) for BOTH client modes — adding it here
+    // too double-add-panics the moment the windowed client runs with `ARENA_TRACE_FILE` set (Bevy
+    // rejects a duplicate plugin). The net plugin's copy covers the windowed client's tracing.
     // Obelisk runs its sim on the 60 Hz fixed timestep.
     app.insert_resource(Time::<Fixed>::from_hz(60.0));
 
