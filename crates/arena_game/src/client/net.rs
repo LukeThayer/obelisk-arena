@@ -42,6 +42,20 @@ pub struct LocalInput {
 #[derive(Resource, Default)]
 pub struct CastIntent(pub Option<String>);
 
+/// Emitted by [`send_cast_requests`] the instant a local cast_request goes out, so the client can
+/// play the PREDICTED own-cast cosmetics immediately (zero latency) instead of waiting for the
+/// server's replicated cue (Task 17, guide §6.4). Carries the local caster's stable `ObeliskId`, its
+/// world position, and the aim direction. Consumed by `skills::predicted_local_cast`, which is the
+/// presentation-only predicted half — it spawns the on_cast muzzle + cosmetic projectile, NEVER an
+/// obelisk `Hitbox` and NEVER touching `CombatRng` (the server resolves damage authoritatively).
+#[derive(Message, Clone, Debug)]
+pub struct PredictedCast {
+    pub skill_id: String,
+    pub source_id: String,
+    pub position: Vec3,
+    pub aim_dir: Vec3,
+}
+
 /// Marker on the local player's materialized body — the replicated `NetworkedPlayer` whose
 /// `NetworkOwner` equals our own `LocalId`. The windowed client attaches the follow camera + rig to
 /// this; M2.2 Task 12 marks the predicted/controlled body.
@@ -63,6 +77,7 @@ impl Plugin for ClientNetPlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LocalInput>()
             .init_resource::<CastIntent>()
+            .add_message::<PredictedCast>()
             .add_systems(
                 Update,
                 (
@@ -177,7 +192,11 @@ fn send_local_player_input(
 fn send_cast_requests(
     mut intent: ResMut<CastIntent>,
     local: Query<
-        (&NetworkOwner, &NetworkedPosition),
+        (
+            &NetworkOwner,
+            &NetworkedPosition,
+            &crate::net::protocol::ObeliskNetId,
+        ),
         (With<NetworkedPlayer>, With<LocalNetPlayer>),
     >,
     others: Query<
@@ -185,11 +204,12 @@ fn send_cast_requests(
         (With<NetworkedPlayer>, Without<LocalNetPlayer>),
     >,
     sender: Option<Single<&mut MessageSender<CastRequestMessage>>>,
+    mut predicted: MessageWriter<PredictedCast>,
 ) {
     let Some(skill_id) = intent.0.clone() else {
         return;
     };
-    let Ok((_owner, local_pos)) = local.single() else {
+    let Ok((_owner, local_pos, local_obelisk_id)) = local.single() else {
         return; // no local player yet
     };
     let Some(mut sender) = sender else {
@@ -225,6 +245,18 @@ fn send_cast_requests(
         "cast_request_sent",
         serde_json::json!({ "skill_id": skill_id, "target_hint": target_hint, "aim_dir": aim_dir }),
     );
+
+    // PREDICTED own-cast feedback (Task 17): fire the local on_cast cosmetics IMMEDIATELY so the
+    // windup + cosmetic projectile start with zero perceptible latency. Presentation-only — the
+    // server still resolves damage authoritatively (its replicated OnCast cue for this same player
+    // is de-duped on this client by `skills::consume_replicated_cues`). NO obelisk Hitbox / RNG.
+    predicted.write(PredictedCast {
+        skill_id: skill_id.clone(),
+        source_id: local_obelisk_id.0.clone(),
+        position: here,
+        aim_dir: Vec3::from_array(aim_dir),
+    });
+
     intent.0 = None;
 }
 

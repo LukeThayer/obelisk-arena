@@ -188,6 +188,9 @@ pub fn run_windowed_client() {
     // replicated firebolt VFX play on the windowed client for BOTH peers' casts.
     crate::skills::register_client_event_trace(&mut app);
     crate::skills::register_client_cue_binding(&mut app);
+    // Predicted own-cast (Task 17): play the local on_cast + cosmetic projectile INSTANTLY on cast,
+    // with NO ResolveHits / Hitbox / CombatRng (Stage-A invariant). Damage arrives from the server.
+    crate::skills::register_predicted_sim(&mut app);
     app.add_systems(
         Update,
         (

@@ -226,3 +226,58 @@ fn consume_replicated_cues(
         }
     }
 }
+
+/// Register the PREDICTED local-cast presentation (Task 17, guide §6.4).
+///
+/// Stage-A invariant (guide risk #2): the client predicts the own-cast COSMETICS only — it fires the
+/// local `on_cast` muzzle + cosmetic projectile the instant the cast_request goes out (zero latency),
+/// but it NEVER runs `ObeliskSet::ResolveHits`, NEVER spawns an obelisk `Hitbox`, and NEVER touches
+/// `CombatRng`. Hit resolution + damage stay 100% server-authoritative (they arrive via the
+/// replicated `NetEventMessage(DamageResolved)` a few ms later). This system is the predicted half;
+/// it consumes [`PredictedCast`] (emitted by `client::net::send_cast_requests`), looks up the skill's
+/// `on_cast` cue id from the loaded cast timeline, stashes the aim direction, and emits a `LocalCue`
+/// so `client::cosmetics::spawn_cue_cosmetics` plays the windup + projectile cosmetics immediately.
+///
+/// Only added by the windowed client (the headless client has no cosmetics). The replicated OnCast
+/// cue for this same local player is de-duped by [`consume_replicated_cues`], so the cast plays
+/// exactly once (predicted), not twice.
+pub fn register_predicted_sim(app: &mut App) {
+    app.add_systems(Update, predicted_local_cast);
+}
+
+/// Consume [`PredictedCast`] → play the predicted own-cast cosmetics immediately (no resolution).
+fn predicted_local_cast(
+    mut predicted: MessageReader<crate::client::net::PredictedCast>,
+    handles: Res<CastTimelineHandles>,
+    timelines: Res<Assets<CastTimeline>>,
+    mut aim: ResMut<crate::client::cosmetics::AimDirs>,
+    mut out: MessageWriter<crate::client::cosmetics::LocalCue>,
+) {
+    for cast in predicted.read() {
+        // Resolve the skill's `on_cast` cue id from its loaded cast timeline (e.g.
+        // firebolt → "firebolt_cast"). If the timeline isn't loaded, skip (cosmetics-only; no crash).
+        let Some(cue_id) = handles
+            .0
+            .get(&cast.skill_id)
+            .and_then(|h| timelines.get(h))
+            .and_then(|t| t.vfx_cues.get("on_cast").cloned())
+        else {
+            continue;
+        };
+        // Stash the aim so `spawn_cue_cosmetics` flies the cosmetic projectile the right way
+        // (keyed by the caster's ObeliskId — matches the cue's source_id).
+        aim.0.insert(cast.source_id.clone(), cast.aim_dir);
+        crate::trace::event(
+            "predicted_cast",
+            serde_json::json!({ "cue_id": cue_id, "source_id": cast.source_id }),
+        );
+        out.write(crate::client::cosmetics::LocalCue(
+            arena_skills::CueMessage {
+                cue_id,
+                source_id: cast.source_id.clone(),
+                position: cast.position,
+                kind: arena_skills::CueKind::OnCast,
+            },
+        ));
+    }
+}
