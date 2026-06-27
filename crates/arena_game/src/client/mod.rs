@@ -1,129 +1,139 @@
-//! Client-side present + gameplay layer (M1 co-located logic, now lib-housed).
+//! Client-side present + gameplay layer.
 //!
-//! M2.1 keeps the M1 single-process gameplay working through `run_windowed_client`, which the
-//! `arena-client` bin calls. Later M2 tasks (§6) split this into net-driven prediction +
-//! interpolation; for now it's the M1 firebolt-cast + cosmetics + rig stack, unchanged, plus the
-//! lightyear client net stack layered on so two clients can connect to the dedicated server.
+//! Two entry points (the `arena-client` bin picks via `ARENA_HEADLESS`):
+//!   - [`run_windowed_client`] — the NETWORKED windowed client (M2.5 Task 21): DefaultPlugins +
+//!     the lightyear client stack + the CLIENT obelisk subset (no authoritative ResolveHits/RNG —
+//!     Stage A) + net-driven materialized players (rigged), predicted local movement, third-person
+//!     camera, replicated/predicted cosmetics, and the HUD (hp bars + round banner). The duel is
+//!     entirely server-authoritative + replicated; there is NO M1 co-located demo path anymore.
+//!   - [`run_headless_client`] — the headless scriptable cast client (`ARENA_HEADLESS=1`, the
+//!     `arena-observer` bin): MinimalPlugins + the net stack, materializes players, traces the
+//!     replicated combat/cue streams, and (under `ARENA_AUTOCAST`/`ARENA_AUTOMOVE`) scripts casts /
+//!     movement over the wire — the M2 net-regression vehicle (M2.5 Task 20).
 
 pub mod controller;
 pub mod cosmetics;
 pub mod hud;
 pub mod net;
 pub mod prediction;
+pub mod present;
 pub mod replication;
 pub mod rig;
 
-use arena_skills::{cue_event_to_message, SkillFxRegistry};
+use arena_skills::SkillFxRegistry;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-use controller::{ArenaControllerPlugin, FollowCamera, PlayerController};
-use cosmetics::{age_lifetimes, fly_cosmetic_projectiles, spawn_cue_cosmetics, AimDirs, LocalCue};
+use controller::{ArenaControllerPlugin, FollowCamera};
+use cosmetics::{age_lifetimes, fly_cosmetic_projectiles, spawn_cue_cosmetics, AimDirs};
 use obelisk_bevy::prelude::*;
-use rig::{ArenaBody, LocalAnimBlend};
-use stat_core::StatBlock;
 use std::path::PathBuf;
 
-use crate::{add_avian_with_lightyear, arena_root, net::ClientNetPlugin};
+use crate::{add_avian_with_lightyear, add_obelisk_sim_client, arena_root, net::ClientNetPlugin};
 
-/// Wire the M2 co-located cue path: load the [`SkillFxRegistry`] (cue_id → lanes) from
-/// `assets/skills`, register the [`LocalCue`] message channel, and install the egress observer that
-/// converts every obelisk `CueEvent` into a serde `CueMessage` (wrapped in `LocalCue`).
+/// Load the [`SkillFxRegistry`] (cue_id → lanes) from `assets/skills` so the cosmetics consumer
+/// (`cosmetics::spawn_cue_cosmetics`) can re-look-up lanes by `cue_id` from a replicated/predicted
+/// `CueMessage`. (`register_client_cue_binding` adds the `LocalCue` channel; this just supplies the
+/// registry resource.)
 ///
-/// This replaces M1's `register_skill_cues` build-time closure binding. The egress observer resolves
-/// `CueEvent.source` (a local `Entity`) → the source's stable `ObeliskId` (via `ObeliskEntityIndex`)
-/// so the serde `CueMessage.source_id` is process-independent — the same shape that crosses the wire
-/// in M2.3. The cosmetics consumer (`spawn_cue_cosmetics`) reads `LocalCue`, re-looks-up the lanes
-/// from the registry, and spawns. `arena_skills` stays lightyear-free: this `arena_game` glue owns
-/// the bevy `Message` wrapper + the obelisk lookup.
+/// M2.5 Task 21 NOTE: the NETWORKED windowed client does NOT install a local obelisk `CueEvent`
+/// egress observer (M1's co-located path) — it spawns no obelisk combatants of its own, so it fires
+/// no local cues. Its cosmetics come entirely from (a) the server's replicated `CueWireMessage`
+/// (drained by `skills::register_client_cue_binding`) and (b) the predicted own-cast `LocalCue`
+/// (emitted by `skills::register_predicted_sim`). Both feed `spawn_cue_cosmetics` via the `LocalCue`
+/// channel, which needs this registry to resolve lanes.
 ///
 /// A missing/empty `assets/skills` dir yields an empty registry (cues then no-op) rather than
 /// panicking the binary.
-fn register_cue_egress(app: &mut App, root: &std::path::Path) {
+fn load_skillfx_registry(app: &mut App, root: &std::path::Path) {
     let skills_dir = root.join("assets/skills");
     let registry = SkillFxRegistry::load_dir(&skills_dir);
-    let bound: Vec<String> = {
-        let mut k: Vec<String> = registry.by_cue.keys().cloned().collect();
-        k.sort();
-        k
-    };
+    let mut bound: Vec<String> = registry.by_cue.keys().cloned().collect();
+    bound.sort();
     app.insert_resource(registry);
-    app.add_message::<LocalCue>();
-    // The egress observer: one observer for ALL CueEvents (filters happen in the consumer via the
-    // registry lookup). It needs `Res<ObeliskEntityIndex>` to resolve the source Entity → ObeliskId,
-    // which a bevy observer can take as a system param.
-    app.add_observer(
-        |cue: On<CueEvent>, index: Res<ObeliskEntityIndex>, mut writer: MessageWriter<LocalCue>| {
-            let cue = cue.event();
-            // The source's stable ObeliskId (caster for OnCast/OnWindow, target for OnHit). If the
-            // source has no ObeliskId, skip + warn rather than emit an empty-string id (mirrors
-            // obelisk's NetEvent mirror invariant).
-            let Some(source_id) = index.id(cue.source) else {
-                warn!(
-                    "cue {} source {:?} has no ObeliskId — skipping",
-                    cue.cue_id, cue.source
-                );
-                return;
-            };
-            let msg = cue_event_to_message(&cue.cue_id, source_id, cue.position, cue.kind.into());
-            writer.write(LocalCue(msg));
-        },
-    );
     info!(
-        "cue egress wired from {} (bound cues: {:?})",
+        "skillfx registry loaded from {} (bound cues: {:?})",
         skills_dir.display(),
         bound
     );
 }
 
-/// Run the windowed M1 client app (DefaultPlugins + obelisk sim + cosmetics + rig). This is the
-/// M1 `main()` body, lib-housed so the `arena-client` bin can call it and (later tasks) layer the
-/// net stack on top. The lightyear client connect is added by `crate::net::ClientNetPlugin` in the
-/// bin, not here, so this function stays a pure single-process present app for the M1 regression.
+/// Run the windowed NETWORKED client (M2.5 Task 21). `DefaultPlugins` (windowing + rendering) + the
+/// lightyear client stack + the CLIENT obelisk subset (`add_obelisk_sim_client`, NO authoritative
+/// ResolveHits/RNG — Stage A) + the net-driven player/present/HUD layers. It connects to the
+/// dedicated server, materializes the replicated players (rigged via `present`), runs the
+/// third-person camera + predicted movement on the LOCAL player, renders cosmetics from the
+/// replicated/predicted cues, and shows the HUD (hp bars + round banner).
+///
+/// ## What changed from the broken M1-co-located version (the Task 21 fix)
+///
+/// The old body added BOTH `ObeliskSimPlugin` (whose `ObeliskSpatialPlugin` adds avian
+/// `PhysicsPlugins`) AND `add_avian_with_lightyear` (also avian `PhysicsPlugins`) → a guaranteed
+/// double-add panic (`PhysicsSchedulePlugin ... already added`). It ALSO ran the M1 single-process
+/// co-located demo (a hard-coded "player" + "dummy" combatant, `cast_on_input`/`autocast_system`
+/// directly calling `cast_skill_at`), which has no place on a NETWORKED client (the server is the
+/// sole combat authority). The fix: compose like the SERVER — `add_avian_with_lightyear` is the
+/// SOLE physics registrant, and `add_obelisk_sim_client` supplies the obelisk asset/core infra WITHOUT
+/// `ObeliskSpatialPlugin` (no second physics group) and WITHOUT ResolveHits/`ObeliskCombatPlugin`
+/// (Stage-A: the client never resolves hits / draws RNG). The co-located player/dummy + direct-cast
+/// systems are GONE; the duel is entirely the replicated `NetworkedPlayer`s + the wire cast path.
 pub fn run_windowed_client() {
     let root = arena_root();
 
     let mut app = App::new();
     // Point the AssetServer at the workspace-root `assets/` dir so cast-timeline paths
-    // (e.g. "skills/firebolt.cast.ron") resolve there rather than under the crate dir.
+    // (e.g. "skills/firebolt.cast.ron") + character.glb resolve there rather than under the crate dir.
     app.add_plugins(DefaultPlugins.set(AssetPlugin {
         file_path: root.join("assets").to_string_lossy().into_owned(),
         ..default()
     }));
-    // The headless authoritative simulation (assets + spatial + core + combat + net + vfx + loot).
-    app.add_plugins(ObeliskSimPlugin);
-    // The arena cosmetic-binding layer: registers the SkillFx asset + its `.skillfx.ron` loader.
-    app.add_plugins(arena_skills::ArenaSkillsPlugin);
-    // Third-person controller: follow camera + camera-relative WASD + chest_joint aim lean.
-    app.add_plugins(ArenaControllerPlugin);
-    // NB: `TracePlugin` is added by `ClientNetPlugin` (below) for BOTH client modes — adding it here
-    // too double-add-panics the moment the windowed client runs with `ARENA_TRACE_FILE` set (Bevy
-    // rejects a duplicate plugin). The net plugin's copy covers the windowed client's tracing.
-    // Obelisk runs its sim on the 60 Hz fixed timestep.
     app.insert_resource(Time::<Fixed>::from_hz(60.0));
 
-    register_cue_egress(&mut app, &root);
+    // --- lightyear client stack FIRST (ClientPlugins { 1/60 } + ProtocolPlugin + connect), so the
+    //     avian-lightyear physics added below sees the replication infra (same order as the server).
+    app.add_plugins(ClientNetPlugin);
+    let server_addr = crate::net::parse_addr_args(crate::net::default_server_addr());
+    let client_id = app
+        .world()
+        .resource::<crate::net::client::ConnectTo>()
+        .client_id;
+    app.insert_resource(crate::net::client::ConnectTo {
+        server: server_addr,
+        client_id,
+    });
 
-    // Obelisk global config: stat constants + the effect/skill registries + a fixed RNG seed.
+    // --- physics: the SOLE avian `PhysicsPlugins` registrant (after ClientPlugins). ---
+    add_avian_with_lightyear(&mut app);
+
+    // --- obelisk CLIENT subset (no ObeliskSpatialPlugin → no 2nd physics group; no ResolveHits/RNG
+    //     → Stage-A invariant). Supplies the CastTimeline asset/loader + SkillRegistry/config infra
+    //     the cosmetics + predicted-cast cue lookup need. ---
+    add_obelisk_sim_client(&mut app);
     app.add_obelisk_config_constants_default();
     app.add_obelisk_effects(&root.join("config/effects"));
     app.add_obelisk_skills(SkillSource::Dir(root.join("config/skills")));
+    // CombatRng is registered by ObeliskCorePlugin; seed it for determinism even though the client
+    // never DRAWS from it (Stage A) — keeps the resource present + future-proof. Seed value is
+    // irrelevant client-side (no client resolve).
     app.seed_combat_rng(1);
 
-    app.add_systems(
-        Startup,
-        (setup_scene, load_rig, load_cast_assets, spawn_combatants).chain(),
-    );
+    // The arena cosmetic-binding layer: registers the SkillFx asset + its `.skillfx.ron` loader.
+    app.add_plugins(arena_skills::ArenaSkillsPlugin);
+    // Third-person camera + mouse-look + spine-pitch aim lean (NET-aware: follows the local
+    // predicted player, no longer moves a Transform — prediction owns the body).
+    app.add_plugins(ArenaControllerPlugin);
+
+    // Load the SkillFx registry (cue_id → lanes) for the cosmetics consumer.
+    load_skillfx_registry(&mut app, &root);
     app.init_resource::<AimDirs>();
 
-    app.add_systems(
-        Update,
-        (
-            poll_cast_assets,
-            log_registered_skills_once,
-            confirm_combatants_once,
-        ),
-    );
+    // Scene (camera + light + ground) + rig assets + cast timelines. NO co-located combatants.
+    app.add_systems(Startup, (setup_scene, load_rig, load_cast_assets));
 
+    app.add_systems(Update, (poll_cast_assets, log_registered_skills_once));
+
+    // Rig: build the animation graph, attach it + the per-player rig (`present`), cull the costume,
+    // drive the per-player animation.
+    app.add_plugins(present::ArenaPresentPlugin);
     app.add_systems(
         Update,
         (
@@ -134,12 +144,11 @@ pub fn run_windowed_client() {
         ),
     );
 
+    // Cosmetics: spawn from the LocalCue channel (fed by replicated + predicted cues), fly + age.
     app.add_systems(
         Update,
         (spawn_cue_cosmetics, fly_cosmetic_projectiles, age_lifetimes),
     );
-
-    app.add_systems(Update, cast_on_input);
 
     if let Some(frames) = std::env::var("ARENA_SMOKE_FRAMES")
         .ok()
@@ -152,35 +161,23 @@ pub fn run_windowed_client() {
         app.add_systems(Update, smoke_exit_after_frames);
     }
 
+    // Screenshot harness (ARENA_SHOT / ARENA_SHOT_FRAME): Bevy off-screen-window capture (M1 harness,
+    // carried through the lib/bin split). Captures the primary window after N frames → ARENA_SHOT.
     if let Some(cfg) = ScreenshotConfig::from_env() {
         app.insert_resource(cfg);
         app.add_systems(Update, screenshot_system);
     }
-    if let Some(cfg) = AutocastConfig::from_env() {
-        app.insert_resource(cfg);
-        app.add_systems(Update, autocast_system);
+    // AUTOCAST harness (ARENA_AUTOCAST=1): drive the NETWORKED cast path on a cadence (set
+    // `net::CastIntent` → `send_cast_requests` ships a `CastRequestMessage`). This is the same wire
+    // cast the headless AUTOCAST uses — NOT the removed M1 co-located direct-cast. Lets a windowed
+    // client script firebolt for the visual gate.
+    if std::env::var("ARENA_AUTOCAST").ok().as_deref() == Some("1") {
+        app.add_systems(Update, windowed_autocast);
     }
 
-    // lightyear client stack (ClientPlugins { 1/60 } + ProtocolPlugin + connect), then the
-    // avian-lightyear physics AFTER ClientPlugins (same ordering rule as the server). The windowed
-    // client connects to the dedicated server just like the headless client.
-    app.add_plugins(ClientNetPlugin);
-    let server_addr = crate::net::parse_addr_args(crate::net::default_server_addr());
-    let client_id = app
-        .world()
-        .resource::<crate::net::client::ConnectTo>()
-        .client_id;
-    app.insert_resource(crate::net::client::ConnectTo {
-        server: server_addr,
-        client_id,
-    });
-    add_avian_with_lightyear(&mut app);
-
     // Net-driven player layer (M2.2): materialize a body per replicated NetworkedPlayer, interpolate
-    // remote players, and send local input to the server. The windowed client bridges its existing
-    // third-person controller (CameraYaw + WASD keys) into `LocalInput` so server-authoritative
-    // movement is driven by real input. The M1 co-located local player/dummy still spawn for the
-    // single-process regression; the net layer runs alongside and drives the replicated players.
+    // remote players, predict + send local input. The windowed controller's CameraYaw/AimPitch +
+    // WASD feed `LocalInput` so server-authoritative movement is driven by real input.
     app.add_plugins(net::ClientNetPlayerPlugin);
     app.add_plugins(replication::ReplicationSmoothingPlugin);
     // Stage-A own-movement prediction (predict-locally-snap-to-server fallback, see prediction.rs).
@@ -208,6 +205,48 @@ pub fn run_windowed_client() {
     app.run();
 }
 
+/// AUTOCAST for the WINDOWED client (`ARENA_AUTOCAST=1`): set [`net::CastIntent`] to firebolt on a
+/// cadence once the local player + an opponent are materialized, so `net::send_cast_requests` ships a
+/// `CastRequestMessage` over the wire (the server re-validates + resolves — Stage A). This is the
+/// visual-gate vehicle: it drives a firebolt cast (predicted own-cast cosmetics + the replicated
+/// server cue + the server-authoritative damage) without a keyboard. Mirrors the headless
+/// `headless_autocast`. `ARENA_AUTOCAST_PERIOD` seconds (default 0.8) between casts.
+#[allow(clippy::type_complexity)]
+fn windowed_autocast(
+    time: Res<Time>,
+    mut accum: Local<f32>,
+    mut intent: ResMut<net::CastIntent>,
+    local: Query<
+        (),
+        (
+            With<crate::net::protocol::NetworkedPlayer>,
+            With<net::LocalNetPlayer>,
+        ),
+    >,
+    remotes: Query<
+        (),
+        (
+            With<crate::net::protocol::NetworkedPlayer>,
+            Without<net::LocalNetPlayer>,
+        ),
+    >,
+) {
+    if local.iter().next().is_none() || remotes.iter().next().is_none() {
+        return;
+    }
+    let period = std::env::var("ARENA_AUTOCAST_PERIOD")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.8);
+    *accum += time.delta_secs();
+    if *accum >= period {
+        *accum = 0.0;
+        if intent.0.is_none() {
+            intent.0 = Some("firebolt".to_string());
+        }
+    }
+}
+
 /// Bridge the windowed cast key (Space / left-mouse) into [`net::CastIntent`] so the local player's
 /// cast goes over the wire as a `CastRequestMessage` (server re-validates + resolves — Stage A,
 /// Task 14). This is the windowed counterpart of the headless AUTOCAST hook; it replaces M1's direct
@@ -227,7 +266,7 @@ fn bridge_windowed_cast_to_intent(
 /// Bridge the windowed third-person controller's input into [`net::LocalInput`] so the local
 /// player's movement is sent to the server (server-authoritative Stage-A movement). Reads the
 /// camera yaw (mouse-X driven) + WASD keys in the same camera-relative frame the controller uses
-/// (`controller::move_player`): forward = -Z, strafe = +X, both in the camera-yaw frame.
+/// (matching the server controller): forward = -Z, strafe = +X, both in the camera-yaw frame.
 fn bridge_windowed_input_to_local_input(
     keys: Res<ButtonInput<KeyCode>>,
     yaw: Res<controller::CameraYaw>,
@@ -499,125 +538,6 @@ fn load_rig(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(rig::RigAssets::new(gltf));
 }
 
-/// Spawn the two M1 combatants: a `Player`-faction "player" at the origin granted "firebolt", and an
-/// `Enemy`-faction "dummy" 6 units down +Z.
-fn spawn_combatants(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    assets: Res<AssetServer>,
-) {
-    let capsule = meshes.add(Capsule3d::new(0.3, 1.0));
-
-    let player_scene: Handle<Scene> =
-        assets.load(GltfAssetLabel::Scene(0).from_asset("character.glb"));
-    let player_body = commands
-        .spawn((
-            Name::new("ArenaBody"),
-            ArenaBody,
-            SceneRoot(player_scene),
-            Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
-            Visibility::default(),
-        ))
-        .id();
-
-    let player = commands
-        .spawn_empty()
-        .make_combatant(StatBlock::with_id("player"))
-        .insert((
-            Faction::Player,
-            PlayerController,
-            LocalAnimBlend::default(),
-            Transform::from_xyz(0.0, 0.0, 0.0),
-            Visibility::default(),
-        ))
-        .id();
-    commands.entity(player).add_child(player_body);
-    commands.entity(player).grant_skill("firebolt");
-
-    let dummy_pos = Vec3::new(0.0, 0.0, 6.0);
-    let dummy = commands
-        .spawn_empty()
-        .make_combatant(StatBlock::with_id("dummy"))
-        .insert((
-            Faction::Enemy,
-            Transform::from_translation(dummy_pos),
-            Mesh3d(capsule),
-            MeshMaterial3d(materials.add(Color::srgb(1.0, 0.3, 0.2))),
-        ))
-        .id();
-    insert_hurtbox(&mut commands, dummy, 0.6, dummy_pos);
-}
-
-/// One-shot readback (fires once): confirm both combatants spawned with `ObeliskId == StatBlock.id`.
-fn confirm_combatants_once(
-    mut done: Local<bool>,
-    combatants: Query<(&ObeliskId, &Attributes, &SkillSlots), With<Combatant>>,
-) {
-    if *done {
-        return;
-    }
-    let mut summary: Vec<String> = Vec::new();
-    for (id, attrs, slots) in &combatants {
-        debug_assert_eq!(
-            id.0, attrs.0.id,
-            "ObeliskId ({}) must equal StatBlock.id ({})",
-            id.0, attrs.0.id
-        );
-        summary.push(format!(
-            "{:?}(hp={}/{}, skills={:?})",
-            id.0, attrs.0.current_life, attrs.0.max_life.base, slots.0
-        ));
-    }
-    if summary.len() >= 2 {
-        summary.sort();
-        info!(
-            "combatants spawned, ObeliskId == StatBlock.id confirmed: {}",
-            summary.join(", ")
-        );
-        *done = true;
-    }
-}
-
-/// The M1 cast bind: on `Space` or left-mouse, cast firebolt at the nearest enemy.
-#[allow(clippy::type_complexity)]
-fn cast_on_input(
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    mut commands: Commands,
-    spatial: ObeliskSpatial,
-    mut aim_dirs: ResMut<AimDirs>,
-    players: Query<
-        (Entity, &ObeliskId, &Transform, &Faction, &SkillSlots),
-        (With<PlayerController>, Without<ActiveCast>),
-    >,
-    transforms: Query<&Transform, With<Combatant>>,
-) {
-    if !keys.just_pressed(KeyCode::Space) && !mouse.just_pressed(MouseButton::Left) {
-        return;
-    }
-    let Ok((player, player_id, tf, faction, slots)) = players.single() else {
-        return;
-    };
-    let Some(skill) = slots.0.first().cloned() else {
-        return;
-    };
-    let Some(target) = spatial.nearest_enemy(tf.translation, 20.0, *faction) else {
-        info!("cast {skill}: no enemy in range");
-        return;
-    };
-    let target_pos = transforms
-        .get(target)
-        .map(|t| t.translation)
-        .unwrap_or(tf.translation + Vec3::Z);
-    let dir = (target_pos - tf.translation)
-        .try_normalize()
-        .unwrap_or(Vec3::Z);
-    aim_dirs.0.insert(player_id.0.clone(), dir);
-    info!("cast {skill} at nearest enemy");
-    commands.entity(player).cast_skill_at(skill, target);
-}
-
 /// The cast-timeline handles being polled to load (skill id -> handle).
 #[derive(Resource, Default)]
 struct PendingCastAssets(Vec<(String, Handle<CastTimeline>)>);
@@ -745,66 +665,5 @@ fn screenshot_system(
     if cfg.fired && cfg.count >= cfg.shot_frame + 12 {
         info!("arena_game shot: capture flushed, exiting");
         exit.write(AppExit::Success);
-    }
-}
-
-/// Auto-cast-harness config, present as a resource only when `ARENA_AUTOCAST=1`.
-#[derive(Resource)]
-struct AutocastConfig {
-    cast_frame: u64,
-    count: u64,
-    fired: bool,
-}
-
-impl AutocastConfig {
-    fn from_env() -> Option<Self> {
-        if std::env::var("ARENA_AUTOCAST").ok().as_deref() != Some("1") {
-            return None;
-        }
-        Some(Self {
-            cast_frame: env_frame("ARENA_AUTOCAST_FRAME", 30),
-            count: 0,
-            fired: false,
-        })
-    }
-}
-
-fn autocast_system(
-    mut commands: Commands,
-    mut cfg: ResMut<AutocastConfig>,
-    mut aim_dirs: ResMut<AimDirs>,
-    combatants: Query<(Entity, &ObeliskId, &Transform), With<Combatant>>,
-) {
-    cfg.count += 1;
-    if cfg.fired || cfg.count < cfg.cast_frame {
-        return;
-    }
-
-    let mut player = None;
-    let mut dummy = None;
-    for (entity, id, tf) in &combatants {
-        match id.0.as_str() {
-            "player" => player = Some((entity, tf.translation)),
-            "dummy" => dummy = Some((entity, tf.translation)),
-            _ => {}
-        }
-    }
-
-    if let (Some((player, player_pos)), Some((dummy, dummy_pos))) = (player, dummy) {
-        info!(
-            "arena_game autocast: frame {}, player casts firebolt at dummy",
-            cfg.count
-        );
-        let dir = (dummy_pos - player_pos).try_normalize().unwrap_or(Vec3::Z);
-        aim_dirs.0.insert("player".to_string(), dir);
-        commands.entity(player).cast_skill_at("firebolt", dummy);
-        cfg.fired = true;
-    } else {
-        warn!(
-            "arena_game autocast: frame {}, player/dummy not found yet (player={:?}, dummy={:?})",
-            cfg.count,
-            player.is_some(),
-            dummy.is_some()
-        );
     }
 }

@@ -10,9 +10,7 @@ fn registry_loads_firebolt_cues() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../assets/skills"
     )));
-    assert!(reg.lanes("firebolt_cast").map_or(false, |l| !l.is_empty()));
-    assert!(reg
-        .lanes("firebolt_impact")
-        .map_or(false, |l| !l.is_empty()));
+    assert!(reg.lanes("firebolt_cast").is_some_and(|l| !l.is_empty()));
+    assert!(reg.lanes("firebolt_impact").is_some_and(|l| !l.is_empty()));
     assert!(reg.lanes("nonexistent").is_none());
 }

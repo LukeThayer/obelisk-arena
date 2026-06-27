@@ -386,64 +386,86 @@ fn locomotion_blend(
     out
 }
 
-/// Per-frame animation driver for the player rig (the `drive_animation` shape from
-/// wisp's `visuals.rs:548+`, adapted for obelisk + the arena controller).
+/// Per-frame animation driver for the player rigs (the `drive_animation` shape from
+/// wisp's `visuals.rs:548+`, adapted for obelisk + the NETWORKED arena client).
+///
+/// M2.5 Task 21 made this PER-PLAYER (was single-player co-located): the networked client renders
+/// TWO rigs (local + remote), each a descendant of its own `NetworkedPlayer` root carrying a
+/// [`LocalAnimBlend`]. For each `AnimationPlayer` we walk the `ChildOf` chain up to its owning rig
+/// root, read that root's persisted blend + optional `ActiveCast`, and drive that rig — so both
+/// characters animate independently instead of `single_mut()` erroring on the 2-player case.
 ///
 /// Drives two layers:
-///   - **Locomotion** from [`PlayerVelocity`] (Task 11) + the camera yaw, blending
-///     idle / directional-walk clips.
-///   - **Casting** from the player's `Option<&ActiveCast>` (obelisk's cast state
-///     machine): the `ActiveCast.phase` maps to a casting blend target —
-///     `Windup`/`Active` → 1.0, `Recovery` → 0.5, none/`Done` → 0.0 — eased by
-///     [`step_casting_blend`] so the pose doesn't pop. The casting clips are
-///     overlaid on the locomotion layer underneath.
-///
-/// `world_velocity` is in world space and `yaw` is the camera/body yaw, so the
-/// directional-walk split reads the same regardless of which way the camera faces.
-/// The `AnimationPlayer` lives on an entity DEEP inside the rig scene tree, so we
-/// walk the `ChildOf` chain up to the `PlayerController` root to find the player's
-/// `ActiveCast` + `LocalAnimBlend`.
+///   - **Locomotion** from the camera yaw (the per-player world velocity is not yet threaded for
+///     remote rigs — they idle/face via the interpolated `NetworkedPosition.yaw`; deriving remote
+///     walk velocity from the pose-stream delta is later polish, the rig idles correctly meanwhile).
+///   - **Casting** from the root's `Option<&ActiveCast>`: `Windup`/`Active` → 1.0, `Recovery` → 0.5,
+///     none/`Done` → 0.0, eased by [`step_casting_blend`]. (On the Stage-A client the materialized
+///     players carry no obelisk `ActiveCast` today, so this reads as 0 = plain idle; the cast pose
+///     would light up the moment a predicted local `ActiveCast` lands — forward-compatible.)
+#[allow(clippy::type_complexity)]
 pub fn drive_animation(
     rig: Res<RigAssets>,
     mut anim: Query<(Entity, &mut AnimationPlayer)>,
     parents: Query<&ChildOf>,
     body_marker: Query<(), With<ArenaBody>>,
-    mut player_state: Query<(Option<&ActiveCast>, &mut LocalAnimBlend)>,
-    velocity: Res<super::controller::PlayerVelocity>,
+    mut roots: Query<(Option<&ActiveCast>, &mut LocalAnimBlend)>,
     yaw: Res<super::controller::CameraYaw>,
 ) {
     if !rig.ready() {
         return;
     }
-
-    // Find the player's cast phase + the persisted blend state. The
-    // `LocalAnimBlend` + `ActiveCast` live on the `PlayerController` root; there is
-    // exactly one player, so take the single matching entity.
-    let Ok((active_cast, mut blend)) = player_state.single_mut() else {
-        return;
-    };
-
-    // Map the obelisk cast phase to a casting-layer blend target (guide §4).
-    let casting_target = match active_cast.map(|c| c.phase) {
-        Some(SkillPhase::Windup) => 1.0,
-        Some(SkillPhase::Active) => 1.0,
-        Some(SkillPhase::Recovery) => 0.5,
-        // No cast, or it has finished (`Done`) → fade the casting layer out.
-        _ => 0.0,
-    };
-    blend.casting = step_casting_blend(blend.casting, casting_target);
-
-    let world_velocity = velocity.0;
     let body_yaw = yaw.0;
 
     for (anim_entity, mut player) in &mut anim {
-        // Only drive `AnimationPlayer`s that belong to the player's rig (a
-        // descendant of an `ArenaBody`); ignore any other rigs.
-        if !ancestor_has_body_marker(anim_entity, &parents, &body_marker) {
+        // Resolve THIS anim player's owning rig root: the nearest ancestor carrying a
+        // `LocalAnimBlend` (the `NetworkedPlayer` root). Skip anim players not under an arena rig.
+        let Some(root) = rig_root_of(anim_entity, &parents, &body_marker, &roots) else {
             continue;
-        }
-        for (node, weight) in locomotion_blend(&rig, world_velocity, body_yaw, blend.casting) {
+        };
+        let Ok((active_cast, mut blend)) = roots.get_mut(root) else {
+            continue;
+        };
+
+        // Map the obelisk cast phase to a casting-layer blend target (guide §4).
+        let casting_target = match active_cast.map(|c| c.phase) {
+            Some(SkillPhase::Windup) | Some(SkillPhase::Active) => 1.0,
+            Some(SkillPhase::Recovery) => 0.5,
+            _ => 0.0,
+        };
+        blend.casting = step_casting_blend(blend.casting, casting_target);
+
+        // No per-rig world velocity threaded yet → idle/casting_idle (Vec3::ZERO speed).
+        for (node, weight) in locomotion_blend(&rig, Vec3::ZERO, body_yaw, blend.casting) {
             player.play(node).repeat().set_weight(weight);
+        }
+    }
+}
+
+/// Walk the `ChildOf` chain from an `AnimationPlayer` entity up to the nearest ancestor that is BOTH
+/// past an [`ArenaBody`] marker (so it's an arena rig) AND carries a [`LocalAnimBlend`] (the
+/// `NetworkedPlayer` root). Returns that root entity, or `None` if the anim player isn't under an
+/// arena rig. Lets [`drive_animation`] drive each of the N rigs from its own root state.
+fn rig_root_of(
+    anim_entity: Entity,
+    parents: &Query<&ChildOf>,
+    body_marker: &Query<(), With<ArenaBody>>,
+    roots: &Query<(Option<&ActiveCast>, &mut LocalAnimBlend)>,
+) -> Option<Entity> {
+    // First confirm it belongs to an arena rig at all.
+    if !ancestor_has_body_marker(anim_entity, parents, body_marker) {
+        return None;
+    }
+    // Then walk up to the nearest ancestor carrying a LocalAnimBlend (the player root, parent of the
+    // ArenaBody scene). `roots` contains exactly the player roots.
+    let mut cur = anim_entity;
+    loop {
+        if roots.get(cur).is_ok() {
+            return Some(cur);
+        }
+        match parents.get(cur) {
+            Ok(p) => cur = p.0,
+            Err(_) => return None,
         }
     }
 }

@@ -159,6 +159,80 @@ pub fn add_obelisk_sim_headless(app: &mut App) {
     app.add_systems(Update, refresh_spatial_pipeline);
 }
 
+/// Compose the CLIENT-appropriate obelisk subset (netcode guide §6.4, Stage-A invariant).
+///
+/// Identical to [`add_obelisk_sim_headless`] EXCEPT it deliberately omits `ObeliskCombatPlugin` and
+/// the `detect_overlaps` (`ObeliskSet::ResolveHits`) system — the Stage-A invariant (guide risk #2):
+/// **the client never resolves hits and never touches `CombatRng`.** Hit resolution + damage are
+/// 100% server-authoritative; the client only predicts cast initiation + projectile MOTION
+/// (timeline + `move_projectiles`) for zero-latency cosmetics, and renders the server's replicated
+/// `DamageResolved`. Like the headless variant it also omits `ObeliskSpatialPlugin` (the physics
+/// group is owned solely by [`add_avian_with_lightyear`]), so this is panic-free alongside it.
+///
+/// What it DOES add: `ObeliskAssetsPlugin` (the `CastTimeline` asset + `.cast.ron` loader the
+/// cosmetics + `register_predicted_sim` cue lookup need), `ObeliskCorePlugin` (`SkillRegistry` /
+/// `CombatRng` / config infra that `add_obelisk_skills` / `seed_combat_rng` populate +
+/// `ObeliskEntityIndex`), `ObeliskCuePlugin`, `ObeliskNetPlugin`, `ObeliskLootPlugin`, and the
+/// timeline/projectile systems (Validate / Advance / Projectiles) — but **not** ResolveHits.
+///
+/// Why include the timeline/projectile sets when the client issues no obelisk casts today: they are
+/// inert without an `ActiveCast` on a client entity (the networked client's cast goes over the wire,
+/// the materialized players are render proxies), so they cost nothing, and they keep the door open
+/// for a future predicted-local-obelisk-cast pass without a re-compose. The spatial-pipeline refresh
+/// is kept for the same `LightyearAvianPlugin` reason as the server (a `Validate` LOS read could
+/// otherwise see an empty pipeline) — harmless on the client.
+pub fn add_obelisk_sim_client(app: &mut App) {
+    use obelisk_bevy::{assets, core, loot, net, spatial, timeline, vfx, ObeliskSet};
+
+    app.add_plugins(assets::ObeliskAssetsPlugin)
+        // ObeliskSpatialPlugin omitted — physics is `add_avian_with_lightyear`'s sole job.
+        // ObeliskCombatPlugin omitted — Stage-A: the client NEVER runs the resolve funnel / RNG.
+        .add_plugins(core::ObeliskCorePlugin)
+        .add_plugins(net::ObeliskNetPlugin)
+        .add_plugins(vfx::ObeliskCuePlugin)
+        .add_plugins(loot::ObeliskLootPlugin);
+
+    app.configure_sets(
+        FixedUpdate,
+        (
+            ObeliskSet::Validate,
+            ObeliskSet::Advance,
+            ObeliskSet::Projectiles,
+            // ResolveHits set is still CONFIGURED (so anything ordering against it resolves) but no
+            // system runs in it on the client — the Stage-A hard exclusion.
+            ObeliskSet::ResolveHits,
+            ObeliskSet::TickEffects,
+        )
+            .chain(),
+    );
+
+    app.add_systems(
+        FixedUpdate,
+        (
+            timeline::advance::validate_casts.in_set(ObeliskSet::Validate),
+            (
+                timeline::advance::advance_casts,
+                timeline::advance::expire_hitboxes,
+            )
+                .in_set(ObeliskSet::Advance),
+            spatial::projectile::move_projectiles.in_set(ObeliskSet::Projectiles),
+            // NB: `spatial::detect::detect_overlaps` (ResolveHits) is DELIBERATELY NOT added — the
+            // Stage-A invariant. Adding it here would draw `CombatRng` on the client and desync.
+        ),
+    );
+
+    // Same `LightyearAvianPlugin` spatial-pipeline refresh rationale as the server (see
+    // `add_obelisk_sim_headless`). Only the pre-validation refresh is needed (no client detect).
+    use avian3d::prelude::PhysicsSystems;
+    app.add_systems(
+        FixedUpdate,
+        refresh_spatial_pipeline
+            .after(PhysicsSystems::StepSimulation)
+            .before(ObeliskSet::Validate),
+    );
+    app.add_systems(Update, refresh_spatial_pipeline);
+}
+
 /// Force the avian `SpatialQueryPipeline` to reflect the current collider set. See the call sites in
 /// [`add_obelisk_sim_headless`] for why this explicit refresh is required under
 /// `LightyearAvianPlugin`. Takes `SpatialQuery` mutably so it can call `update_pipeline()`.

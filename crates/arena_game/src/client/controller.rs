@@ -26,29 +26,21 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use super::rig::ArenaBody;
 
 /// Marker on the player combatant root that this controller drives. Spawned in
-/// `main::spawn_combatants` alongside the `Combatant`. Separate from `ArenaBody`
-/// (the rig scene-root child) so the controller can move the root while the
-/// spine-pitch system mutates a bone deep inside the body subtree.
-#[derive(Component)]
-pub struct PlayerController;
-
 /// Marker on the over-the-shoulder follow camera.
 #[derive(Component)]
 pub struct FollowCamera;
 
-/// The player's read-only `Transform`, disjoint from the camera's. Aliased to keep
-/// [`update_camera_and_aim`]'s signature under clippy's `type_complexity` bar.
-type PlayerTransform<'w, 's> =
-    Single<'w, 's, &'static Transform, (With<PlayerController>, Without<FollowCamera>)>;
-
-/// The follow camera's mutable `Transform`, disjoint from the player's. Aliased to keep
-/// [`update_camera_and_aim`]'s signature under clippy's `type_complexity` bar.
-type CameraTransform<'w, 's> =
-    Single<'w, 's, &'static mut Transform, (With<FollowCamera>, Without<PlayerController>)>;
-
-/// Player horizontal move speed (world units/sec). Roughly matches wisp's
-/// `MAX_SPEED` (4.2) so the locomotion clips read at a sensible cadence later.
-const MOVE_SPEED: f32 = 4.0;
+/// The follow camera's mutable `Transform`, disjoint from the local player's. Aliased to keep
+/// [`follow_local_net_player`]'s signature under clippy's `type_complexity` bar.
+type CameraTransform<'w, 's> = Single<
+    'w,
+    's,
+    &'static mut Transform,
+    (
+        With<FollowCamera>,
+        Without<crate::client::net::LocalNetPlayer>,
+    ),
+>;
 
 /// Mouse sensitivity (radians of yaw/pitch per pixel of accumulated motion).
 const MOUSE_SENSITIVITY: f32 = 0.0035;
@@ -91,19 +83,19 @@ pub struct AimPitch(pub f32);
 #[derive(Resource, Default)]
 pub struct AimPitchLocked(pub bool);
 
-/// Player velocity this frame (world units/sec), derived from the
-/// `Transform.translation` delta. Read by the Task 12 locomotion blend to pick
-/// between idle / directional-walk clips. Kinematic movement means avian gives
-/// us no `LinearVelocity`, so we track it ourselves.
-#[derive(Resource, Default)]
-pub struct PlayerVelocity(pub Vec3);
-
-/// Plugin: registers the controller resources + systems.
+/// Plugin: registers the controller resources + the NET-CLIENT-appropriate systems.
 ///
-/// `Update`: `cursor_grab`, then `update_camera_and_aim` (mouse → yaw/pitch +
-/// cam pose), then `move_player` (WASD → translation + body yaw + velocity).
-/// `PostUpdate`: `apply_aim_pitch_to_local_spine`, ordered between
-/// `AnimationSystems` and `TransformSystems::Propagate` (the load-bearing order).
+/// M2.5 Task 21 repurposed this from the M1 co-located controller (which moved a `PlayerController`
+/// Transform directly) to the NETWORKED windowed client. Movement is now server-authoritative +
+/// client-predicted (`client::prediction` integrates the local body's avian `Position` from
+/// `LocalInput`), so this plugin NO LONGER moves a Transform — `move_player` is gone. What it keeps
+/// is the net-agnostic mouse-look + the camera follow + the spine-pitch aim lean:
+///
+/// `Update`: `cursor_grab`, then `accumulate_mouse_look` (mouse → `CameraYaw`/`AimPitch` resources,
+/// read by `client::mod::bridge_windowed_input_to_local_input` to drive the server controller), then
+/// `follow_local_net_player` (positions the [`FollowCamera`] behind the local predicted player).
+/// `PostUpdate`: `apply_aim_pitch_to_local_spine`, ordered between `AnimationSystems` and
+/// `TransformSystems::Propagate` (the load-bearing order).
 pub struct ArenaControllerPlugin;
 
 impl Plugin for ArenaControllerPlugin {
@@ -115,10 +107,9 @@ impl Plugin for ArenaControllerPlugin {
             .map(|p| (p, true))
             .unwrap_or((0.0, false));
 
-        // Initial camera yaw. `ARENA_CAM_YAW` (radians) seeds a 3/4 view for headless
-        // screenshot verification so the cast pose + muzzle particle + flying projectile
-        // are all legible (a straight-behind shot hides them behind the character).
-        // Default 0 → straight behind; mouse-X drives it from there in normal play.
+        // Initial camera yaw. `ARENA_CAM_YAW` (radians) seeds a 3/4 view for screenshot verification
+        // so the cast pose + muzzle particle + flying projectile are all legible (a straight-behind
+        // shot hides them behind the character). Default 0 → straight behind; mouse-X drives it.
         let yaw0 = std::env::var("ARENA_CAM_YAW")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
@@ -127,10 +118,9 @@ impl Plugin for ArenaControllerPlugin {
         app.insert_resource(CameraYaw(yaw0))
             .insert_resource(AimPitch(pitch0))
             .insert_resource(AimPitchLocked(locked))
-            .init_resource::<PlayerVelocity>()
             .add_systems(
                 Update,
-                (cursor_grab, update_camera_and_aim, move_player).chain(),
+                (cursor_grab, accumulate_mouse_look, follow_local_net_player).chain(),
             )
             .add_systems(
                 PostUpdate,
@@ -162,20 +152,18 @@ fn cursor_grab(
     }
 }
 
-/// Accumulate mouse motion into [`CameraYaw`] + [`AimPitch`], then place the
-/// follow camera behind + above the player looking at its head.
+/// Accumulate mouse motion into [`CameraYaw`] + [`AimPitch`] (net-agnostic). The yaw/pitch are read
+/// by `client::mod::bridge_windowed_input_to_local_input` (→ `LocalInput` → the server controller +
+/// local prediction) and by the spine-pitch aim lean; the camera placement is a SEPARATE system
+/// ([`follow_local_net_player`]) so this stays a pure input system with no player dependency.
 ///
-/// Mouse-X → yaw (turn the camera around the player); mouse-Y → pitch (aim lean,
-/// inverted so pushing the mouse up looks up). Pitch is skipped when
-/// `ARENA_TEST_PITCH` pinned it (debug hook). The camera position is recomputed
-/// from the player's translation every frame so it follows movement.
-fn update_camera_and_aim(
+/// Mouse-X → yaw (turn the camera around the player); mouse-Y → pitch (aim lean, inverted so pushing
+/// the mouse up looks up). Pitch is skipped when `ARENA_TEST_PITCH` pinned it (debug hook).
+fn accumulate_mouse_look(
     motion: Res<AccumulatedMouseMotion>,
     mut yaw: ResMut<CameraYaw>,
     mut pitch: ResMut<AimPitch>,
     pitch_locked: Res<AimPitchLocked>,
-    player: Option<PlayerTransform>,
-    cam: Option<CameraTransform>,
 ) {
     let delta = motion.delta;
     yaw.0 -= delta.x * MOUSE_SENSITIVITY;
@@ -183,7 +171,32 @@ fn update_camera_and_aim(
         // Invert mouse-Y: pushing up (negative delta.y) looks up (positive pitch).
         pitch.0 = (pitch.0 - delta.y * MOUSE_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
+}
 
+/// The local predicted player's read-only Transform, for the camera to follow. The networked client
+/// has no `PlayerController` entity (the M1 co-located player is gone) — the local player is the
+/// materialized [`LocalNetPlayer`] (a replicated `NetworkedPlayer` whose `NetworkOwner == LocalId`).
+/// Aliased to keep [`follow_local_net_player`]'s signature under clippy's `type_complexity` bar.
+type LocalNetPlayerTransform<'w, 's> = Single<
+    'w,
+    's,
+    &'static Transform,
+    (
+        With<crate::client::net::LocalNetPlayer>,
+        Without<FollowCamera>,
+    ),
+>;
+
+/// Place the over-the-shoulder follow camera behind + above the LOCAL predicted player, looking at
+/// its head, recomputed each frame in the [`CameraYaw`] frame so the cam follows the predicted body
+/// and tracks mouse-look. Replaces M1's `PlayerController`-following branch of `update_camera_and_aim`
+/// with one that follows the materialized [`LocalNetPlayer`]. No-op until the local player is bodied
+/// (pre-connect / pre-replication).
+fn follow_local_net_player(
+    player: Option<LocalNetPlayerTransform>,
+    cam: Option<CameraTransform>,
+    yaw: Res<CameraYaw>,
+) {
     let (Some(player), Some(mut cam)) = (player, cam) else {
         return;
     };
@@ -191,62 +204,6 @@ fn update_camera_and_aim(
     let focus = player.translation + CAM_LOOK_AT;
     cam.translation = player.translation + yaw_rot * CAM_OFFSET;
     cam.look_at(focus, Vec3::Y);
-}
-
-/// Camera-relative WASD: move the player's `Transform` directly (kinematic),
-/// rotate the body to face the movement direction, and record the per-frame
-/// world velocity for the locomotion blend.
-///
-/// W/S move along the camera's forward/back, A/D strafe — all in the
-/// [`CameraYaw`] frame so movement tracks where the camera looks. The player
-/// root's yaw is snapped toward the movement heading; when idle the body keeps
-/// its last facing (so it doesn't snap back to a default).
-fn move_player(
-    time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
-    yaw: Res<CameraYaw>,
-    mut velocity: ResMut<PlayerVelocity>,
-    player: Option<Single<&mut Transform, With<PlayerController>>>,
-) {
-    let Some(mut tf) = player else {
-        velocity.0 = Vec3::ZERO;
-        return;
-    };
-
-    // WASD in the camera-yaw frame. Forward = -Z, right = +X.
-    let mut input = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) {
-        input.z -= 1.0;
-    }
-    if keys.pressed(KeyCode::KeyS) {
-        input.z += 1.0;
-    }
-    if keys.pressed(KeyCode::KeyA) {
-        input.x -= 1.0;
-    }
-    if keys.pressed(KeyCode::KeyD) {
-        input.x += 1.0;
-    }
-
-    let dt = time.delta_secs();
-    if input == Vec3::ZERO {
-        velocity.0 = Vec3::ZERO;
-        return;
-    }
-
-    let yaw_rot = Quat::from_axis_angle(Vec3::Y, yaw.0);
-    let world_dir = (yaw_rot * input.normalize()).normalize();
-    let step = world_dir * MOVE_SPEED * dt;
-    tf.translation += step;
-    velocity.0 = world_dir * MOVE_SPEED;
-
-    // Face the movement direction. The ArenaBody child carries a fixed π glTF
-    // yaw offset, so the character's WORLD forward is `root_rot * +Z`. Setting
-    // `root_rot = RotY(heading)` with `heading = atan2(dir.x, dir.z)` makes that
-    // world forward equal `world_dir` — no extra π here (that's already on the
-    // body child); adding it would double-flip and the character would moonwalk.
-    let heading_yaw = world_dir.x.atan2(world_dir.z);
-    tf.rotation = Quat::from_axis_angle(Vec3::Y, heading_yaw);
 }
 
 /// After animation has set bone Transforms, apply the aim pitch on top of the
