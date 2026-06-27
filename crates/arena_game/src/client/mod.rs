@@ -303,7 +303,14 @@ pub fn run_headless_client() {
     // dispatched LocalCues clear harmlessly; the trace lines are what the [H] checks assert on.
     crate::skills::register_client_event_trace(&mut app);
     crate::skills::register_client_cue_binding(&mut app);
-    app.add_systems(Update, (trace_replicated_players, trace_replicated_health));
+    app.add_systems(
+        Update,
+        (
+            trace_replicated_players,
+            trace_replicated_health,
+            trace_replicated_round_state,
+        ),
+    );
 
     // [H] AUTOMOVE hook: feed a constant forward movement input so the headless movement-replication
     // check can drive the server controller without a keyboard. Off unless ARENA_AUTOMOVE=1.
@@ -323,13 +330,19 @@ pub fn run_headless_client() {
     app.run();
 }
 
-/// [H] AUTOCAST: set [`net::CastIntent`] to firebolt exactly once, after both the local player and
-/// at least one remote player are materialized, so `send_cast_requests` has a target hint to send.
-/// Repeats the intent until a request is actually sent (the send system clears it), so a transient
-/// "sender not ready" frame doesn't swallow the only cast.
-#[allow(clippy::type_complexity)]
+/// [H] AUTOCAST: set [`net::CastIntent`] to firebolt on a CADENCE (default ~0.8s), once both the
+/// local player and an opponent are materialized so `send_cast_requests` has a target hint. Repeating
+/// (not one-shot) so a headless AUTOCAST client drives a FULL best-of-3 match: it keeps casting across
+/// rounds, killing the opponent each round until one side reaches the match-win threshold (Task 19).
+///
+/// Cadence is `ARENA_AUTOCAST_PERIOD` seconds (default 0.8) — comfortably above firebolt's ~0.6s cast
+/// time so requests don't pile up behind an in-flight cast (the server skips a caster mid-cast). The
+/// server is authoritative for whether a given cast lands; firing continuously is safe — a stray cast
+/// during a countdown/round-over window is harmless (the per-round reset heals both players on entry
+/// to Active, and only deaths during Active count).
 fn headless_autocast(
-    mut fired: Local<bool>,
+    time: Res<Time>,
+    mut accum: Local<f32>,
     mut intent: ResMut<net::CastIntent>,
     local: Query<
         (),
@@ -346,17 +359,20 @@ fn headless_autocast(
         ),
     >,
 ) {
-    if *fired {
-        return;
-    }
     // Need our own player + an opponent before the request carries a useful target hint.
     if local.iter().next().is_none() || remotes.iter().next().is_none() {
         return;
     }
-    if intent.0.is_none() {
-        intent.0 = Some("firebolt".to_string());
-        info!("headless AUTOCAST: requesting firebolt cast");
-        *fired = true;
+    let period = std::env::var("ARENA_AUTOCAST_PERIOD")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.8);
+    *accum += time.delta_secs();
+    if *accum >= period {
+        *accum = 0.0;
+        if intent.0.is_none() {
+            intent.0 = Some("firebolt".to_string());
+        }
     }
 }
 
@@ -412,6 +428,33 @@ fn trace_replicated_health(
             serde_json::json!({ "obelisk_id": net_id.0, "current": health.current,
                 "max": health.max }),
         );
+    }
+}
+
+/// [H] Trace each replicated `RoundStateMessage` the headless client receives, so the round-machine
+/// check (Task 19) can assert the best-of-3 flow replicates over the wire (phase transitions, the
+/// score increments, and the terminal `MatchOver`). Dedups consecutive identical (phase, scores,
+/// winner) so the trace carries transitions, not the ~1/sec countdown re-broadcasts.
+#[allow(clippy::type_complexity)]
+fn trace_replicated_round_state(
+    mut receivers: Query<
+        &mut lightyear::prelude::MessageReceiver<crate::net::protocol::RoundStateMessage>,
+    >,
+    mut last: Local<Option<(u8, [(String, u8); 2], String)>>,
+) {
+    for mut rx in &mut receivers {
+        for msg in rx.receive() {
+            let key = (msg.phase, msg.scores.clone(), msg.winner.clone());
+            if last.as_ref() == Some(&key) {
+                continue; // skip the per-second countdown re-broadcasts
+            }
+            *last = Some(key);
+            crate::trace::event(
+                "client_round_state",
+                serde_json::json!({ "phase": msg.phase, "countdown": msg.countdown,
+                    "scores": msg.scores, "winner": msg.winner }),
+            );
+        }
     }
 }
 

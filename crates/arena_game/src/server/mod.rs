@@ -17,10 +17,11 @@ use serde_json::json;
 use stat_core::StatBlock;
 
 use crate::net::protocol::{
-    CastRequestMessage, NetworkOwner, NetworkedHealth, NetworkedId, NetworkedPlayer,
-    NetworkedPosition, ObeliskNetId, PlayerInputMessage,
+    CastRequestMessage, EventChannel, NetworkOwner, NetworkedHealth, NetworkedId, NetworkedPlayer,
+    NetworkedPosition, ObeliskNetId, PlayerInputMessage, RoundStateMessage,
 };
 use crate::trace;
+use lightyear::prelude::MessageSender;
 
 pub struct ArenaServerPlugin;
 
@@ -28,6 +29,7 @@ impl Plugin for ArenaServerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NetworkedIdAlloc>()
             .init_resource::<ClientPlayerMap>()
+            .init_resource::<RoundState>()
             // Load the `.cast.ron` cast timelines the authoritative sim needs (firebolt). Without
             // these, obelisk's `validate_casts` rejects every cast with `TimelineMissing`. The
             // windowed client loads these itself (`client::load_cast_assets`); the headless server
@@ -54,6 +56,18 @@ impl Plugin for ArenaServerPlugin {
                     // add_obelisk_sim_headless) so `nearest_enemy` sees a fresh pipeline.
                     drain_cast_requests,
                 ),
+            )
+            // Best-of-3 round machine (Task 19, guide §7). `detect_round_end` reads the death stream
+            // and credits the winner; `run_round_machine` drives the FSM (wait → countdown → active →
+            // round/match over) + resets/respawns on each new round; `broadcast_round_state` ships
+            // the `RoundStateMessage` to every client on a phase/score/countdown change. Ordered after
+            // `sync_networked_players` so players exist before the machine counts them; `detect_round_end`
+            // before `run_round_machine` so a death this frame is consumed by the FSM the same frame.
+            .add_systems(
+                Update,
+                (detect_round_end, run_round_machine, broadcast_round_state)
+                    .chain()
+                    .after(sync_networked_players),
             )
             // The authoritative controller runs in FixedUpdate so it ticks at the fixed 60 Hz the
             // physics group integrates on. `apply_player_rotation` (writes avian `Rotation`) is a
@@ -495,7 +509,8 @@ fn sync_networked_health(
         };
         let max = read.max_life_of(entity).unwrap_or(current);
         // Only write (and trace) on an actual change so replication ships a delta, not every tick.
-        if (health.current - current).abs() > f64::EPSILON || (health.max - max).abs() > f64::EPSILON
+        if (health.current - current).abs() > f64::EPSILON
+            || (health.max - max).abs() > f64::EPSILON
         {
             health.current = current;
             health.max = max;
@@ -590,5 +605,348 @@ fn trace_server_net_events(mut net: MessageReader<obelisk_bevy::net::NetEvent>) 
             ),
             other => trace::event("server_net_event", json!({ "event": format!("{other:?}") })),
         }
+    }
+}
+
+// =============================================================================================
+// Best-of-3 round state machine (Task 19, guide §7).
+//
+// The server owns the match flow and broadcasts it as a `RoundStateMessage` on the reliable
+// `EventChannel`. Flow:
+//   WaitingForPlayers  — until 2 ClientOf players exist.
+//   Countdown(t)       — ~3s pre-round; reset hp/effects + respawn both at markers on ENTRY.
+//   Active             — the duel; a round ends when a player's obelisk dies (NetEvent::EntityDied).
+//   RoundOver{winner}  — brief pause crediting the SURVIVOR; first to 2 wins → MatchOver.
+//   MatchOver{winner}  — terminal; the banner stays.
+//
+// Damage stays 100% server-authoritative (obelisk resolves it); this machine only reads the death
+// stream + resets state between rounds. The reset heals to max + clears effects (so a leftover burn
+// DoT doesn't pre-damage the next round) + interrupts any in-flight cast + teleports both back to
+// their spawn markers.
+// =============================================================================================
+
+/// Rounds needed to win the match (best-of-3 ⇒ first to 2).
+const ROUND_WINS_TO_MATCH: u8 = 2;
+/// Pre-round countdown length (seconds).
+const COUNTDOWN_SECS: f32 = 3.0;
+/// Pause between a round ending and the next countdown (seconds), so the result is readable.
+const ROUND_OVER_SECS: f32 = 2.0;
+
+/// The match phase. Mirrors `RoundStateMessage.phase` (0..=4) but carries the live timer/winner.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RoundPhase {
+    WaitingForPlayers,
+    Countdown(f32),
+    Active,
+    RoundOver { winner: String, remaining: f32 },
+    MatchOver { winner: String },
+}
+
+impl RoundPhase {
+    /// The wire phase tag (matches the `RoundStateMessage` docstring: 0 wait, 1 countdown, 2 active,
+    /// 3 round-over, 4 match-over).
+    fn wire_tag(&self) -> u8 {
+        match self {
+            RoundPhase::WaitingForPlayers => 0,
+            RoundPhase::Countdown(_) => 1,
+            RoundPhase::Active => 2,
+            RoundPhase::RoundOver { .. } => 3,
+            RoundPhase::MatchOver { .. } => 4,
+        }
+    }
+    fn countdown_secs(&self) -> f32 {
+        match self {
+            RoundPhase::Countdown(t) => *t,
+            RoundPhase::RoundOver { remaining, .. } => *remaining,
+            _ => 0.0,
+        }
+    }
+    fn winner(&self) -> String {
+        match self {
+            RoundPhase::RoundOver { winner, .. } | RoundPhase::MatchOver { winner } => {
+                winner.clone()
+            }
+            _ => String::new(),
+        }
+    }
+}
+
+/// Server-owned best-of-3 match state. `scores` is keyed by obelisk_id; `entered_active_for` guards
+/// the per-round reset so it runs exactly once on the Countdown→Active transition.
+#[derive(Resource)]
+pub struct RoundState {
+    phase: RoundPhase,
+    /// Round wins per obelisk_id. Populated when 2 players first appear.
+    scores: HashMap<String, u8>,
+    /// True when the phase/score changed and a `RoundStateMessage` must be (re)broadcast.
+    dirty: bool,
+    /// Set true on entering `Active`; the reset (heal/respawn) runs on the rising edge.
+    needs_round_reset: bool,
+}
+
+impl Default for RoundState {
+    fn default() -> Self {
+        Self {
+            phase: RoundPhase::WaitingForPlayers,
+            scores: HashMap::new(),
+            dirty: true, // broadcast the initial WaitingForPlayers once a client can receive it
+            needs_round_reset: false,
+        }
+    }
+}
+
+impl RoundState {
+    /// The two players' (obelisk_id, wins) in a stable order for the wire `scores` array. Falls back
+    /// to empty entries until both players are known.
+    fn wire_scores(&self) -> [(String, u8); 2] {
+        let mut ids: Vec<(&String, &u8)> = self.scores.iter().collect();
+        ids.sort_by(|a, b| a.0.cmp(b.0));
+        let mut out = [(String::new(), 0u8), (String::new(), 0u8)];
+        for (i, (id, wins)) in ids.into_iter().take(2).enumerate() {
+            out[i] = (id.clone(), *wins);
+        }
+        out
+    }
+}
+
+/// Detect a round ending: while `Active`, read obelisk's `EntityDied` stream. The SURVIVOR (the
+/// living player other than the one who died) wins the round; their score increments. Transition to
+/// `RoundOver` (or `MatchOver` if they reached the win threshold). Reads obelisk's `NetEvent` (stable
+/// string ids) via an independent cursor from the egress/trace readers.
+fn detect_round_end(
+    mut net: MessageReader<obelisk_bevy::net::NetEvent>,
+    mut round: ResMut<RoundState>,
+    players: Query<&ObeliskNetId, With<NetworkedPlayer>>,
+) {
+    use obelisk_bevy::net::NetEvent;
+    // Only deaths during the live round count.
+    if round.phase != RoundPhase::Active {
+        // Still drain the stream so a death during countdown/reset isn't mis-attributed next round.
+        for _ in net.read() {}
+        return;
+    }
+    let all_ids: Vec<String> = players.iter().map(|o| o.0.clone()).collect();
+    for ev in net.read() {
+        let NetEvent::EntityDied { target, .. } = ev else {
+            continue;
+        };
+        // The winner is the OTHER player (the survivor). Robust against whether `killer` is set
+        // (a burn-DoT death may have no killer attribution).
+        let Some(winner) = all_ids.iter().find(|id| *id != target).cloned() else {
+            continue;
+        };
+        let wins = {
+            let w = round.scores.entry(winner.clone()).or_insert(0);
+            *w += 1;
+            *w
+        };
+        trace::event(
+            "round_won",
+            json!({ "winner": winner, "loser": target, "wins": wins }),
+        );
+        if wins >= ROUND_WINS_TO_MATCH {
+            round.phase = RoundPhase::MatchOver {
+                winner: winner.clone(),
+            };
+            trace::event("match_over", json!({ "winner": winner, "wins": wins }));
+        } else {
+            round.phase = RoundPhase::RoundOver {
+                winner,
+                remaining: ROUND_OVER_SECS,
+            };
+        }
+        round.dirty = true;
+        break; // one death ends the round; ignore any same-frame extras
+    }
+}
+
+/// Drive the round FSM by wall/real time each `Update`. Handles: waiting → countdown (once 2 players
+/// exist) → active (with the per-round reset on entry) → round-over pause → next countdown. The reset
+/// (heal/clear-effects/respawn) runs here on the Countdown→Active edge via `reset_for_new_round`.
+#[allow(clippy::type_complexity)]
+fn run_round_machine(
+    time: Res<Time>,
+    mut round: ResMut<RoundState>,
+    mut players: Query<
+        (
+            Entity,
+            &ObeliskNetId,
+            &mut Attributes,
+            &mut Position,
+            &mut Transform,
+            &mut NetworkedPosition,
+            &NetworkOwner,
+        ),
+        With<NetworkedPlayer>,
+    >,
+    mut commands: Commands,
+    client_map: Res<ClientPlayerMap>,
+) {
+    let dt = time.delta_secs();
+    let player_count = players.iter().count();
+
+    // Lazily register both players in `scores` (0 wins) once they exist, so the wire `scores` array
+    // carries both obelisk_ids from the first broadcast.
+    if player_count >= 2 {
+        for (_, net_id, ..) in &players {
+            if !round.scores.contains_key(&net_id.0) {
+                round.scores.insert(net_id.0.clone(), 0);
+                round.dirty = true;
+            }
+        }
+    }
+
+    match round.phase.clone() {
+        RoundPhase::WaitingForPlayers => {
+            if player_count >= 2 {
+                round.phase = RoundPhase::Countdown(COUNTDOWN_SECS);
+                round.dirty = true;
+                trace::event("round_phase", json!({ "phase": "countdown" }));
+            }
+        }
+        RoundPhase::Countdown(t) => {
+            // If a player vanished mid-countdown, fall back to waiting.
+            if player_count < 2 {
+                round.phase = RoundPhase::WaitingForPlayers;
+                round.dirty = true;
+                return;
+            }
+            let nt = t - dt;
+            if nt <= 0.0 {
+                round.phase = RoundPhase::Active;
+                round.needs_round_reset = true;
+                round.dirty = true;
+                trace::event("round_phase", json!({ "phase": "active" }));
+            } else {
+                // Re-broadcast only when the displayed (ceil'd) second changes, not every frame, so
+                // the wire carries ~1 countdown update/sec instead of 60.
+                round.dirty |= t.ceil() != nt.ceil();
+                round.phase = RoundPhase::Countdown(nt);
+            }
+        }
+        RoundPhase::Active => {
+            // On the rising edge into Active, reset + respawn both players for the new round.
+            if round.needs_round_reset {
+                round.needs_round_reset = false;
+                reset_for_new_round(&mut players, &mut commands, &client_map);
+                trace::event("round_reset", json!({ "players": player_count }));
+            }
+        }
+        RoundPhase::RoundOver { winner, remaining } => {
+            let nr = remaining - dt;
+            if nr <= 0.0 {
+                // Next round: back to countdown (the reset happens on the Countdown→Active edge).
+                round.phase = RoundPhase::Countdown(COUNTDOWN_SECS);
+                round.dirty = true;
+                trace::event("round_phase", json!({ "phase": "countdown" }));
+            } else {
+                // Throttle the round-over countdown re-broadcast to ~1/sec (see Countdown above).
+                round.dirty |= remaining.ceil() != nr.ceil();
+                round.phase = RoundPhase::RoundOver {
+                    winner,
+                    remaining: nr,
+                };
+            }
+        }
+        RoundPhase::MatchOver { .. } => { /* terminal — hold the banner */ }
+    }
+}
+
+/// Per-round reset (runs on the Countdown→Active edge): heal every player to full, clear effects
+/// (drops a leftover burn DoT), interrupt any in-flight cast, and teleport both back to their fixed
+/// spawn markers (avian `Position` + `Transform` + the replicated `NetworkedPosition`). Slot is by
+/// the player's connection order in `ClientPlayerMap` so the two land at the two markers consistently.
+#[allow(clippy::type_complexity)]
+fn reset_for_new_round(
+    players: &mut Query<
+        (
+            Entity,
+            &ObeliskNetId,
+            &mut Attributes,
+            &mut Position,
+            &mut Transform,
+            &mut NetworkedPosition,
+            &NetworkOwner,
+        ),
+        With<NetworkedPlayer>,
+    >,
+    commands: &mut Commands,
+    client_map: &ClientPlayerMap,
+) {
+    // Stable slot assignment: order client ids the same way `sync_networked_players` did (insertion
+    // order isn't stable across a HashMap, so sort by client id for determinism).
+    let mut ordered: Vec<(u64, Entity)> = client_map.0.iter().map(|(k, v)| (*k, *v)).collect();
+    ordered.sort_by_key(|(cid, _)| *cid);
+    let slot_of: HashMap<Entity, usize> = ordered
+        .iter()
+        .enumerate()
+        .map(|(i, (_, e))| (*e, i))
+        .collect();
+
+    for (entity, net_id, mut attrs, mut position, mut transform, mut netpos, _owner) in
+        players.iter_mut()
+    {
+        // Heal to full + restore mana + clear effects (drop any lingering DoT/buff).
+        let max_life = attrs.0.computed_max_life();
+        let max_mana = attrs.0.computed_max_mana();
+        attrs.0.current_life = max_life;
+        attrs.0.current_mana = max_mana;
+        attrs.0.effects.clear();
+
+        // Interrupt any in-flight cast so the new round starts clean.
+        commands.entity(entity).interrupt_cast();
+
+        // Respawn at the fixed marker for this player's slot.
+        let slot = slot_of
+            .get(&entity)
+            .copied()
+            .unwrap_or(0)
+            .min(SPAWN_MARKERS.len() - 1);
+        let spawn = SPAWN_MARKERS[slot];
+        position.0 = spawn;
+        transform.translation = spawn;
+        netpos.x = spawn.x;
+        netpos.y = spawn.y;
+        netpos.z = spawn.z;
+
+        trace::event(
+            "player_respawn",
+            json!({ "obelisk_id": net_id.0, "pos": [spawn.x, spawn.y, spawn.z],
+                    "life": max_life }),
+        );
+    }
+}
+
+/// Broadcast the current `RoundStateMessage` to every connected client on the reliable `EventChannel`
+/// whenever the round state is `dirty` (phase/score/countdown changed). Clears the flag after sending.
+/// `match_seed` is the replicated session seed (forward-prep for Stage B; informational in Stage A).
+fn broadcast_round_state(
+    mut round: ResMut<RoundState>,
+    mut senders: Query<&mut MessageSender<RoundStateMessage>, With<ClientOf>>,
+) {
+    if !round.dirty {
+        return;
+    }
+    // Don't clear `dirty` until at least one sender exists, else the initial states are lost before
+    // a client connects (the reliable channel only delivers to currently-connected senders).
+    let mut sent = false;
+    let msg = RoundStateMessage {
+        phase: round.phase.wire_tag(),
+        countdown: round.phase.countdown_secs(),
+        scores: round.wire_scores(),
+        winner: round.phase.winner(),
+        match_seed: crate::net::session_seed(),
+    };
+    for mut sender in &mut senders {
+        sender.send::<EventChannel>(msg.clone());
+        sent = true;
+    }
+    if sent {
+        round.dirty = false;
+        trace::event(
+            "round_state",
+            json!({ "phase": msg.phase, "countdown": msg.countdown,
+                    "scores": msg.scores, "winner": msg.winner }),
+        );
     }
 }

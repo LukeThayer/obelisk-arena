@@ -164,10 +164,7 @@ fn spawn_bar(commands: &mut Commands, local: bool, frame_node: Node, fill_color:
 /// the client renders exactly what the server replicated, never computing damage.
 #[allow(clippy::type_complexity)]
 fn update_health_bars(
-    players: Query<
-        (&NetworkedHealth, &ObeliskNetId, Has<LocalNetPlayer>),
-        With<NetworkedPlayer>,
-    >,
+    players: Query<(&NetworkedHealth, &ObeliskNetId, Has<LocalNetPlayer>), With<NetworkedPlayer>>,
     mut fills: Query<(&HealthBarFill, &mut Node), Without<HealthBarLabel>>,
     mut labels: Query<(&HealthBarLabel, &mut Text)>,
 ) {
@@ -187,7 +184,13 @@ fn update_health_bars(
         let snap = if fill.local { &local } else { &opponent };
         let frac = snap
             .as_ref()
-            .map(|(cur, max, _)| if *max > 0.0 { (cur / max).clamp(0.0, 1.0) } else { 0.0 })
+            .map(|(cur, max, _)| {
+                if *max > 0.0 {
+                    (cur / max).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            })
             .unwrap_or(0.0);
         node.width = Val::Percent((frac * 100.0) as f32);
     }
@@ -233,10 +236,7 @@ struct HitFlash {
 #[allow(clippy::type_complexity)]
 fn spawn_damage_feedback(
     mut receivers: Query<&mut MessageReceiver<NetEventMessage>>,
-    targets: Query<
-        (&ObeliskNetId, &NetworkedPosition, Has<LocalNetPlayer>),
-        With<NetworkedPlayer>,
-    >,
+    targets: Query<(&ObeliskNetId, &NetworkedPosition, Has<LocalNetPlayer>), With<NetworkedPlayer>>,
     mut commands: Commands,
 ) {
     use obelisk_bevy::net::NetEvent;
@@ -251,8 +251,7 @@ fn spawn_damage_feedback(
                 continue;
             };
             // Find the replicated body for this obelisk id.
-            let Some((_, netpos, is_local)) =
-                targets.iter().find(|(id, _, _)| id.0 == target)
+            let Some((_, netpos, is_local)) = targets.iter().find(|(id, _, _)| id.0 == target)
             else {
                 continue;
             };
