@@ -110,15 +110,16 @@ fn egress_net_events(
     }
 }
 
-/// Register the CLIENT-side trace of the replicated combat events + cues (guide §5.5/§8). Drains
-/// the replicated `NetEventMessage` (CastBegan / DamageResolved / …) and `CueWireMessage` streams
-/// and emits a trace line per item, so the headless harness can assert that BOTH clients receive
-/// the server-authoritative combat events + a cue, and that the echoed damage matches the server's.
+/// Register the CLIENT-side trace of the replicated combat events (guide §5.5/§8). Drains the
+/// replicated `NetEventMessage` stream (CastBegan / DamageResolved / …) → one trace line per event,
+/// so the headless harness can assert BOTH clients receive the server-authoritative combat events
+/// and that the echoed damage matches the server's.
 ///
-/// This is the OBSERVABILITY half; the actual cosmetics dispatch (+ de-dup) is
-/// `client::cosmetics` (Task 16). Added by both client modes (windowed + headless).
+/// The CUE stream (`CueWireMessage`) is drained separately by [`register_client_cue_binding`] (the
+/// single drain point — `MessageReceiver::receive()` drains, so only one consumer may read it).
+/// Added by both client modes.
 pub fn register_client_event_trace(app: &mut App) {
-    app.add_systems(Update, (trace_received_net_events, trace_received_cues));
+    app.add_systems(Update, trace_received_net_events);
 }
 
 /// Drain the replicated `NetEventMessage` stream → one trace line per event. The damage value here
@@ -163,8 +164,40 @@ fn trace_received_net_events(mut receivers: Query<&mut MessageReceiver<NetEventM
     }
 }
 
-/// Drain the replicated `CueWireMessage` stream → one trace line per cue received.
-fn trace_received_cues(mut receivers: Query<&mut MessageReceiver<CueWireMessage>>) {
+/// Register the CLIENT cue consumer (Task 16, guide §6.5). The SINGLE drain point for the replicated
+/// `CueWireMessage` stream: it traces each received cue (`client_cue_received`), de-dups against the
+/// local player's own predicted cues, and feeds the surviving cues into the cosmetics consumer via
+/// the existing [`LocalCue`] channel (so `client::cosmetics::spawn_cue_cosmetics` plays them).
+///
+/// De-dup (guide §6.5): the LOCAL predicting player fires its OWN `on_cast`/projectile cues locally
+/// (Task 17) for zero latency, so a replicated cue whose `source_id == local player's ObeliskId` AND
+/// whose kind is a predicted kind (`OnCast`) is SKIPPED — the predicted copy already played.
+/// Resolution-dependent cues (`OnHit`/impact) always come from the server and are never de-duped.
+///
+/// Headless mode adds this too (so the [H] `client_cue_received` + `cue_dispatch` traces appear and
+/// the single-drain invariant holds); it just has no `spawn_cue_cosmetics` reader, so the emitted
+/// `LocalCue`s harmlessly clear.
+pub fn register_client_cue_binding(app: &mut App) {
+    // Ensure the LocalCue channel exists even on the headless client (the windowed client already
+    // adds it in `register_cue_egress`; `add_message` is idempotent-safe via Bevy's dedup).
+    app.add_message::<crate::client::cosmetics::LocalCue>();
+    app.add_systems(Update, consume_replicated_cues);
+}
+
+/// Drain replicated `CueWireMessage`s, trace + de-dup, forward survivors as `LocalCue`.
+#[allow(clippy::type_complexity)]
+fn consume_replicated_cues(
+    mut receivers: Query<&mut MessageReceiver<CueWireMessage>>,
+    local: Query<
+        &crate::net::protocol::ObeliskNetId,
+        (
+            With<crate::net::protocol::NetworkedPlayer>,
+            With<crate::client::net::LocalNetPlayer>,
+        ),
+    >,
+    mut out: MessageWriter<crate::client::cosmetics::LocalCue>,
+) {
+    let local_id: Option<String> = local.iter().next().map(|o| o.0.clone());
     for mut rx in &mut receivers {
         for CueWireMessage(m) in rx.receive() {
             crate::trace::event(
@@ -173,6 +206,23 @@ fn trace_received_cues(mut receivers: Query<&mut MessageReceiver<CueWireMessage>
                 serde_json::json!({ "cue_id": m.cue_id, "source_id": m.source_id,
                     "cue_kind": format!("{:?}", m.kind) }),
             );
+            // De-dup: skip a replicated predicted-kind cue for our own player (already played
+            // locally by the predicted sim). OnHit/impact always plays (server-authoritative).
+            let is_own = local_id.as_deref() == Some(m.source_id.as_str());
+            let is_predicted_kind = m.kind == arena_skills::CueKind::OnCast;
+            if is_own && is_predicted_kind {
+                crate::trace::event(
+                    "cue_deduped",
+                    serde_json::json!({ "cue_id": m.cue_id, "source_id": m.source_id }),
+                );
+                continue;
+            }
+            crate::trace::event(
+                "cue_dispatch",
+                serde_json::json!({ "cue_id": m.cue_id, "source_id": m.source_id,
+                    "cue_kind": format!("{:?}", m.kind) }),
+            );
+            out.write(crate::client::cosmetics::LocalCue(m));
         }
     }
 }

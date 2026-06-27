@@ -182,8 +182,12 @@ pub fn run_windowed_client() {
     app.add_plugins(replication::ReplicationSmoothingPlugin);
     // Stage-A own-movement prediction (predict-locally-snap-to-server fallback, see prediction.rs).
     app.add_plugins(prediction::LocalPredictionPlugin);
-    // Trace the replicated NetEvent + cue streams (Task 15). Task 16 adds the cosmetics consumer.
+    // Trace the replicated NetEvent stream (Task 15) + consume the replicated cues → cosmetics
+    // (Task 16): `register_client_cue_binding` drains CueWireMessage, de-dups the local player's own
+    // predicted cue, and feeds survivors to `spawn_cue_cosmetics` via the LocalCue channel. So
+    // replicated firebolt VFX play on the windowed client for BOTH peers' casts.
     crate::skills::register_client_event_trace(&mut app);
+    crate::skills::register_client_cue_binding(&mut app);
     app.add_systems(
         Update,
         (
@@ -287,9 +291,11 @@ pub fn run_headless_client() {
     app.add_plugins(replication::ReplicationSmoothingPlugin);
     // Stage-A own-movement prediction (predict-locally-snap-to-server fallback, see prediction.rs).
     app.add_plugins(prediction::LocalPredictionPlugin);
-    // [H] Trace the replicated combat events (NetEventMessage) + cues (CueWireMessage) so the
-    // headless harness can assert both clients receive CastBegan/DamageResolved + a cue (Task 15).
+    // [H] Trace the replicated combat events (NetEventMessage), and consume the replicated cues
+    // (CueWireMessage → trace + de-dup + dispatch). Headless has no cosmetics reader, so the
+    // dispatched LocalCues clear harmlessly; the trace lines are what the [H] checks assert on.
     crate::skills::register_client_event_trace(&mut app);
+    crate::skills::register_client_cue_binding(&mut app);
     app.add_systems(Update, trace_replicated_players);
 
     // [H] AUTOMOVE hook: feed a constant forward movement input so the headless movement-replication
