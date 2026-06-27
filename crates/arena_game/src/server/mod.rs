@@ -44,6 +44,9 @@ impl Plugin for ArenaServerPlugin {
                     // (FixedUpdate, below) → ship the avian-integrated pose back (Update).
                     drain_player_inputs,
                     sync_player_positions,
+                    // HP mirror (Task 18): mirror each player's obelisk life → replicated
+                    // NetworkedHealth so the client HUD reads server-authoritative hp.
+                    sync_networked_health,
                     // Cast pipeline (Task 14): drain client cast_requests → re-validate
                     // server-side (re-acquire target) → cast_skill_at → obelisk's validate_casts
                     // gates the rest. Ordered after `sync_networked_players` so the ClientPlayerMap
@@ -461,6 +464,44 @@ fn sync_player_positions(
                     "pos": [netpos.x, netpos.y, netpos.z],
                     "yaw": netpos.yaw,
                 }),
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// HP mirror (Task 18, guide §5.6): mirror obelisk life → replicated `NetworkedHealth`.
+//
+// The obelisk sim owns the authoritative life (`Attributes`/`StatBlock.current_life`); the client
+// HUD must read a REPLICATED snapshot, not compute damage. Each `Update` we copy `life_of` +
+// `max_life_of` (via `ObeliskRead`) into the player's `NetworkedHealth { current, max }`. Lightyear
+// replicates the component change to every client (the spawn already inserted `NetworkedHealth`).
+//
+// We write the component every frame the value differs (not unconditionally) so lightyear only
+// ships a delta on a real hp change — and so a throttled trace fires exactly on the hp drop the
+// headless [H] check asserts (50 → 30 after the first firebolt hit).
+// ---------------------------------------------------------------------------------------------
+
+/// Mirror each networked player's obelisk life into its replicated `NetworkedHealth`. Reads
+/// `ObeliskRead` (the authoritative life facade); writes the component only when it changes so
+/// lightyear ships a delta and the trace fires on the real drop.
+fn sync_networked_health(
+    read: ObeliskRead,
+    mut players: Query<(Entity, &ObeliskNetId, &mut NetworkedHealth), With<NetworkedPlayer>>,
+) {
+    for (entity, net_id, mut health) in &mut players {
+        let Some(current) = read.life_of(entity) else {
+            continue;
+        };
+        let max = read.max_life_of(entity).unwrap_or(current);
+        // Only write (and trace) on an actual change so replication ships a delta, not every tick.
+        if (health.current - current).abs() > f64::EPSILON || (health.max - max).abs() > f64::EPSILON
+        {
+            health.current = current;
+            health.max = max;
+            trace::event(
+                "hp",
+                json!({ "obelisk_id": net_id.0, "current": current, "max": max }),
             );
         }
     }

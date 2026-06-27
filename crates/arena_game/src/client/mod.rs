@@ -7,6 +7,7 @@
 
 pub mod controller;
 pub mod cosmetics;
+pub mod hud;
 pub mod net;
 pub mod prediction;
 pub mod replication;
@@ -191,6 +192,9 @@ pub fn run_windowed_client() {
     // Predicted own-cast (Task 17): play the local on_cast + cosmetic projectile INSTANTLY on cast,
     // with NO ResolveHits / Hitbox / CombatRng (Stage-A invariant). Damage arrives from the server.
     crate::skills::register_predicted_sim(&mut app);
+    // HUD (Task 18 + 19): hp bars driven by replicated NetworkedHealth, floating damage + hit flash
+    // from DamageResolved, and the round/score banner from RoundStateMessage. Windowed-only.
+    app.add_plugins(hud::ArenaHudPlugin);
     app.add_systems(
         Update,
         (
@@ -299,7 +303,7 @@ pub fn run_headless_client() {
     // dispatched LocalCues clear harmlessly; the trace lines are what the [H] checks assert on.
     crate::skills::register_client_event_trace(&mut app);
     crate::skills::register_client_cue_binding(&mut app);
-    app.add_systems(Update, trace_replicated_players);
+    app.add_systems(Update, (trace_replicated_players, trace_replicated_health));
 
     // [H] AUTOMOVE hook: feed a constant forward movement input so the headless movement-replication
     // check can drive the server controller without a keyboard. Off unless ARENA_AUTOMOVE=1.
@@ -382,6 +386,32 @@ fn trace_replicated_players(
                 serde_json::json!({ "owner": owner.0, "obelisk_id": obelisk_id }),
             );
         }
+    }
+}
+
+/// [H] Trace the replicated `NetworkedHealth` whenever it CHANGES on this client — proves the
+/// server-authoritative hp mirror (Task 18) replicates over the wire and drops on a hit (50 → 30).
+/// `Changed<NetworkedHealth>` fires only on a real delta, so the trace mirrors the server's `hp`
+/// stream from the receiving end. Keyed by the replicated `ObeliskNetId`.
+#[allow(clippy::type_complexity)]
+fn trace_replicated_health(
+    changed: Query<
+        (
+            &crate::net::protocol::ObeliskNetId,
+            &crate::net::protocol::NetworkedHealth,
+        ),
+        (
+            With<crate::net::protocol::NetworkedPlayer>,
+            Changed<crate::net::protocol::NetworkedHealth>,
+        ),
+    >,
+) {
+    for (net_id, health) in &changed {
+        crate::trace::event(
+            "client_hp",
+            serde_json::json!({ "obelisk_id": net_id.0, "current": health.current,
+                "max": health.max }),
+        );
     }
 }
 
