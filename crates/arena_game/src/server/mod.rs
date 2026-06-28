@@ -18,7 +18,7 @@ use stat_core::StatBlock;
 
 use crate::net::protocol::{
     CastRequestMessage, EventChannel, NetworkOwner, NetworkedHealth, NetworkedId, NetworkedPlayer,
-    NetworkedPosition, ObeliskNetId, PlayerInputMessage, RoundStateMessage,
+    NetworkedPosition, ObeliskNetId, PlayerCustomization, PlayerInputMessage, RoundStateMessage,
 };
 use crate::trace;
 use lightyear::prelude::MessageSender;
@@ -191,6 +191,8 @@ fn sync_networked_players(
                 NetworkedId(net_id),
                 ObeliskNetId(obelisk_id.clone()),
                 NetworkedHealth::default(),
+                // Replicated appearance — default witch on spawn; live edits arrive via D6.
+                PlayerCustomization::default(),
                 NetworkedPosition::from_vec3(spawn),
                 // Latest input from this client, written by `drain_player_inputs` (Update) and read
                 // by the FixedUpdate controller. Defaults to no-movement so an idle player stands.

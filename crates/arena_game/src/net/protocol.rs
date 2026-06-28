@@ -11,6 +11,8 @@
 use avian3d::prelude::{LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
 use core::time::Duration;
+
+use crate::client::parts::PartSelection;
 use lightyear::interpolation::registry::InterpolationRegistrationExt;
 use lightyear::prediction::registry::PredictionRegistrationExt;
 use lightyear::prelude::{
@@ -38,6 +40,13 @@ impl Plugin for ProtocolPlugin {
         // --- Health (replicated; HUD source of truth, server-authoritative). ---
         // No interpolation: hp is discrete and damage feedback feels best snapping.
         app.register_component::<NetworkedHealth>();
+
+        // --- Character appearance (replicated per-player; drives each rig's slot visibility). ---
+        // Initial-value replication is reliable in this lightyear setup — that's what the spawn
+        // relies on (each player spawns with `PlayerCustomization::default()`). Live appearance
+        // changes are pushed via the reliable `CustomizeBroadcast` message path (D6), not by
+        // trusting component-update replication (which is unreliable here — see CLAUDE notes).
+        app.register_component::<PlayerCustomization>();
 
         // --- avian physics for the PREDICTED local player (Stage-A movement, M2.2). ---
         // Registered-but-DISABLED by default (`disable: true`); M2.2 opts the local player in
@@ -204,6 +213,16 @@ pub struct ObeliskNetId(pub String);
 pub struct NetworkedHealth {
     pub current: f64,
     pub max: f64,
+}
+
+/// Replicated per-player character appearance: the slot-based [`PartSelection`] that drives which
+/// `character.glb` meshes are visible on that player's rig. Replicated on spawn (initial value is
+/// reliable here) so every client materializes both players with a coherent costume; live edits are
+/// pushed via the reliable `CustomizeBroadcast` path (D6). `Default` is the default witch (via
+/// `PartSelection::default`).
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlayerCustomization {
+    pub parts: PartSelection,
 }
 
 /// Serializable world pose + obelisk cast state. Bevy's `Transform` doesn't serde, so the protocol

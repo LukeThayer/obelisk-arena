@@ -32,9 +32,12 @@
 //! wisp gates visibility on its `LocalWizardBody` marker (local player
 //! only). Arena applies to BOTH players' rigs: the ancestor check walks
 //! to [`ArenaBody`] (present on every spawned arena rig — local and
-//! remote alike). A single shared [`PartSelection`] resource drives all
-//! rigs to the same default witch; per-player replicated selection comes
-//! in a later task.
+//! remote alike), then to that rig's parent `NetworkedPlayer` entity.
+//! Each rig is driven PER-PLAYER:
+//!   - the LOCAL rig (its player carries [`LocalNetPlayer`]) reads the
+//!     LOCAL [`PartSelection`] resource — the one the customizer edits;
+//!   - each REMOTE rig reads its own player's replicated
+//!     [`PlayerCustomization`]`.parts`.
 //!
 //! Per-mesh `Visibility` is set on the `SkinnedMesh` child entities, NOT
 //! the body root. The local body root stays `Visibility::Hidden` (set in
@@ -42,12 +45,16 @@
 //! per-mesh under a `Hidden` root propagates to hidden — correct for
 //! the first-person case.
 
+use std::collections::HashSet;
+
 use bevy::camera::visibility::Visibility;
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::client::net::LocalNetPlayer;
 use crate::client::rig::ArenaBody;
+use crate::net::protocol::PlayerCustomization;
 
 pub struct PartsPlugin;
 
@@ -378,12 +385,19 @@ fn is_indexed_match(rest: &str, selected: u8, len: usize) -> bool {
 }
 
 /// Marker placed on every mesh entity once we've decided its
-/// visibility for the current selection. The cached `mesh_name` lets
-/// `refresh_arena_part_visibility_on_change` re-evaluate without
-/// walking back up the hierarchy to read the `Name` component.
+/// visibility for the current selection. Caches the glTF `name` (so
+/// `refresh_arena_part_visibility_on_change` re-evaluates without walking
+/// back up to read `Name`), the owning `player` (`NetworkedPlayer` entity)
+/// so the refresh can re-resolve that rig's selection, and `is_local` so
+/// the refresh knows whether to read the LOCAL [`PartSelection`] resource
+/// or the player's replicated [`PlayerCustomization`].
 #[derive(Component)]
 pub struct PartMesh {
     pub name: String,
+    /// The `NetworkedPlayer` entity this rig hangs under.
+    pub player: Entity,
+    /// Whether `player` is the LOCAL player (drives which selection source applies).
+    pub is_local: bool,
 }
 
 /// Newly-spawned skinned meshes not yet stamped with [`PartMesh`], with their optional `Name`.
@@ -393,11 +407,16 @@ type PendingPartMeshes<'w, 's> =
 
 /// Apply per-mesh visibility to newly-spawned skinned meshes under any [`ArenaBody`]
 /// (local + remote). Resolves each mesh entity to its glTF node-name (from the entity's
-/// own `Name` or its nearest named ancestor), queries the shared [`PartSelection`]
-/// resource, and stamps each mesh with [`PartMesh`] so it's processed exactly once.
+/// own `Name` or its nearest named ancestor) AND its owning `NetworkedPlayer` (the parent
+/// of the [`ArenaBody`] root). The LOCAL rig reads the LOCAL [`PartSelection`] resource;
+/// each REMOTE rig reads its player's replicated [`PlayerCustomization`]. Stamps each mesh
+/// with [`PartMesh`] so it's processed exactly once.
+#[allow(clippy::too_many_arguments)]
 fn apply_arena_part_visibility(
     mut commands: Commands,
-    selection: Res<PartSelection>,
+    local_selection: Res<PartSelection>,
+    customizations: Query<&PlayerCustomization>,
+    locals: Query<(), With<LocalNetPlayer>>,
     pending: PendingPartMeshes,
     parents: Query<&ChildOf>,
     names: Query<&Name>,
@@ -405,11 +424,15 @@ fn apply_arena_part_visibility(
     mut visibility: Query<&mut Visibility>,
 ) {
     for (entity, name) in &pending {
-        // Only process meshes that are descendants of an ArenaBody scene root.
-        // Both local and remote rigs carry ArenaBody, so this covers all arena characters.
-        if !ancestor_has_arena_body(entity, &parents, &body_marker) {
+        // Resolve the ArenaBody scene root this mesh hangs under (local + remote rigs both
+        // carry ArenaBody), then the rig's parent `NetworkedPlayer` entity.
+        let Some(body_root) = ancestor_arena_body(entity, &parents, &body_marker) else {
             continue;
-        }
+        };
+        let Some(player) = parents.get(body_root).ok().map(|p| p.0) else {
+            continue;
+        };
+        let is_local = locals.contains(player);
         // Resolve the glTF node-name: prefer the mesh entity's own `Name` (if
         // it's not an auto-generated "Mesh.NNN"), else walk up to the nearest
         // named ancestor. glTF imports the visible primitive under a node that
@@ -437,6 +460,7 @@ fn apply_arena_part_visibility(
             })
             .unwrap_or_default();
 
+        let selection = selection_for(player, is_local, &local_selection, &customizations);
         let vis = if selection.is_visible(&resolved) {
             Visibility::Inherited
         } else {
@@ -445,20 +469,44 @@ fn apply_arena_part_visibility(
         if let Ok(mut v) = visibility.get_mut(entity) {
             *v = vis;
         }
-        commands.entity(entity).insert(PartMesh { name: resolved });
+        commands.entity(entity).insert(PartMesh {
+            name: resolved,
+            player,
+            is_local,
+        });
     }
 }
 
-/// Re-evaluate visibility on all cached [`PartMesh`] entities whenever [`PartSelection`]
-/// changes. No-ops when the resource is unchanged (cheap every frame).
+/// Re-evaluate visibility on cached [`PartMesh`] entities whenever the selection driving them
+/// changes: the LOCAL [`PartSelection`] resource (customizer edits) re-evaluates LOCAL meshes;
+/// a player whose replicated [`PlayerCustomization`] changed (D6 broadcast / initial replication)
+/// re-evaluates that REMOTE rig's meshes. No-ops when nothing changed (cheap every frame).
 fn refresh_arena_part_visibility_on_change(
-    selection: Res<PartSelection>,
+    local_selection: Res<PartSelection>,
+    customizations: Query<&PlayerCustomization>,
+    changed_players: Query<Entity, Changed<PlayerCustomization>>,
     mut meshes: Query<(&PartMesh, &mut Visibility)>,
 ) {
-    if !selection.is_changed() {
+    let local_changed = local_selection.is_changed();
+    let changed: HashSet<Entity> = changed_players.iter().collect();
+    if !local_changed && changed.is_empty() {
         return;
     }
     for (part, mut vis) in &mut meshes {
+        let reeval = if part.is_local {
+            local_changed
+        } else {
+            changed.contains(&part.player)
+        };
+        if !reeval {
+            continue;
+        }
+        let selection = selection_for(
+            part.player,
+            part.is_local,
+            &local_selection,
+            &customizations,
+        );
         *vis = if selection.is_visible(&part.name) {
             Visibility::Inherited
         } else {
@@ -467,21 +515,39 @@ fn refresh_arena_part_visibility_on_change(
     }
 }
 
-/// Walk the `ChildOf` parent chain to confirm a mesh belongs to an
-/// [`ArenaBody`] before setting its visibility.
-fn ancestor_has_arena_body(
+/// The effective [`PartSelection`] for a rig: the LOCAL resource for the local player, else the
+/// player's replicated [`PlayerCustomization`] (falling back to the default witch if it hasn't
+/// replicated yet).
+fn selection_for(
+    player: Entity,
+    is_local: bool,
+    local_selection: &PartSelection,
+    customizations: &Query<&PlayerCustomization>,
+) -> PartSelection {
+    if is_local {
+        *local_selection
+    } else {
+        customizations
+            .get(player)
+            .map(|c| c.parts)
+            .unwrap_or_default()
+    }
+}
+
+/// Walk the `ChildOf` parent chain to find the [`ArenaBody`] scene root a mesh belongs to.
+fn ancestor_arena_body(
     entity: Entity,
     parents: &Query<&ChildOf>,
     marker: &Query<(), With<ArenaBody>>,
-) -> bool {
+) -> Option<Entity> {
     let mut cur = entity;
     loop {
         if marker.contains(cur) {
-            return true;
+            return Some(cur);
         }
         match parents.get(cur) {
             Ok(p) => cur = p.0,
-            Err(_) => return false,
+            Err(_) => return None,
         }
     }
 }
