@@ -115,6 +115,21 @@ fn predict_local_movement(
 
     position.0.x += new_planar.x * dt;
     position.0.z += new_planar.z * dt;
+
+    // Vertical physics: the SAME manual gravity + jump + ground clamp the server runs
+    // (server::run_player_controller), using the SAME shared constants + `LocalInput.jump`, so the
+    // predicted local player jumps/falls identically to the server and the reconcile (snap_local_to
+    // _server) has no residual Y to fight.
+    let grounded = position.0.y <= crate::net::GROUND_Y + 0.001;
+    if input.jump && grounded {
+        lin_vel.0.y = crate::net::JUMP_SPEED;
+    }
+    lin_vel.0.y -= crate::net::GRAVITY * dt;
+    position.0.y += lin_vel.0.y * dt;
+    if position.0.y <= crate::net::GROUND_Y {
+        position.0.y = crate::net::GROUND_Y;
+        lin_vel.0.y = 0.0;
+    }
 }
 
 /// **Reconcile**: snap the local body toward the server's authoritative `NetworkedPosition`. Within

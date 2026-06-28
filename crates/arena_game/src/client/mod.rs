@@ -331,8 +331,9 @@ fn bridge_windowed_input_to_local_input(
     local_input.movement = movement;
     local_input.yaw = yaw.0;
     local_input.pitch = pitch.0;
-    // No jump in Stage A (the server controller is kinematic + flat-arena); Space is the cast key.
-    local_input.jump = false;
+    // SPACE jumps: the server controller (and the local prediction) apply manual gravity + a ground
+    // clamp, so a grounded player holding Space launches up (JUMP_SPEED) and falls back to GROUND_Y.
+    local_input.jump = keys.pressed(KeyCode::Space);
 }
 
 /// Run the headless connectivity/movement client: MinimalPlugins + LogPlugin (no window, no

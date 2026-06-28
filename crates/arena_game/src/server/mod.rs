@@ -385,16 +385,31 @@ fn run_player_controller(
         let world_dir = Quat::from_axis_angle(Vec3::Y, input.yaw) * local;
         let desired = world_dir.normalize_or_zero() * MAX_SPEED;
 
-        // Approach the desired planar velocity (keep the existing Y for any future gravity/jump).
+        // Approach the desired planar velocity (the vertical velocity is handled below).
         let cur = Vec3::new(lin_vel.0.x, 0.0, lin_vel.0.z);
         let new_planar = cur.lerp(desired, ACCEL_LERP);
         lin_vel.0.x = new_planar.x;
         lin_vel.0.z = new_planar.z;
 
-        // Integrate Position from the planar velocity (kinematic). Y is held at the spawn height for
-        // the flat arena (no gravity/jump in Stage A; jump is a later cosmetic concern).
+        // Integrate Position from the planar velocity (kinematic).
         position.0.x += new_planar.x * dt;
         position.0.z += new_planar.z * dt;
+
+        // Vertical physics (manual gravity + jump + ground clamp), applied IDENTICALLY on the client
+        // prediction (client::prediction::predict_local_movement) using the SAME shared constants so
+        // the two integrate in lockstep. Avian's own gravity is NOT applied (kinematic body), so we
+        // integrate Y by hand. Order: read groundedness, jump on the rising input, apply gravity,
+        // integrate, then clamp to the platform.
+        let grounded = position.0.y <= crate::net::GROUND_Y + 0.001;
+        if input.jump && grounded {
+            lin_vel.0.y = crate::net::JUMP_SPEED;
+        }
+        lin_vel.0.y -= crate::net::GRAVITY * dt;
+        position.0.y += lin_vel.0.y * dt;
+        if position.0.y <= crate::net::GROUND_Y {
+            position.0.y = crate::net::GROUND_Y;
+            lin_vel.0.y = 0.0;
+        }
     }
 }
 
@@ -522,7 +537,6 @@ fn sync_player_positions(
         ),
         (With<NetworkedPlayer>, Changed<Position>),
     >,
-    spatial: SpatialQuery,
     mut throttle: Local<HashMap<Entity, u32>>,
 ) {
     for (entity, position, input, owner, mut netpos) in &mut q {
@@ -531,18 +545,10 @@ fn sync_player_positions(
         netpos.z = position.0.z;
         netpos.yaw = input.yaw;
         netpos.pitch = input.pitch;
-        // Derive airborne server-side, excluding THIS player from the ray (see the controller note).
-        let ray_origin = position.0 + Vec3::new(0.0, -1.0, 0.0);
-        let grounded = spatial
-            .cast_ray(
-                ray_origin,
-                Dir3::NEG_Y,
-                0.2,
-                true,
-                &SpatialQueryFilter::from_excluded_entities([entity]),
-            )
-            .is_some();
-        netpos.airborne = !grounded;
+        // Derive airborne server-side from the manual ground clamp (the green plane has no collider,
+        // so a downward raycast finds nothing and would report "always airborne"). The controller
+        // floors the player at `GROUND_Y`; a player meaningfully above it is airborne (jumping).
+        netpos.airborne = position.0.y > crate::net::GROUND_Y + 0.05;
 
         // Throttled pose trace (every ~30th change) so the headless movement-replication check can
         // confirm the server's authoritative NetworkedPosition is changing for the moving player.

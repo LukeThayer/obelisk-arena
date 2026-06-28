@@ -29,6 +29,21 @@ pub const TICK_HZ: u32 = 60;
 /// opponent connects. Defined once here so the two values can never drift apart.
 pub const ARENA_EYE_HEIGHT: f32 = 1.6;
 
+/// The stand height (world Y of a grounded player origin) — the witch's feet rest on the green
+/// visual plane at origin Y=1.0. The manual gravity clamp floors the player here. Shared by the
+/// server controller (`server::run_player_controller`) and the client prediction
+/// (`client::prediction::predict_local_movement`) so the two integrate IDENTICALLY (prediction
+/// lockstep).
+pub const GROUND_Y: f32 = 1.0;
+
+/// Manual downward acceleration (m/s²) applied to a player's vertical velocity each tick. The
+/// controller is KINEMATIC (avian's gravity is not applied), so gravity is integrated by hand,
+/// identically on server + client. Shared so the two can't drift.
+pub const GRAVITY: f32 = 20.0;
+
+/// Upward velocity (m/s) imparted on a grounded jump (Space). Shared server + client.
+pub const JUMP_SPEED: f32 = 7.0;
+
 /// Netcode protocol id. Bumped whenever the wire format changes incompatibly. Dev: 0.
 pub const PROTOCOL_ID: u64 = 0;
 
