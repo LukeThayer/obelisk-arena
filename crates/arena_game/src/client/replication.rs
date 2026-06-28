@@ -54,6 +54,20 @@ pub struct NetworkedPositionSmoothing {
     initialized: bool,
 }
 
+impl NetworkedPositionSmoothing {
+    /// World-space velocity estimate from the two most-recent pose samples
+    /// (`(cur_pos - prev_pos) / max(cur_time - prev_time, 1e-3)`). Drives the remote rig's
+    /// locomotion blend (Bug 2) so a moving opponent plays the correct directional walk clip
+    /// instead of sliding while idle. `Vec3::ZERO` until the buffer has captured a sample.
+    pub fn velocity(&self) -> Vec3 {
+        if !self.initialized {
+            return Vec3::ZERO;
+        }
+        let dt = (self.cur_time - self.prev_time).max(1e-3);
+        (self.cur_pos - self.prev_pos) / dt
+    }
+}
+
 /// Attach a [`NetworkedPositionSmoothing`] buffer to every remote `NetworkedPlayer` that lacks one.
 /// The LOCAL player is excluded (Task 12 owns its pose). Idempotent (polls for new replicas).
 #[allow(clippy::type_complexity)]

@@ -12,6 +12,7 @@ use bevy::{gltf::Gltf, prelude::*};
 use obelisk_bevy::prelude::{ActiveCast, SkillPhase};
 
 use super::net::{ChargeState, LocalNetPlayer};
+use super::replication::NetworkedPositionSmoothing;
 use crate::net::protocol::NetworkedPosition;
 
 /// Animation clip names baked into `character.glb`. Verified against the
@@ -315,6 +316,7 @@ pub fn drive_animation(
     mut roots: Query<(
         Option<&ActiveCast>,
         &NetworkedPosition,
+        Option<&NetworkedPositionSmoothing>,
         &mut LocalAnimBlend,
         Has<LocalNetPlayer>,
     )>,
@@ -332,7 +334,7 @@ pub fn drive_animation(
         let Some(root) = rig_root_of(anim_entity, &parents, &body_marker, &roots) else {
             continue;
         };
-        let Ok((active_cast, netpos, mut blend, is_local)) = roots.get_mut(root) else {
+        let Ok((active_cast, netpos, smoothing, mut blend, is_local)) = roots.get_mut(root) else {
             continue;
         };
 
@@ -363,8 +365,18 @@ pub fn drive_animation(
         };
         blend.casting = step_casting_blend(blend.casting, casting_target);
 
-        // No per-rig world velocity threaded yet → idle/casting_idle (Vec3::ZERO speed).
-        for (node, weight) in locomotion_blend(&rig, Vec3::ZERO, body_yaw, blend.casting) {
+        // Per-rig locomotion (Bug 2): the LOCAL player uses the camera yaw + zero velocity (it's
+        // first-person/hidden, so its walk clip is never seen). Each REMOTE rig uses ITS OWN yaw
+        // (the replicated `NetworkedPosition.yaw`) and ITS OWN world velocity (derived from the
+        // pose-stream smoothing buffer) so a moving opponent plays the correct directional walk
+        // clip facing the right way instead of sliding while idle.
+        let (rig_velocity, rig_yaw) = if is_local {
+            (Vec3::ZERO, body_yaw)
+        } else {
+            let vel = smoothing.map(|s| s.velocity()).unwrap_or(Vec3::ZERO);
+            (vel, netpos.yaw)
+        };
+        for (node, weight) in locomotion_blend(&rig, rig_velocity, rig_yaw, blend.casting) {
             player.play(node).repeat().set_weight(weight);
         }
     }
@@ -374,6 +386,7 @@ pub fn drive_animation(
 /// past an [`ArenaBody`] marker (so it's an arena rig) AND carries a [`LocalAnimBlend`] (the
 /// `NetworkedPlayer` root). Returns that root entity, or `None` if the anim player isn't under an
 /// arena rig. Lets [`drive_animation`] drive each of the N rigs from its own root state.
+#[allow(clippy::type_complexity)]
 fn rig_root_of(
     anim_entity: Entity,
     parents: &Query<&ChildOf>,
@@ -381,6 +394,7 @@ fn rig_root_of(
     roots: &Query<(
         Option<&ActiveCast>,
         &NetworkedPosition,
+        Option<&NetworkedPositionSmoothing>,
         &mut LocalAnimBlend,
         Has<LocalNetPlayer>,
     )>,
