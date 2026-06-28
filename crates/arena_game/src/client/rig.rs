@@ -311,7 +311,11 @@ pub fn drive_animation(
     mut anim: Query<(Entity, &mut AnimationPlayer)>,
     parents: Query<&ChildOf>,
     body_marker: Query<(), With<ArenaBody>>,
-    mut roots: Query<(Option<&ActiveCast>, &mut LocalAnimBlend, Has<LocalNetPlayer>)>,
+    mut roots: Query<(
+        Option<&ActiveCast>,
+        &mut LocalAnimBlend,
+        Has<LocalNetPlayer>,
+    )>,
     yaw: Res<super::controller::CameraYaw>,
     charge: Res<ChargeState>,
 ) {
@@ -361,7 +365,11 @@ fn rig_root_of(
     anim_entity: Entity,
     parents: &Query<&ChildOf>,
     body_marker: &Query<(), With<ArenaBody>>,
-    roots: &Query<(Option<&ActiveCast>, &mut LocalAnimBlend, Has<LocalNetPlayer>)>,
+    roots: &Query<(
+        Option<&ActiveCast>,
+        &mut LocalAnimBlend,
+        Has<LocalNetPlayer>,
+    )>,
 ) -> Option<Entity> {
     // First confirm it belongs to an arena rig at all.
     if !ancestor_has_body_marker(anim_entity, parents, body_marker) {

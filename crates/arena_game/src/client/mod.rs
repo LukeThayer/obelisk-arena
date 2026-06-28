@@ -267,7 +267,8 @@ fn bridge_windowed_cast_hold(
     mut charge: ResMut<net::ChargeState>,
 ) {
     let held = keys.pressed(KeyCode::Space) || mouse.pressed(MouseButton::Left);
-    let just_released = keys.just_released(KeyCode::Space) || mouse.just_released(MouseButton::Left);
+    let just_released =
+        keys.just_released(KeyCode::Space) || mouse.just_released(MouseButton::Left);
 
     if held {
         charge.secs = (charge.secs + time.delta_secs()).min(net::MAX_CHARGE_SECS);
