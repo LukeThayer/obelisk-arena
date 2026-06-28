@@ -448,9 +448,19 @@ fn drain_cast_requests(
             // Use the charged variant: `charge_mult(Some(c)) = 0.5 + (c/255)*1.5`.
             // charge=85 ≈ 1.0× (instant tap), charge=255 = 2.0× (full hold).
             // `u8` is inherently bounded [0, 255] — no extra clamp needed.
-            commands
-                .entity(caster)
-                .cast_skill_dir_charged(req.skill_id.clone(), dir, req.charge);
+            //
+            // Fire from the caster's EYE (`origin + Y*ARENA_EYE_HEIGHT`), the same height the client
+            // camera sits at. The client's `aim_dir` is the camera-forward ray FROM that eye, so a
+            // muzzle at the eye makes the bolt travel along the crosshair ray — a shot aimed at the
+            // opponent lands (Bug 1). Without the offset the bolt spawns at the feet (Y=1.0) and
+            // undershoots a crosshair-aimed shot.
+            let muzzle_offset = Vec3::Y * crate::net::ARENA_EYE_HEIGHT;
+            commands.entity(caster).cast_skill_dir_charged_from(
+                req.skill_id.clone(),
+                dir,
+                req.charge,
+                muzzle_offset,
+            );
         }
     }
 }

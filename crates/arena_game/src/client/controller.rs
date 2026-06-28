@@ -57,7 +57,11 @@ const PITCH_LIMIT: f32 = 85.0_f32 * std::f32::consts::PI / 180.0;
 /// Camera eye height above the player root transform in world units. Placing the
 /// camera at `player.translation + Vec3::Y * EYE_HEIGHT` puts it at roughly head
 /// level for the Polysplit rig (capsule half-height ~0.6 + ~1.0 upper body).
-const EYE_HEIGHT: f32 = 1.6;
+///
+/// Aliased to the shared [`crate::net::ARENA_EYE_HEIGHT`] so the camera eye and the server muzzle
+/// offset (which fires the firebolt from this exact height) can never drift apart — that shared
+/// height is what makes the crosshair ray equal the bolt path.
+const EYE_HEIGHT: f32 = crate::net::ARENA_EYE_HEIGHT;
 
 /// Name of the spine bone that drives upper-body aim lean. The Polysplit rig's
 /// spine chain is `pelvis_joint → waist_joint → chest_joint → neck_joint`;

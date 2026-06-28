@@ -21,6 +21,14 @@ pub const DEFAULT_PORT: u16 = 5000;
 /// Fixed tick duration. 60 Hz — must match on both peers or the sims desync.
 pub const TICK_HZ: u32 = 60;
 
+/// Camera eye height above the player root (world units). Shared by BOTH the first-person camera
+/// placement (`client::controller::EYE_HEIGHT`) and the server muzzle offset
+/// (`server::drain_cast_requests`). Because the camera sits at `origin + Y*ARENA_EYE_HEIGHT` and the
+/// firebolt now spawns at `origin + Y*ARENA_EYE_HEIGHT`, the bolt originates at the eye and travels
+/// along `aim_dir` (camera forward) — so the crosshair ray IS the bolt path and a shot aimed at the
+/// opponent connects. Defined once here so the two values can never drift apart.
+pub const ARENA_EYE_HEIGHT: f32 = 1.6;
+
 /// Netcode protocol id. Bumped whenever the wire format changes incompatibly. Dev: 0.
 pub const PROTOCOL_ID: u64 = 0;
 
