@@ -149,6 +149,11 @@ pub struct CueMessage {
     pub source_id: String,
     /// World position to spawn cosmetics at. `Vec3` serdes via bevy's `serialize` feature.
     pub position: Vec3,
+    /// The caster's aim direction (normalized) when the cue fired, so an OBSERVER can fly the
+    /// cosmetic projectile the right way (Bug 1b). Without it, observers default to `Vec3::Z`
+    /// (always-forward). `Vec3::ZERO` means "no direction supplied" (the consumer then falls back
+    /// to its local `AimDirs` lookup). Serdes via bevy's `serialize` feature, like `position`.
+    pub aim_dir: Vec3,
     /// Which timeline moment fired the cue.
     pub kind: CueKind,
 }
@@ -157,17 +162,21 @@ pub struct CueMessage {
 ///
 /// Pure (no bevy/lightyear), so it's testable headlessly and keeps `arena_skills` engine-neutral.
 /// The obelisk side supplies `source_id` by resolving the `CueEvent.source` `Entity` to its stable
-/// `ObeliskId` (via `ObeliskEntityIndex`) — `arena_game` does that lookup and calls this.
+/// `ObeliskId` (via `ObeliskEntityIndex`) — `arena_game` does that lookup and calls this. `aim_dir`
+/// is the caster's normalized facing when the cue fired (read from the caster's `ActiveCast`), so an
+/// observer can fly the cosmetic projectile the right way (Bug 1b); pass `Vec3::ZERO` if unknown.
 pub fn cue_event_to_message(
     cue_id: &str,
     source_id: &str,
     position: Vec3,
+    aim_dir: Vec3,
     kind: CueKind,
 ) -> CueMessage {
     CueMessage {
         cue_id: cue_id.into(),
         source_id: source_id.into(),
         position,
+        aim_dir,
         kind,
     }
 }

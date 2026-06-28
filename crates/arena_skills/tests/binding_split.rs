@@ -15,6 +15,7 @@ fn consumer_resolves_lanes_for_a_cue() {
         cue_id: "firebolt_cast".into(),
         source_id: "player".into(),
         position: Vec3::ZERO,
+        aim_dir: Vec3::ZERO,
         kind: CueKind::OnCast,
     };
     let lanes = resolve_cue(&reg, &m);
@@ -27,6 +28,7 @@ fn consumer_resolves_lanes_for_a_cue() {
         cue_id: "nope".into(),
         source_id: "x".into(),
         position: Vec3::ZERO,
+        aim_dir: Vec3::ZERO,
         kind: CueKind::OnHit,
     };
     assert!(resolve_cue(&reg, &miss).is_empty());
