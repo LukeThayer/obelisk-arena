@@ -27,7 +27,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::client::controller::FollowCamera;
-use crate::client::net::LocalNetPlayer;
+use crate::client::net::{CustomizeDirty, LocalNetPlayer};
 use crate::client::parts::{PartSelection, Slot as PartSlot, SLOTS};
 use crate::client::present::LocalPlayerBody;
 
@@ -108,6 +108,7 @@ fn toggle_panel_on_key(
     mut state: ResMut<CustomizationOpen>,
     cursor: Option<Single<&mut CursorOptions, With<PrimaryWindow>>>,
     selection: Res<PartSelection>,
+    mut dirty: ResMut<CustomizeDirty>,
     mut local_body: Query<&mut Visibility, With<LocalPlayerBody>>,
 ) {
     if !keys.just_pressed(KeyCode::KeyK) {
@@ -120,6 +121,8 @@ fn toggle_panel_on_key(
             }
         }
         state.open = false;
+        // Push the finished selection to the server → opponent (D6, debounced on close).
+        dirty.0 = true;
         if let Some(mut cursor) = cursor {
             cursor.grab_mode = CursorGrabMode::Locked;
             cursor.visible = false;

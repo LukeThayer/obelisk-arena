@@ -17,8 +17,9 @@ use serde_json::json;
 use stat_core::StatBlock;
 
 use crate::net::protocol::{
-    CastRequestMessage, EventChannel, NetworkOwner, NetworkedHealth, NetworkedId, NetworkedPlayer,
-    NetworkedPosition, ObeliskNetId, PlayerCustomization, PlayerInputMessage, RoundStateMessage,
+    CastRequestMessage, CustomizeBroadcast, CustomizeMessage, EventChannel, NetworkOwner,
+    NetworkedHealth, NetworkedId, NetworkedPlayer, NetworkedPosition, ObeliskNetId,
+    PlayerCustomization, PlayerInputMessage, RoundStateMessage,
 };
 use crate::trace;
 use lightyear::prelude::MessageSender;
@@ -55,6 +56,11 @@ impl Plugin for ArenaServerPlugin {
                     // is populated, and after the lib's Update spatial refresh (in
                     // add_obelisk_sim_headless) so `nearest_enemy` sees a fresh pipeline.
                     drain_cast_requests,
+                    // Appearance pipeline (D6): drain client CustomizeMessage → update that
+                    // player's PlayerCustomization + broadcast CustomizeBroadcast to all clients
+                    // (reliable), mirroring the cue broadcast. Ordered after sync_networked_players
+                    // so the ClientPlayerMap is populated.
+                    drain_customize_requests,
                 ),
             )
             // Best-of-3 round machine (Task 19, guide §7). `detect_round_end` reads the death stream
@@ -418,6 +424,45 @@ fn drain_cast_requests(
             commands
                 .entity(caster)
                 .cast_skill_dir_charged(req.skill_id.clone(), dir, req.charge);
+        }
+    }
+}
+
+/// Drain `CustomizeMessage`s from each client and propagate the new appearance (D6). For each
+/// request: resolve the sender's caster entity via `ClientPlayerMap`, update its
+/// `PlayerCustomization` (so late joiners get the right initial value via component replication),
+/// and broadcast a `CustomizeBroadcast { player: <net id>, parts }` to EVERY client on the reliable
+/// `EventChannel` — mirroring the cue broadcast. We rely on the broadcast (not component-update
+/// replication, which is unreliable here) to push the live change to the opponent's rig.
+fn drain_customize_requests(
+    mut receivers: Query<(&RemoteId, &mut MessageReceiver<CustomizeMessage>), With<ClientOf>>,
+    client_map: Res<ClientPlayerMap>,
+    mut players: Query<(&NetworkedId, &mut PlayerCustomization), With<NetworkedPlayer>>,
+    mut senders: Query<&mut MessageSender<CustomizeBroadcast>, With<ClientOf>>,
+) {
+    for (RemoteId(peer_id), mut receiver) in &mut receivers {
+        let Some(client_id) = peer_to_u64(peer_id) else {
+            continue;
+        };
+        for msg in receiver.receive() {
+            let Some(&player) = client_map.0.get(&client_id) else {
+                continue;
+            };
+            let Ok((net_id, mut cust)) = players.get_mut(player) else {
+                continue;
+            };
+            cust.parts = msg.parts;
+            let bcast = CustomizeBroadcast {
+                player: net_id.0,
+                parts: msg.parts,
+            };
+            for mut sender in &mut senders {
+                sender.send::<EventChannel>(bcast);
+            }
+            trace::event(
+                "customize_applied",
+                json!({ "net_id": net_id.0, "client_id": client_id }),
+            );
         }
     }
 }

@@ -16,11 +16,13 @@
 
 use bevy::prelude::*;
 use lightyear::prelude::server::ClientOf;
-use lightyear::prelude::{LocalId, MessageSender, PeerId};
+use lightyear::prelude::{LocalId, MessageReceiver, MessageSender, PeerId};
 
+use crate::client::parts::PartSelection;
 use crate::net::protocol::{
-    CastChannel, CastRequestMessage, InputChannel, NetworkOwner, NetworkedPlayer,
-    NetworkedPosition, PlayerInputMessage,
+    CastChannel, CastRequestMessage, CustomizeBroadcast, CustomizeMessage, InputChannel,
+    NetworkOwner, NetworkedId, NetworkedPlayer, NetworkedPosition, PlayerCustomization,
+    PlayerInputMessage,
 };
 
 /// The local player's current input, written each frame by whichever input source is active
@@ -96,6 +98,12 @@ pub struct PredictedCast {
     pub aim_dir: Vec3,
 }
 
+/// Set true when the local player finishes editing their costume (customizer panel close), so
+/// [`send_customization`] ships the current local [`PartSelection`] to the server once. Debounced
+/// this way (one send per edit session) rather than on every `<`/`>` click.
+#[derive(Resource, Default)]
+pub struct CustomizeDirty(pub bool);
+
 /// Marker on the local player's materialized body — the replicated `NetworkedPlayer` whose
 /// `NetworkOwner` equals our own `LocalId`. The windowed client attaches the follow camera + rig to
 /// this; M2.2 Task 12 marks the predicted/controlled body.
@@ -118,6 +126,11 @@ impl Plugin for ClientNetPlayerPlugin {
         app.init_resource::<LocalInput>()
             .init_resource::<CastIntent>()
             .init_resource::<ChargeState>()
+            .init_resource::<CustomizeDirty>()
+            // The LOCAL selection the customizer edits + `send_customization` reads. `PartsPlugin`
+            // also inits it (windowed); init here too so the headless client + the send path have
+            // it even without `PartsPlugin`. `init_resource` is idempotent.
+            .init_resource::<PartSelection>()
             .add_message::<PredictedCast>()
             .add_systems(
                 Update,
@@ -125,6 +138,8 @@ impl Plugin for ClientNetPlayerPlugin {
                     materialize_replicated_players,
                     send_local_player_input,
                     send_cast_requests,
+                    send_customization,
+                    drain_customize_broadcasts,
                     trace_received_remote_pose,
                 ),
             );
@@ -294,6 +309,54 @@ fn send_cast_requests(
     });
 
     intent.0 = None;
+}
+
+/// Ship the local player's [`PartSelection`] to the server when [`CustomizeDirty`] is set (debounced
+/// on panel close). The server applies it + broadcasts to all clients (D6). Reliable `CastChannel`.
+/// No-op until we own a local player + the sender exists. Mirrors `send_cast_requests`'s shape.
+fn send_customization(
+    mut dirty: ResMut<CustomizeDirty>,
+    selection: Res<PartSelection>,
+    local: Query<(), (With<NetworkedPlayer>, With<LocalNetPlayer>)>,
+    sender: Option<Single<&mut MessageSender<CustomizeMessage>>>,
+) {
+    if !dirty.0 {
+        return;
+    }
+    if local.iter().next().is_none() {
+        return; // no local player yet — keep the flag set until we can send
+    }
+    let Some(mut sender) = sender else {
+        return; // sender not ready (pre-connect)
+    };
+    sender.send::<CastChannel>(CustomizeMessage { parts: *selection });
+    dirty.0 = false;
+    crate::trace::event("customize_sent", serde_json::json!({}));
+}
+
+/// Drain the server's [`CustomizeBroadcast`]s and apply each to the matching player's
+/// [`PlayerCustomization`] (keyed by the replicated [`NetworkedId`]). Setting the component trips
+/// `Changed<PlayerCustomization>`, which `client::parts::refresh_arena_part_visibility_on_change`
+/// picks up to re-skin that player's REMOTE rig. The local player's own rig is driven by the local
+/// [`PartSelection`] resource, so a loopback broadcast for self is harmless. Added by both client
+/// modes (headless just traces — no rig).
+fn drain_customize_broadcasts(
+    mut receivers: Query<&mut MessageReceiver<CustomizeBroadcast>>,
+    mut players: Query<(&NetworkedId, &mut PlayerCustomization), With<NetworkedPlayer>>,
+) {
+    for mut rx in &mut receivers {
+        for msg in rx.receive() {
+            for (net_id, mut cust) in &mut players {
+                if net_id.0 == msg.player {
+                    cust.parts = msg.parts;
+                }
+            }
+            crate::trace::event(
+                "customize_received",
+                serde_json::json!({ "player": msg.player }),
+            );
+        }
+    }
 }
 
 /// [H] check support: throttled trace of a REMOTE player's received `NetworkedPosition` (the local

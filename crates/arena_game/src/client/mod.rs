@@ -417,6 +417,19 @@ pub fn run_headless_client() {
         app.add_systems(Update, automove_input);
     }
 
+    // [H] CUSTOMIZE hook (D6 verification): if `ARENA_CUSTOMIZE=<top_index>` is set, change the
+    // local PartSelection's Top slot once (after we own a local player) and mark it dirty so
+    // `send_customization` ships a `CustomizeMessage`. The server applies + broadcasts it, and the
+    // OTHER observer's `drain_customize_broadcasts` emits a `customize_received` trace — proving the
+    // live appearance change propagates to the opponent over the wire.
+    if let Some(top) = std::env::var("ARENA_CUSTOMIZE")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+    {
+        app.insert_resource(HeadlessCustomize(top));
+        app.add_systems(Update, headless_customize_once);
+    }
+
     // [H] AUTOCAST hook: once we own a local player AND an opponent is replicated, set the cast
     // intent once so `net::send_cast_requests` fires a `CastRequestMessage` (Task 14). This is the
     // headless verification vehicle for M2.3 — a server `CastBegan` (and downstream the egress of
@@ -427,6 +440,34 @@ pub fn run_headless_client() {
     }
 
     app.run();
+}
+
+/// The Top-slot index a headless observer applies once under `ARENA_CUSTOMIZE` (D6 verification).
+#[derive(Resource)]
+struct HeadlessCustomize(u8);
+
+/// [H] CUSTOMIZE (D6): once we own a local player, set its Top slot to the configured index and
+/// flag `CustomizeDirty` so `net::send_customization` ships the change. One-shot via the `done`
+/// local. Lets the net-test confirm a non-default selection propagates to the other observer.
+fn headless_customize_once(
+    cfg: Res<HeadlessCustomize>,
+    mut selection: ResMut<parts::PartSelection>,
+    mut dirty: ResMut<net::CustomizeDirty>,
+    local: Query<
+        (),
+        (
+            With<crate::net::protocol::NetworkedPlayer>,
+            With<net::LocalNetPlayer>,
+        ),
+    >,
+    mut done: Local<bool>,
+) {
+    if *done || local.iter().next().is_none() {
+        return;
+    }
+    selection.top = cfg.0;
+    dirty.0 = true;
+    *done = true;
 }
 
 /// [H] AUTOCAST: set [`net::CastIntent`] to firebolt on a CADENCE (default ~0.8s), once both the

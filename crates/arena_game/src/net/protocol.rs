@@ -111,6 +111,14 @@ impl Plugin for ProtocolPlugin {
             .add_direction(NetworkDirection::ServerToClient); // wraps arena_skills CueMessage (§4)
         app.register_message::<RoundStateMessage>()
             .add_direction(NetworkDirection::ServerToClient); // best-of-3 round flow (§7)
+
+        // Live appearance change (D6): client→server request (reused reliable CastChannel) + the
+        // server→client broadcast (reused reliable EventChannel). Mirrors the cue broadcast pattern
+        // so a live edit propagates reliably (component UPDATES are unreliable in this setup).
+        app.register_message::<CustomizeMessage>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<CustomizeBroadcast>()
+            .add_direction(NetworkDirection::ServerToClient);
     }
 }
 
@@ -168,6 +176,26 @@ pub struct NetEventMessage(pub obelisk_bevy::net::NetEvent);
 /// client consumer re-looks-up the `LaneEvent`s via the `SkillFxRegistry` (§4.3).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CueWireMessage(pub arena_skills::CueMessage);
+
+/// Live appearance change, client→server, reliable (`CastChannel`). Sent when the local player
+/// finishes editing their costume (panel close). The server applies it to that player's
+/// `PlayerCustomization` and re-broadcasts via [`CustomizeBroadcast`] (D6).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CustomizeMessage {
+    pub parts: PartSelection,
+}
+
+/// Appearance broadcast, server→client, reliable (`EventChannel`). The server relays a player's
+/// new costume to every client; each client applies it to the matching player's rig (keyed by the
+/// replicated [`NetworkedId`]). Mirrors the cue broadcast (`CueWireMessage`) — the proven reliable
+/// S→C path — because component UPDATES don't propagate reliably in this lightyear setup (only
+/// initial inserts do).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CustomizeBroadcast {
+    /// The target player's replicated [`NetworkedId`] (stable cross-peer key).
+    pub player: u64,
+    pub parts: PartSelection,
+}
 
 /// Best-of-3 round flow (§7). Filled out by M2.4 Task 19; the wire shape is fixed here so the
 /// protocol checksum agrees on both peers from M2.1.
