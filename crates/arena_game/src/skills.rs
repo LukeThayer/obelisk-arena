@@ -51,6 +51,7 @@ struct PendingCues(Vec<arena_skills::CueMessage>);
 fn capture_cue_event(
     cue: On<CueEvent>,
     index: Res<ObeliskEntityIndex>,
+    active_casts: Query<&ActiveCast>,
     mut pending: ResMut<PendingCues>,
 ) {
     let cue = cue.event();
@@ -61,10 +62,19 @@ fn capture_cue_event(
         );
         return;
     };
+    // Bug 1b: carry the caster's aim direction so OBSERVERS fly the cosmetic projectile the right
+    // way (without it they default to +Z, "always forward"). The on_cast cue fires during Windup,
+    // so the caster's `ActiveCast` is present and holds the resolved `aim_dir`. Falls back to
+    // `Vec3::ZERO` (= "unknown" → the consumer uses its local AimDirs lookup) for non-cast cues.
+    let aim = active_casts
+        .get(cue.source)
+        .map(|c| c.aim_dir)
+        .unwrap_or(Vec3::ZERO);
     pending.0.push(arena_skills::cue_event_to_message(
         &cue.cue_id,
         source_id,
         cue.position,
+        aim,
         cue.kind.into(),
     ));
 }
@@ -276,6 +286,9 @@ fn predicted_local_cast(
                 cue_id,
                 source_id: cast.source_id.clone(),
                 position: cast.position,
+                // Bug 1b: carry the predicted cast's aim so the local predicted bolt flies the
+                // right way (and so the cue's own aim_dir is the single source of truth).
+                aim_dir: cast.aim_dir,
                 kind: arena_skills::CueKind::OnCast,
             },
         ));
