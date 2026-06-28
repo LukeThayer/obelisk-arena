@@ -209,8 +209,7 @@ fn follow_local_net_player(
         return;
     };
     cam.translation = player.translation + Vec3::Y * EYE_HEIGHT;
-    cam.rotation =
-        Quat::from_axis_angle(Vec3::Y, yaw.0) * Quat::from_axis_angle(Vec3::X, pitch.0);
+    cam.rotation = Quat::from_axis_angle(Vec3::Y, yaw.0) * Quat::from_axis_angle(Vec3::X, pitch.0);
 }
 
 /// After animation has set bone Transforms, apply the aim pitch on top of the
