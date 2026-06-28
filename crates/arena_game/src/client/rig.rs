@@ -11,6 +11,8 @@
 use bevy::{gltf::Gltf, prelude::*};
 use obelisk_bevy::prelude::{ActiveCast, SkillPhase};
 
+use super::net::{ChargeState, LocalNetPlayer};
+
 /// Animation clip names baked into `character.glb`. Verified against the
 /// glb's `gltf.named_animations` keys: `idle`, `walk_forward`,
 /// `walk_backward`, `walk_left`, `walk_right`, `falling`, plus the
@@ -300,17 +302,18 @@ fn locomotion_blend(
 ///     remote rigs — they idle/face via the interpolated `NetworkedPosition.yaw`; deriving remote
 ///     walk velocity from the pose-stream delta is later polish, the rig idles correctly meanwhile).
 ///   - **Casting** from the root's `Option<&ActiveCast>`: `Windup`/`Active` → 1.0, `Recovery` → 0.5,
-///     none/`Done` → 0.0, eased by [`step_casting_blend`]. (On the Stage-A client the materialized
-///     players carry no obelisk `ActiveCast` today, so this reads as 0 = plain idle; the cast pose
-///     would light up the moment a predicted local `ActiveCast` lands — forward-compatible.)
+///     none/`Done` → 0.0, eased by [`step_casting_blend`]. For the LOCAL player only, a charge hold
+///     (C5) also drives the blend to 1.0 so the caster visibly winds up while charging — the actual
+///     `ActiveCast` only starts on release, so this pre-emptively cues the pose during the hold.
 #[allow(clippy::type_complexity)]
 pub fn drive_animation(
     rig: Res<RigAssets>,
     mut anim: Query<(Entity, &mut AnimationPlayer)>,
     parents: Query<&ChildOf>,
     body_marker: Query<(), With<ArenaBody>>,
-    mut roots: Query<(Option<&ActiveCast>, &mut LocalAnimBlend)>,
+    mut roots: Query<(Option<&ActiveCast>, &mut LocalAnimBlend, Has<LocalNetPlayer>)>,
     yaw: Res<super::controller::CameraYaw>,
+    charge: Res<ChargeState>,
 ) {
     if !rig.ready() {
         return;
@@ -323,15 +326,23 @@ pub fn drive_animation(
         let Some(root) = rig_root_of(anim_entity, &parents, &body_marker, &roots) else {
             continue;
         };
-        let Ok((active_cast, mut blend)) = roots.get_mut(root) else {
+        let Ok((active_cast, mut blend, is_local)) = roots.get_mut(root) else {
             continue;
         };
 
         // Map the obelisk cast phase to a casting-layer blend target (guide §4).
-        let casting_target = match active_cast.map(|c| c.phase) {
-            Some(SkillPhase::Windup) | Some(SkillPhase::Active) => 1.0,
-            Some(SkillPhase::Recovery) => 0.5,
-            _ => 0.0,
+        // C5: While the LOCAL player is charging (holding the cast button), drive the blend to
+        // 1.0 as a wind-up so the caster visibly prepares the spell. The `ActiveCast` only
+        // starts on release; this pre-emptively cues the casting pose during the hold phase.
+        // Remote players are unaffected (charging is a local input state).
+        let casting_target = if is_local && charge.charging {
+            1.0 // wind-up: hold drives the casting pose
+        } else {
+            match active_cast.map(|c| c.phase) {
+                Some(SkillPhase::Windup) | Some(SkillPhase::Active) => 1.0,
+                Some(SkillPhase::Recovery) => 0.5,
+                _ => 0.0,
+            }
         };
         blend.casting = step_casting_blend(blend.casting, casting_target);
 
@@ -350,7 +361,7 @@ fn rig_root_of(
     anim_entity: Entity,
     parents: &Query<&ChildOf>,
     body_marker: &Query<(), With<ArenaBody>>,
-    roots: &Query<(Option<&ActiveCast>, &mut LocalAnimBlend)>,
+    roots: &Query<(Option<&ActiveCast>, &mut LocalAnimBlend, Has<LocalNetPlayer>)>,
 ) -> Option<Entity> {
     // First confirm it belongs to an arena rig at all.
     if !ancestor_has_body_marker(anim_entity, parents, body_marker) {
