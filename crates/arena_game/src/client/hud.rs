@@ -117,6 +117,25 @@ fn setup_hud(mut commands: Commands) {
             ..default()
         },
     ));
+
+    // Crosshair: a centered 4×4 px white dot at dead-center for first-person aim.
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(50.0),
+            top: Val::Percent(50.0),
+            // Pull the dot back by half its own size so it is pixel-exact center.
+            margin: UiRect {
+                left: Val::Px(-2.0),
+                top: Val::Px(-2.0),
+                ..default()
+            },
+            width: Val::Px(4.0),
+            height: Val::Px(4.0),
+            ..default()
+        },
+        BackgroundColor(Color::WHITE),
+    ));
 }
 
 /// Spawn one hp bar (a dark frame `Node` + a colored fill child + a centered label).
