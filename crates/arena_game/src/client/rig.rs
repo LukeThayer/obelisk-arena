@@ -12,6 +12,7 @@ use bevy::{gltf::Gltf, prelude::*};
 use obelisk_bevy::prelude::{ActiveCast, SkillPhase};
 
 use super::net::{ChargeState, LocalNetPlayer};
+use crate::net::protocol::NetworkedPosition;
 
 /// Animation clip names baked into `character.glb`. Verified against the
 /// glb's `gltf.named_animations` keys: `idle`, `walk_forward`,
@@ -313,6 +314,7 @@ pub fn drive_animation(
     body_marker: Query<(), With<ArenaBody>>,
     mut roots: Query<(
         Option<&ActiveCast>,
+        &NetworkedPosition,
         &mut LocalAnimBlend,
         Has<LocalNetPlayer>,
     )>,
@@ -330,21 +332,32 @@ pub fn drive_animation(
         let Some(root) = rig_root_of(anim_entity, &parents, &body_marker, &roots) else {
             continue;
         };
-        let Ok((active_cast, mut blend, is_local)) = roots.get_mut(root) else {
+        let Ok((active_cast, netpos, mut blend, is_local)) = roots.get_mut(root) else {
             continue;
         };
 
-        // Map the obelisk cast phase to a casting-layer blend target (guide §4).
-        // C5: While the LOCAL player is charging (holding the cast button), drive the blend to
-        // 1.0 as a wind-up so the caster visibly prepares the spell. The `ActiveCast` only
-        // starts on release; this pre-emptively cues the casting pose during the hold phase.
-        // Remote players are unaffected (charging is a local input state).
-        let casting_target = if is_local && charge.charging {
-            1.0 // wind-up: hold drives the casting pose
+        // Map the cast state to a casting-layer blend target (guide §4).
+        // - LOCAL player: drive from the local-only `ActiveCast` (+ the charge hold wind-up). C5:
+        //   while the LOCAL player is charging (holding the cast button), drive the blend to 1.0 as
+        //   a wind-up so the caster visibly prepares the spell — the `ActiveCast` only starts on
+        //   release, so this pre-emptively cues the casting pose during the hold phase.
+        // - REMOTE player (Bug 1a): the local-only `ActiveCast` is never present, so drive from the
+        //   replicated `NetworkedPosition.cast_phase` the server stamps (1 windup / 2 active → 1.0,
+        //   3 recovery → 0.5, 0 none → 0.0). This is what makes A's cast animate on B's screen.
+        let casting_target = if is_local {
+            if charge.charging {
+                1.0 // wind-up: hold drives the casting pose
+            } else {
+                match active_cast.map(|c| c.phase) {
+                    Some(SkillPhase::Windup) | Some(SkillPhase::Active) => 1.0,
+                    Some(SkillPhase::Recovery) => 0.5,
+                    _ => 0.0,
+                }
+            }
         } else {
-            match active_cast.map(|c| c.phase) {
-                Some(SkillPhase::Windup) | Some(SkillPhase::Active) => 1.0,
-                Some(SkillPhase::Recovery) => 0.5,
+            match netpos.cast_phase {
+                1 | 2 => 1.0,
+                3 => 0.5,
                 _ => 0.0,
             }
         };
@@ -367,6 +380,7 @@ fn rig_root_of(
     body_marker: &Query<(), With<ArenaBody>>,
     roots: &Query<(
         Option<&ActiveCast>,
+        &NetworkedPosition,
         &mut LocalAnimBlend,
         Has<LocalNetPlayer>,
     )>,
