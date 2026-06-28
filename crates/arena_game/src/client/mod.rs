@@ -13,6 +13,7 @@
 
 pub mod controller;
 pub mod cosmetics;
+pub mod customization;
 pub mod hud;
 pub mod net;
 pub mod parts;
@@ -136,6 +137,8 @@ pub fn run_windowed_client() {
     // slot-based part visibility (PartsPlugin), drive the per-player animation.
     app.add_plugins(present::ArenaPresentPlugin);
     app.add_plugins(parts::PartsPlugin);
+    // Character customizer (D4): K-toggled per-slot panel + third-person preview. Windowed-only.
+    app.add_plugins(customization::CustomizationPlugin);
     app.add_systems(
         Update,
         (
@@ -265,7 +268,14 @@ fn bridge_windowed_cast_hold(
     time: Res<Time>,
     mut intent: ResMut<net::CastIntent>,
     mut charge: ResMut<net::ChargeState>,
+    customization: Option<Res<customization::CustomizationOpen>>,
 ) {
+    // While the customizer is open, LMB clicks the panel buttons — don't charge/cast.
+    if customization.map(|c| c.open).unwrap_or(false) {
+        charge.secs = 0.0;
+        charge.charging = false;
+        return;
+    }
     let held = keys.pressed(KeyCode::Space) || mouse.pressed(MouseButton::Left);
     let just_released =
         keys.just_released(KeyCode::Space) || mouse.just_released(MouseButton::Left);
@@ -297,7 +307,14 @@ fn bridge_windowed_input_to_local_input(
     yaw: Res<controller::CameraYaw>,
     pitch: Res<controller::AimPitch>,
     mut local_input: ResMut<net::LocalInput>,
+    customization: Option<Res<customization::CustomizationOpen>>,
 ) {
+    // While the customizer is open, A/D orbit the preview camera — don't drive movement.
+    if customization.map(|c| c.open).unwrap_or(false) {
+        local_input.movement = Vec2::ZERO;
+        local_input.jump = false;
+        return;
+    }
     let mut movement = Vec2::ZERO;
     if keys.pressed(KeyCode::KeyW) {
         movement.y += 1.0;
