@@ -148,6 +148,22 @@ fn sync_networked_players(
     let existing_ids: HashSet<u64> = existing.iter().map(|o| o.0).collect();
     let senders: Vec<Entity> = connections.iter().map(|(e, _)| e).collect();
 
+    // Stable slot assignment by SORTED client id over all players that will exist (already-spawned +
+    // the new connections this frame). This MUST match `reset_for_new_round`'s sorted-client-id slot
+    // assignment — otherwise the first round reset (Countdown→Active, before any death) would
+    // teleport/swap both players when connection order ≠ client-id order. Sorting here (not counting
+    // connection order) makes the initial spawn position equal the reset position, so players don't
+    // jump at round start. Also robust to two clients connecting in the same frame.
+    let mut all_ids: Vec<u64> = existing_ids.iter().copied().collect();
+    for (_, RemoteId(pid)) in &connections {
+        if let Some(cid) = peer_to_u64(pid) {
+            if !all_ids.contains(&cid) {
+                all_ids.push(cid);
+            }
+        }
+    }
+    all_ids.sort_unstable();
+
     for (_, RemoteId(peer_id)) in &connections {
         let Some(client_id) = peer_to_u64(peer_id) else {
             continue;
@@ -156,9 +172,12 @@ fn sync_networked_players(
             continue;
         }
 
-        // Place by connection order (count of already-spawned players), not by raw id, so the two
-        // players land at the two fixed markers regardless of their netcode ids.
-        let slot = client_map.0.len().min(SPAWN_MARKERS.len() - 1);
+        // Slot from the stable sorted-id order (matches `reset_for_new_round` exactly).
+        let slot = all_ids
+            .iter()
+            .position(|&id| id == client_id)
+            .unwrap_or(0)
+            .min(SPAWN_MARKERS.len() - 1);
         let spawn = SPAWN_MARKERS[slot];
         // OPPOSING factions so firebolt's `hit_filter: Enemies` (target_faction != caster_faction)
         // can resolve a hit player→player, and `nearest_enemy` acquires the opponent. With obelisk's
@@ -294,6 +313,9 @@ pub struct PlayerInputState {
     /// Aim pitch (radians); cosmetic spine lean, replicated for remote cast animation.
     pitch: f32,
     jump: bool,
+    /// True while this client is holding the cast button to charge (pre-release). Drives the
+    /// opponent-facing windup telegraph in `sync_cast_state` (Bug 4).
+    charging: bool,
 }
 
 /// Drain `PlayerInputMessage`s from each connected client onto that client's `PlayerInputState`.
@@ -318,6 +340,7 @@ fn drain_player_inputs(
                 input.yaw = msg.yaw;
                 input.pitch = msg.pitch;
                 input.jump = msg.jump;
+                input.charging = msg.charging;
             }
         }
     }
@@ -551,10 +574,27 @@ fn cast_phase_byte(phase: Option<SkillPhase>) -> u8 {
 /// Writes `cast_phase`/`cast_skill` ONLY when they change so we don't trip
 /// `Changed<NetworkedPosition>` (and re-replicate) every frame the player is idle.
 fn sync_cast_state(
-    mut q: Query<(Option<&ActiveCast>, &mut NetworkedPosition), With<NetworkedPlayer>>,
+    mut q: Query<
+        (
+            Option<&ActiveCast>,
+            &PlayerInputState,
+            &mut NetworkedPosition,
+        ),
+        With<NetworkedPlayer>,
+    >,
 ) {
-    for (active, mut netpos) in &mut q {
-        let phase = cast_phase_byte(active.map(|c| c.phase));
+    for (active, input, mut netpos) in &mut q {
+        // ActiveCast (the real obelisk cast, post-release) takes precedence. Before release, a
+        // player who is CHARGING shows Windup (1) so the opponent sees the cast wind up the instant
+        // charging begins — a telegraph held through the hold into the actual cast (Bug 4).
+        let active_phase = cast_phase_byte(active.map(|c| c.phase));
+        let phase = if active_phase != 0 {
+            active_phase
+        } else if input.charging {
+            1
+        } else {
+            0
+        };
         // A simple "is casting" marker is enough here (the client only needs phase to animate); we
         // don't resolve the real skill-id table. 1 = casting, 0 = idle.
         let skill = if phase == 0 { 0 } else { 1 };

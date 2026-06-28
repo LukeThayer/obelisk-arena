@@ -228,6 +228,7 @@ fn materialize_replicated_players(
 /// client→server message sender per peer. No-op until the sender exists (post-connect).
 fn send_local_player_input(
     input: Res<LocalInput>,
+    charge: Res<ChargeState>,
     local_players: Query<(), (With<NetworkedPlayer>, With<LocalNetPlayer>)>,
     sender: Option<Single<&mut MessageSender<PlayerInputMessage>>>,
 ) {
@@ -243,6 +244,8 @@ fn send_local_player_input(
         yaw: input.yaw,
         pitch: input.pitch,
         jump: input.jump,
+        // Replicate the charge-hold so the opponent sees the windup begin at charge-start (Bug 4).
+        charging: charge.charging,
     });
 }
 

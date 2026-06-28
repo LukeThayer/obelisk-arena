@@ -148,6 +148,11 @@ pub struct PlayerInputMessage {
     /// Aim pitch (spine lean; cosmetic).
     pub pitch: f32,
     pub jump: bool,
+    /// True while the cast button is held to charge (pre-release). The server stamps a Windup
+    /// telegraph into `NetworkedPosition.cast_phase` so the OPPONENT sees the cast wind up the
+    /// instant charging begins (Bug 4). First-person hides the local body, so this is what makes the
+    /// cast animation visible at charge-start.
+    pub charging: bool,
 }
 
 /// Cast request — replaces M1's direct `cast_skill_at` on the local entity (spec §5.2). The server
