@@ -134,8 +134,8 @@ pub struct PlayerInputMessage {
 }
 
 /// Cast request — replaces M1's direct `cast_skill_at` on the local entity (spec §5.2). The server
-/// fires along `aim_dir` (the client's camera forward vector) via `cast_skill_dir` — free aim, no
-/// auto-acquire. The server re-validates caster validity + already-casting; obelisk's
+/// fires along `aim_dir` (the client's camera forward vector) via `cast_skill_dir_charged` — free
+/// aim, no auto-acquire. The server re-validates caster validity + already-casting; obelisk's
 /// `validate_casts` gates mana/cooldown/already-casting.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CastRequestMessage {
@@ -143,6 +143,11 @@ pub struct CastRequestMessage {
     /// Camera-forward unit vector in world space (yaw + pitch applied). The server fires the
     /// projectile along this direction; the client uses it for predicted own-cast cosmetics.
     pub aim_dir: [f32; 3],
+    /// Hold-to-charge level (0–255). Mapped from hold duration via the formula
+    /// `85 + frac * 170` where `frac ∈ [0, 1]`: 85 ≈ instant tap (≈1.0× via `charge_mult`),
+    /// 255 = max hold (2.0×). The server passes this to `cast_skill_dir_charged`, scaling both
+    /// damage and projectile speed. Formula: `charge_mult(Some(c)) = 0.5 + (c/255) * 1.5`.
+    pub charge: u8,
 }
 
 /// Combat events on the wire — wraps obelisk's `NetEvent` so the server broadcasts it verbatim.
