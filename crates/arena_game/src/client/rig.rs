@@ -8,7 +8,6 @@
 //! costume/recolor/viewmodel/render-layer/locomotion-blend logic — those
 //! arrive with the third-person controller in a later task.
 
-use bevy::mesh::skinning::SkinnedMesh;
 use bevy::{gltf::Gltf, prelude::*};
 use obelisk_bevy::prelude::{ActiveCast, SkillPhase};
 
@@ -132,107 +131,8 @@ pub fn build_graph_when_loaded(
     rig.graph = Some(graphs.add(graph));
 }
 
-/// The single coherent outfit we keep visible: the **Witch** set, which reads
-/// as a wizard (the M0/M1 fantasy). One top + one bottom + the matching hat,
-/// plus one hair variant and the transform-correct `*0` face features. Every
-/// other mesh in `character.glb` (the eight other class outfits, all weapons,
-/// capes, body skin, and the dozens of extra hair/face variants) is hidden.
-///
-/// Mesh node-names verified against `character.glb` (they match wisp's
-/// `parts.rs` tables exactly). A minimal allowlist — not a loadout system; the
-/// full slot-based customizer (`PartSelection`) lands later.
-const KEEP_MESHES: &[&str] = &[
-    "F_Witch_Top",
-    "F_Witch_Bottom",
-    "F_Witch_Headwear",
-    "F_hair_1",
-    "F_eyes0",
-    "F_eyebrows0",
-    "F_mouth0",
-];
-
-/// Marker placed on every rig mesh once we've decided its costume visibility,
-/// so we don't re-evaluate it every frame.
-#[derive(Component)]
-pub struct CostumeCulled;
-
-/// Newly-spawned skinned meshes not yet costume-evaluated, with their optional `Name`.
-/// Aliased to keep [`cull_costume`]'s signature under clippy's `type_complexity` bar.
-type PendingCostumeMeshes<'w, 's> =
-    Query<'w, 's, (Entity, Option<&'static Name>), (With<SkinnedMesh>, Without<CostumeCulled>)>;
-
-/// Whether a rig mesh node-name belongs to the single kept (Witch) outfit.
-/// Default-hide: anything not in [`KEEP_MESHES`] is culled. Meshes inside the
-/// glTF that aren't outfit nodes at all (the head/eyes mesh containers named
-/// `F_Head`, `Mesh.NNN`, etc.) are resolved to their outfit node-name by the
-/// caller before this is asked; an unrecognized name falls through to hidden,
-/// which is the safe default for a "show ONE outfit" cull.
-fn keep_mesh(name: &str) -> bool {
-    KEEP_MESHES.contains(&name)
-}
-
-/// Costume-cull: once the rig scene spawns, hide every mesh that isn't part of
-/// the single kept (Witch) outfit so the unified `character.glb` renders as ONE
-/// readable character instead of all nine class outfits stacked at once.
-///
-/// Walks newly-spawned skinned meshes under an [`ArenaBody`], resolves each to
-/// its outfit node-name (the `Name` on the mesh entity or its nearest named
-/// ancestor — glTF nests the visible mesh under a node carrying the `F_*` name),
-/// and sets `Visibility::Hidden` on anything not in [`KEEP_MESHES`]. Each mesh
-/// is stamped [`CostumeCulled`] so it's processed exactly once.
-pub fn cull_costume(
-    mut commands: Commands,
-    pending: PendingCostumeMeshes,
-    parents: Query<&ChildOf>,
-    names: Query<&Name>,
-    body_marker: Query<(), With<ArenaBody>>,
-    mut visibility: Query<&mut Visibility>,
-) {
-    for (entity, name) in &pending {
-        if !ancestor_has_body_marker(entity, &parents, &body_marker) {
-            continue;
-        }
-        // Resolve the outfit node-name: prefer the mesh entity's own `Name` (if
-        // it's not an auto-generated "Mesh.NNN"), else walk up to the nearest
-        // named ancestor. glTF imports the visible primitive under a node that
-        // carries the authored `F_*` name.
-        let own = name
-            .map(|n| n.as_str().to_string())
-            .filter(|s| !s.starts_with("Mesh"));
-        let resolved = own
-            .or_else(|| {
-                let mut cur = entity;
-                loop {
-                    match parents.get(cur) {
-                        Ok(p) => {
-                            cur = p.0;
-                            if let Ok(n) = names.get(cur) {
-                                let s = n.as_str();
-                                if !s.starts_with("Mesh") {
-                                    break Some(s.to_string());
-                                }
-                            }
-                        }
-                        Err(_) => break None,
-                    }
-                }
-            })
-            .unwrap_or_default();
-
-        if let Ok(mut v) = visibility.get_mut(entity) {
-            *v = if keep_mesh(&resolved) {
-                Visibility::Inherited
-            } else {
-                Visibility::Hidden
-            };
-        }
-        commands.entity(entity).insert(CostumeCulled);
-    }
-}
-
-/// Walk the `ChildOf` parent chain to confirm a mesh belongs to an
-/// [`ArenaBody`] before culling it. Mirrors the controller's
-/// `ancestor_has_body_marker`.
+/// Walk the `ChildOf` parent chain to confirm an entity belongs to an
+/// [`ArenaBody`] rig. Used by [`drive_animation`] via [`rig_root_of`].
 fn ancestor_has_body_marker(
     entity: Entity,
     parents: &Query<&ChildOf>,

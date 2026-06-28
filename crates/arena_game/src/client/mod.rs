@@ -15,6 +15,7 @@ pub mod controller;
 pub mod cosmetics;
 pub mod hud;
 pub mod net;
+pub mod parts;
 pub mod prediction;
 pub mod present;
 pub mod replication;
@@ -131,15 +132,15 @@ pub fn run_windowed_client() {
 
     app.add_systems(Update, (poll_cast_assets, log_registered_skills_once));
 
-    // Rig: build the animation graph, attach it + the per-player rig (`present`), cull the costume,
-    // drive the per-player animation.
+    // Rig: build the animation graph, attach it + the per-player rig (`present`), apply
+    // slot-based part visibility (PartsPlugin), drive the per-player animation.
     app.add_plugins(present::ArenaPresentPlugin);
+    app.add_plugins(parts::PartsPlugin);
     app.add_systems(
         Update,
         (
             rig::build_graph_when_loaded,
             rig::attach_animation_graph,
-            rig::cull_costume,
             rig::drive_animation.after(rig::attach_animation_graph),
         ),
     );

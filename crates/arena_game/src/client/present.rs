@@ -98,10 +98,10 @@ fn attach_rig_to_players(
 }
 
 /// Enforce `Visibility::Hidden` on every [`LocalPlayerBody`] each frame. This
-/// is idempotent insurance: the `cull_costume` system sets per-mesh visibility
-/// (some to `Inherited`) which propagates correctly from the `Hidden` root, but
-/// if any other system resets the root visibility this restores it. Cheap — at
-/// most one entity is tagged `LocalPlayerBody` at any time.
+/// is idempotent insurance: `apply_arena_part_visibility` (in `parts.rs`) sets
+/// per-mesh visibility (some to `Inherited`) which propagates correctly from the
+/// `Hidden` root, but if any other system resets the root visibility this restores
+/// it. Cheap — at most one entity is tagged `LocalPlayerBody` at any time.
 fn hide_local_player_body(mut local_bodies: Query<&mut Visibility, With<LocalPlayerBody>>) {
     for mut vis in &mut local_bodies {
         if *vis != Visibility::Hidden {
