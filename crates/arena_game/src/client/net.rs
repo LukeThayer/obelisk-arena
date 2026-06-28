@@ -42,6 +42,46 @@ pub struct LocalInput {
 #[derive(Resource, Default)]
 pub struct CastIntent(pub Option<String>);
 
+/// Maximum hold time for the charge mechanic. A full hold of this duration maps to charge=255
+/// (2.0× multiplier); an instant tap maps to charge=85 (≈1.0×).
+pub const MAX_CHARGE_SECS: f32 = 1.5;
+
+/// Per-frame charge-hold state for the local player's cast. Written by `bridge_windowed_cast_hold`
+/// (real keyboard/mouse) and read by `send_cast_requests` + the charge-bar HUD.
+///
+/// Lifecycle per cast:
+///   1. Cast button held → `charging = true`, `secs` accumulates.
+///   2. Button released → `pending_charge` is locked in, `CastIntent` is set, state resets.
+///   3. `send_cast_requests` fires → reads `pending_charge`, sends it on the wire, resets to
+///      the tap default (85) so the next autocast gets normal-strength casts.
+#[derive(Resource)]
+pub struct ChargeState {
+    /// Accumulated hold time this charge (clamped to [`MAX_CHARGE_SECS`]).
+    pub secs: f32,
+    /// True while the cast button is held but not yet released.
+    pub charging: bool,
+    /// Charge byte locked in at release; consumed (and reset to tap-default 85) by
+    /// `send_cast_requests`. Initialized to 85 so autocast paths get ≈1.0× strength.
+    pub(crate) pending_charge: u8,
+}
+
+impl Default for ChargeState {
+    fn default() -> Self {
+        Self {
+            secs: 0.0,
+            charging: false,
+            pending_charge: 85, // frac=0 → charge_mult(85) ≈ 1.0×
+        }
+    }
+}
+
+impl ChargeState {
+    /// Normalized hold fraction `[0, 1]` for the charge-bar HUD.
+    pub fn frac(&self) -> f32 {
+        (self.secs / MAX_CHARGE_SECS).clamp(0.0, 1.0)
+    }
+}
+
 /// Emitted by [`send_cast_requests`] the instant a local cast_request goes out, so the client can
 /// play the PREDICTED own-cast cosmetics immediately (zero latency) instead of waiting for the
 /// server's replicated cue (Task 17, guide §6.4). Carries the local caster's stable `ObeliskId`, its
@@ -77,6 +117,7 @@ impl Plugin for ClientNetPlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LocalInput>()
             .init_resource::<CastIntent>()
+            .init_resource::<ChargeState>()
             .add_message::<PredictedCast>()
             .add_systems(
                 Update,
@@ -185,12 +226,17 @@ fn send_local_player_input(
 /// Send a `CastRequestMessage` on the reliable `CastChannel` when [`CastIntent`] is set.
 /// `aim_dir` is the camera forward vector built from [`CameraYaw`] + [`AimPitch`] (free aim — the
 /// projectile flies exactly where the camera looks, pitch included; it can miss). The server fires
-/// along this direction via `cast_skill_dir` — no auto-acquire. The client NEVER validates or
-/// resolves. Clears the intent after sending (one cast per intent). `Single` sender
+/// along this direction via `cast_skill_dir_charged` — no auto-acquire. The client NEVER validates
+/// or resolves. Clears the intent after sending (one cast per intent). `Single` sender
 /// (multiple would panic — guide §1.2); no-op until the sender exists + we own a local player.
+///
+/// Reads [`ChargeState::pending_charge`], which is set by `bridge_windowed_cast_hold` on button
+/// release and defaults to 85 (≈1.0×) for autocast paths. Resets `pending_charge` to 85 after
+/// consuming so the next autocast gets normal-strength casts regardless of the previous hold.
 #[allow(clippy::type_complexity)]
 fn send_cast_requests(
     mut intent: ResMut<CastIntent>,
+    mut charge_state: ResMut<ChargeState>,
     local: Query<
         (&NetworkedPosition, &crate::net::protocol::ObeliskNetId),
         (With<NetworkedPlayer>, With<LocalNetPlayer>),
@@ -220,13 +266,20 @@ fn send_cast_requests(
     let aim_dir_vec = (rot * -Vec3::Z).normalize();
     let aim_dir = [aim_dir_vec.x, aim_dir_vec.y, aim_dir_vec.z];
 
+    // Consume the locked-in charge byte. Autocast paths leave `pending_charge` at the tap default
+    // (85, ≈1.0×); `bridge_windowed_cast_hold` sets it on release from the hold duration.
+    let charge = charge_state.pending_charge;
+    // Reset to tap-default so the next autocast (if any) gets normal-strength, not a stale value.
+    charge_state.pending_charge = 85;
+
     sender.send::<CastChannel>(CastRequestMessage {
         skill_id: skill_id.clone(),
         aim_dir,
+        charge,
     });
     crate::trace::event(
         "cast_request_sent",
-        serde_json::json!({ "skill_id": skill_id, "aim_dir": aim_dir }),
+        serde_json::json!({ "skill_id": skill_id, "aim_dir": aim_dir, "charge": charge }),
     );
 
     // PREDICTED own-cast feedback (Task 17): fire the local on_cast cosmetics IMMEDIATELY so the

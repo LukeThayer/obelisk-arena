@@ -199,7 +199,7 @@ pub fn run_windowed_client() {
         Update,
         (
             bridge_windowed_input_to_local_input,
-            bridge_windowed_cast_to_intent,
+            bridge_windowed_cast_hold,
         ),
     );
 
@@ -248,19 +248,42 @@ fn windowed_autocast(
     }
 }
 
-/// Bridge the windowed cast key (Space / left-mouse) into [`net::CastIntent`] so the local player's
-/// cast goes over the wire as a `CastRequestMessage` (server re-validates + resolves — Stage A,
-/// Task 14). This is the windowed counterpart of the headless AUTOCAST hook; it replaces M1's direct
-/// `cast_skill_at` for the NET player. (The M1 co-located `cast_on_input` still runs for the
-/// single-process dummy regression, but the authoritative duel cast now flows server-side.)
-fn bridge_windowed_cast_to_intent(
+/// Hold-to-charge cast input: replaces the old press-to-cast `bridge_windowed_cast_to_intent`.
+///
+/// While the cast button (Space or LMB) is held, `ChargeState.secs` accumulates (clamped to
+/// `MAX_CHARGE_SECS`). On release, the accumulated hold time maps to a charge byte via:
+///   `frac = secs / MAX_CHARGE_SECS`
+///   `charge = (85 + frac * 170).round()` — 85 ≈ instant tap (≈1.0×), 255 = full hold (2.0×)
+/// The charge is locked into `ChargeState.pending_charge` and `CastIntent` is set so
+/// `send_cast_requests` ships a `CastRequestMessage { charge }` on the wire.
+///
+/// Autocast paths (`windowed_autocast`, `headless_autocast`) bypass this and set `CastIntent`
+/// directly; `send_cast_requests` uses the `pending_charge` tap-default (85) for those.
+fn bridge_windowed_cast_hold(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    time: Res<Time>,
     mut intent: ResMut<net::CastIntent>,
+    mut charge: ResMut<net::ChargeState>,
 ) {
-    let pressed = keys.just_pressed(KeyCode::Space) || mouse.just_pressed(MouseButton::Left);
-    if pressed && intent.0.is_none() {
-        intent.0 = Some("firebolt".to_string());
+    let held = keys.pressed(KeyCode::Space) || mouse.pressed(MouseButton::Left);
+    let just_released = keys.just_released(KeyCode::Space) || mouse.just_released(MouseButton::Left);
+
+    if held {
+        charge.secs = (charge.secs + time.delta_secs()).min(net::MAX_CHARGE_SECS);
+        charge.charging = true;
+    } else {
+        if just_released && charge.charging {
+            // Lock in the charge and emit the cast intent on release.
+            let frac = charge.frac();
+            charge.pending_charge = (85.0 + frac * 170.0).round().clamp(0.0, 255.0) as u8;
+            if intent.0.is_none() {
+                intent.0 = Some("firebolt".to_string());
+            }
+        }
+        // Reset regardless — keeps state consistent when button is not held.
+        charge.secs = 0.0;
+        charge.charging = false;
     }
 }
 
