@@ -408,11 +408,14 @@ fn drain_cast_requests(
             trace::event(
                 "cast_request_accepted",
                 json!({ "caster": caster_id.0, "skill_id": req.skill_id,
-                        "aim_dir": req.aim_dir }),
+                        "aim_dir": req.aim_dir, "charge": req.charge }),
             );
+            // Use the charged variant: `charge_mult(Some(c)) = 0.5 + (c/255)*1.5`.
+            // charge=85 ≈ 1.0× (instant tap), charge=255 = 2.0× (full hold).
+            // `u8` is inherently bounded [0, 255] — no extra clamp needed.
             commands
                 .entity(caster)
-                .cast_skill_dir(req.skill_id.clone(), dir);
+                .cast_skill_dir_charged(req.skill_id.clone(), dir, req.charge);
         }
     }
 }
