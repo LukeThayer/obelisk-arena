@@ -47,6 +47,10 @@ impl Plugin for ArenaServerPlugin {
                     // (FixedUpdate, below) → ship the avian-integrated pose back (Update).
                     drain_player_inputs,
                     sync_player_positions,
+                    // Bug 1a: stamp each player's obelisk cast phase into the replicated pose so
+                    // the OTHER client can animate this player's cast. Every Update (a caster
+                    // stands still while casting, so this is NOT gated on Changed<Position>).
+                    sync_cast_state,
                     // HP mirror (Task 18): mirror each player's obelisk life → replicated
                     // NetworkedHealth so the client HUD reads server-authoritative hp.
                     sync_networked_health,
@@ -524,6 +528,45 @@ fn sync_player_positions(
     }
 }
 
+/// Map an optional obelisk `SkillPhase` to the replicated `NetworkedPosition.cast_phase` byte:
+/// `None` → 0 (not casting), `Windup` → 1, `Active` → 2, `Recovery` → 3. `SkillPhase::Done` is the
+/// terminal phase obelisk removes the `ActiveCast` on, so it maps to 0 (no cast) too. Pure helper so
+/// the byte mapping is unit-testable without booting an app.
+fn cast_phase_byte(phase: Option<SkillPhase>) -> u8 {
+    match phase {
+        Some(SkillPhase::Windup) => 1,
+        Some(SkillPhase::Active) => 2,
+        Some(SkillPhase::Recovery) => 3,
+        Some(SkillPhase::Done) | None => 0,
+    }
+}
+
+/// Stamp each player's obelisk cast state into its replicated `NetworkedPosition` so the OTHER
+/// client can drive a cast animation on this player's remote rig (Bug 1a). Runs every `Update`
+/// (NOT gated on `Changed<Position>` — a caster usually stands still while casting, so a
+/// position-gated system would never fire). The `ActiveCast` lives on the SAME entity as the
+/// `NetworkedPlayer` (the server calls `cast_skill_dir_charged` on the player entity, and obelisk
+/// inserts `ActiveCast` there), so `Option<&ActiveCast>` reads it directly.
+///
+/// Writes `cast_phase`/`cast_skill` ONLY when they change so we don't trip
+/// `Changed<NetworkedPosition>` (and re-replicate) every frame the player is idle.
+fn sync_cast_state(
+    mut q: Query<(Option<&ActiveCast>, &mut NetworkedPosition), With<NetworkedPlayer>>,
+) {
+    for (active, mut netpos) in &mut q {
+        let phase = cast_phase_byte(active.map(|c| c.phase));
+        // A simple "is casting" marker is enough here (the client only needs phase to animate); we
+        // don't resolve the real skill-id table. 1 = casting, 0 = idle.
+        let skill = if phase == 0 { 0 } else { 1 };
+        if netpos.cast_phase != phase {
+            netpos.cast_phase = phase;
+        }
+        if netpos.cast_skill != skill {
+            netpos.cast_skill = skill;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // HP mirror (Task 18, guide §5.6): mirror obelisk life → replicated `NetworkedHealth`.
 //
@@ -989,5 +1032,23 @@ fn broadcast_round_state(
             json!({ "phase": msg.phase, "countdown": msg.countdown,
                     "scores": msg.scores, "winner": msg.winner }),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cast_phase_byte;
+    use obelisk_bevy::prelude::SkillPhase;
+
+    /// The phase→byte mapping the client decodes (`NetworkedPosition.cast_phase`): no cast → 0,
+    /// Windup → 1, Active → 2, Recovery → 3; the terminal `Done` (obelisk removes ActiveCast on it)
+    /// collapses to 0. Pins Bug 1a's wire contract.
+    #[test]
+    fn cast_phase_byte_maps_each_phase() {
+        assert_eq!(cast_phase_byte(None), 0);
+        assert_eq!(cast_phase_byte(Some(SkillPhase::Windup)), 1);
+        assert_eq!(cast_phase_byte(Some(SkillPhase::Active)), 2);
+        assert_eq!(cast_phase_byte(Some(SkillPhase::Recovery)), 3);
+        assert_eq!(cast_phase_byte(Some(SkillPhase::Done)), 0);
     }
 }
