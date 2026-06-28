@@ -90,7 +90,10 @@ trap cleanup EXIT INT TERM
 
     # observer-0: the CASTER. ARENA_CLIENT_ID=1 → server slot 0 → obelisk_id "player_1".
     # ARENA_AUTOCAST scripts a firebolt cast (over the wire) once it owns a player + sees an opponent.
+    # ARENA_CAM_YAW: slot-0 spawns at (-4,1,0), slot-1 at (4,1,0).  The look direction
+    #   rot(-Z) = (1,0,0) requires yaw = -π/2 ≈ -1.5707963 so the bolt flies along +X toward slot-1.
     ARENA_HEADLESS=1 ARENA_CLIENT_ID=1 ARENA_AUTOCAST=1 ARENA_AUTOCAST_PERIOD=0.8 \
+    ARENA_CAM_YAW="-1.5707963" \
     ARENA_TRACE_FILE="$session_dir/observer-0.jsonl" ARENA_TRACE_SRC="observer-0" \
     ARENA_MATCH_SEED="$seed" RUST_LOG="${RUST_LOG:-warn}" \
         "$observer_bin" >"$session_dir/observer-0.log" 2>&1 &

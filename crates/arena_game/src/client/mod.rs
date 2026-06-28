@@ -336,6 +336,22 @@ pub fn run_headless_client() {
     // (Task 11) interpolate remote players. Also traces replicated/materialized players for the
     // late-joiner check.
     app.add_plugins(net::ClientNetPlayerPlugin);
+
+    // Seed CameraYaw + AimPitch from env vars so `send_cast_requests` has an aim direction.
+    // `ARENA_CAM_YAW` (radians) steers the cast; `ARENA_TEST_PITCH` seeds the pitch (both
+    // default to 0.0 if unset). These mirror the env-var seeding in `ArenaControllerPlugin`
+    // (windowed client), giving the headless harness the same knob to aim the caster.
+    let headless_yaw = std::env::var("ARENA_CAM_YAW")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.0);
+    let headless_pitch = std::env::var("ARENA_TEST_PITCH")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.0);
+    app.insert_resource(controller::CameraYaw(headless_yaw))
+        .insert_resource(controller::AimPitch(headless_pitch));
+
     app.add_plugins(replication::ReplicationSmoothingPlugin);
     // Stage-A own-movement prediction (predict-locally-snap-to-server fallback, see prediction.rs).
     app.add_plugins(prediction::LocalPredictionPlugin);
