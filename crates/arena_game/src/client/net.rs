@@ -185,22 +185,29 @@ fn materialize_replicated_players(
     for (entity, owner, netpos) in &new_players {
         let is_local = my_id == Some(owner.0);
         let spawn = netpos.to_vec3();
-        // A local avian body so M2.2 Task 11 smoothing (which writes Transform + Position/Rotation)
-        // has a body to drive, and so the local controller (Task 12) can run physics on it. The
-        // pose is authoritatively driven by the server via NetworkedPosition; this body is a render
-        // proxy, NOT a second authority. Kinematic so it never fights the smoothing/snap writes.
+        // Every materialized player gets a Transform + Visibility for rendering.
         commands.entity(entity).insert((
             MaterializedBody,
             Transform::from_translation(spawn),
             Visibility::default(),
-            avian3d::prelude::RigidBody::Kinematic,
-            avian3d::prelude::Position(spawn),
-            avian3d::prelude::Rotation::default(),
-            avian3d::prelude::Collider::capsule(0.4, 1.2),
         ));
         if is_local {
+            // Only the LOCAL player gets an avian body: the local controller (Task 12 prediction)
+            // runs physics on it, and the Task 11 smoothing/snap writes its Position/Rotation.
+            // Kinematic so it never fights those writes. The server is authoritative for combat.
+            commands.entity(entity).insert((
+                avian3d::prelude::RigidBody::Kinematic,
+                avian3d::prelude::Position(spawn),
+                avian3d::prelude::Rotation::default(),
+                avian3d::prelude::Collider::capsule(0.4, 1.2),
+            ));
             commands.entity(entity).insert(LocalNetPlayer);
         }
+        // Bug 2: the REMOTE player gets NO avian body — it's a pure transform proxy. The client
+        // never raycasts/collides the opponent (server is the combat authority), so a remote avian
+        // Kinematic body only competed with `smooth_networked_transforms`' manual pose smoothing,
+        // causing the positional stutter. `smooth_networked_transforms` takes `Option<&mut Position>`
+        // /`Option<&mut Rotation>`, so it gracefully writes Transform-only for the proxy.
         info!(
             "materialized {} body for NetworkedPlayer owner={} at {spawn:?}",
             if is_local { "LOCAL" } else { "remote" },
