@@ -364,28 +364,26 @@ fn run_player_controller(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Cast pipeline (Task 14): client cast_request → server re-validate → cast_skill_at (guide §5.2).
+// Cast pipeline (Task 14 + Milestone B): client cast_request → server fire along aim_dir.
 //
 // The client sends a `CastRequestMessage` on the reliable `CastChannel` (it NEVER validates or
 // resolves — Stage A). The server maps the sender's `RemoteId` → caster entity via the
-// `ClientPlayerMap`, RE-ACQUIRES the real target server-side via `ObeliskSpatial::nearest_enemy`
-// (treating the client's `target_hint` as advisory only — never trusting the client for target
-// selection), and issues `cast_skill_at`. obelisk's `validate_casts` (FixedUpdate) then gates
-// range/LOS/mana/cooldown/already-casting and emits `CastBegan` or `CastRejected`.
+// `ClientPlayerMap` and fires along the client's `aim_dir` (camera forward, full 3D) via
+// `cast_skill_dir` — free aim, no auto-acquire. obelisk's `validate_casts` (FixedUpdate) gates
+// mana/cooldown/already-casting and emits `CastBegan` or `CastRejected`. The projectile can miss
+// if the client was not aimed at the target — this is intentional (free-aim design).
 // ---------------------------------------------------------------------------------------------
 
-/// Drain `CastRequestMessage`s from each connected client and issue an authoritative cast.
+/// Drain `CastRequestMessage`s from each connected client and fire along the client's aim direction.
 ///
-/// Server-side re-validation (guide §5.2): the `target_hint` is advisory; the server re-acquires the
-/// nearest enemy via the spatial query (range gated to firebolt's 15u targeting + a margin). If no
-/// enemy is in range the request is dropped (obelisk would reject it as `NoTarget` anyway). Skips a
-/// caster already mid-cast (obelisk would reject `AlreadyCasting`, but skipping avoids the churn).
-#[allow(clippy::type_complexity)]
+/// Fires the caster's skill via `cast_skill_dir` with the `aim_dir` from the message (the client's
+/// camera forward vector). No server-side target re-acquisition — the bolt goes where the client
+/// aimed (free aim). Skips a caster already mid-cast (`AlreadyCasting` avoidance). The caster
+/// entity must exist in the `ClientPlayerMap`; otherwise the request is silently dropped.
 fn drain_cast_requests(
     mut receivers: Query<(&RemoteId, &mut MessageReceiver<CastRequestMessage>), With<ClientOf>>,
     client_map: Res<ClientPlayerMap>,
-    spatial: ObeliskSpatial,
-    casters: Query<(&Transform, &Faction, &ObeliskId), With<NetworkedPlayer>>,
+    casters: Query<&ObeliskId, With<NetworkedPlayer>>,
     active: Query<(), With<ActiveCast>>,
     mut commands: Commands,
 ) {
@@ -401,27 +399,20 @@ fn drain_cast_requests(
                 // Already casting; obelisk would reject. Drop silently.
                 continue;
             }
-            let Ok((tf, faction, caster_id)) = casters.get(caster) else {
+            let Ok(caster_id) = casters.get(caster) else {
                 continue;
             };
-            // RE-ACQUIRE the target authoritatively (the client's target_hint is advisory only).
-            // 20u acquisition radius (> firebolt's 15u targeting range so validate_casts owns the
-            // range gate). nearest_enemy filters by opposing faction.
-            let Some(target) = spatial.nearest_enemy(tf.translation, 20.0, *faction) else {
-                trace::event(
-                    "cast_request_no_target",
-                    json!({ "caster": caster_id.0, "skill_id": req.skill_id }),
-                );
-                continue;
-            };
+            // Fire along the client's camera-forward direction. Fall back to -Z (straight forward)
+            // if the vector is degenerate (shouldn't happen from a well-formed client).
+            let dir = Dir3::new(Vec3::from(req.aim_dir)).unwrap_or(Dir3::NEG_Z);
             trace::event(
                 "cast_request_accepted",
                 json!({ "caster": caster_id.0, "skill_id": req.skill_id,
-                        "target_hint": req.target_hint }),
+                        "aim_dir": req.aim_dir }),
             );
             commands
                 .entity(caster)
-                .cast_skill_at(req.skill_id.clone(), target);
+                .cast_skill_dir(req.skill_id.clone(), dir);
         }
     }
 }
