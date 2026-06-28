@@ -1,13 +1,15 @@
-//! Third-person over-the-shoulder controller for the arena player.
+//! First-person camera controller for the arena player.
 //!
 //! Three concerns, all kinematic (no avian rigidbody on the player — obelisk's
 //! spatial model owns the authoritative hitboxes; the player moves by writing
 //! `Transform.translation` directly):
 //!
-//!   1. **Follow camera** — an over-the-shoulder cam positioned behind + above
-//!      the player in the player's yaw frame, looking at the head. Camera yaw is
-//!      driven by accumulated mouse-X each frame; the cam follows the player's
-//!      `Transform.translation`.
+//!   1. **First-person camera** — the camera sits at the local player's eye height
+//!      (`EYE_HEIGHT` above the player root). Camera yaw is driven by accumulated
+//!      mouse-X each frame; pitch by mouse-Y. Rotation is
+//!      `Quat::from_axis_angle(Y, yaw) * Quat::from_axis_angle(X, pitch)` so the
+//!      cam looks exactly where the mouse aims. The local player's own body is hidden
+//!      (see `present::LocalPlayerBody`) so the camera is never inside a mesh.
 //!   2. **Camera-relative WASD movement** — moves the player's `Transform`
 //!      directly (`dir * speed * dt`); rotates the body to face the movement
 //!      direction; records `world_velocity` (frame delta) for the Task 12
@@ -15,14 +17,17 @@
 //!   3. **Aim spine-pitch** — the `chest_joint` lean, copied verbatim from
 //!      wisp's `apply_aim_pitch_to_local_spine` (`wisp/src/player/controller.rs`),
 //!      renaming the body marker to [`ArenaBody`] and reading the pitch from the
-//!      [`AimPitch`] resource (mouse-Y). Scheduled in `PostUpdate` AFTER
-//!      `AnimationSystems`, BEFORE `TransformSystems::Propagate` so the lean is
-//!      folded into the per-frame `GlobalTransform` propagation.
+//!      [`AimPitch`] resource (mouse-Y). Applied only to REMOTE (opponent) bodies;
+//!      the hidden local body is skipped (see [`apply_aim_pitch_to_local_spine`]).
+//!      Scheduled in `PostUpdate` AFTER `AnimationSystems`, BEFORE
+//!      `TransformSystems::Propagate` so the lean is folded into the per-frame
+//!      `GlobalTransform` propagation.
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
+use super::present::LocalPlayerBody;
 use super::rig::ArenaBody;
 
 /// Marker on the player combatant root that this controller drives. Spawned in
@@ -49,12 +54,10 @@ const MOUSE_SENSITIVITY: f32 = 0.0035;
 /// readable range and stops the camera from flipping over the top/bottom.
 const PITCH_LIMIT: f32 = 85.0_f32 * std::f32::consts::PI / 180.0;
 
-/// Over-the-shoulder camera offset in the player's yaw frame: behind (-Z is
-/// "forward", so +Z*4 puts the cam 4 units *behind*) and 2 units above.
-const CAM_OFFSET: Vec3 = Vec3::new(0.0, 2.0, 4.0);
-
-/// Where the camera looks, relative to the player root (≈ head height).
-const CAM_LOOK_AT: Vec3 = Vec3::new(0.0, 1.5, 0.0);
+/// Camera eye height above the player root transform in world units. Placing the
+/// camera at `player.translation + Vec3::Y * EYE_HEIGHT` puts it at roughly head
+/// level for the Polysplit rig (capsule half-height ~0.6 + ~1.0 upper body).
+const EYE_HEIGHT: f32 = 1.6;
 
 /// Name of the spine bone that drives upper-body aim lean. The Polysplit rig's
 /// spine chain is `pelvis_joint → waist_joint → chest_joint → neck_joint`;
@@ -187,23 +190,27 @@ type LocalNetPlayerTransform<'w, 's> = Single<
     ),
 >;
 
-/// Place the over-the-shoulder follow camera behind + above the LOCAL predicted player, looking at
-/// its head, recomputed each frame in the [`CameraYaw`] frame so the cam follows the predicted body
-/// and tracks mouse-look. Replaces M1's `PlayerController`-following branch of `update_camera_and_aim`
-/// with one that follows the materialized [`LocalNetPlayer`]. No-op until the local player is bodied
+/// Place the first-person camera at the LOCAL predicted player's eye position each frame.
+///
+/// Translation: `player.translation + Vec3::Y * EYE_HEIGHT` (head level).
+/// Rotation: `Quat::from_axis_angle(Y, yaw) * Quat::from_axis_angle(X, pitch)` — yaw from
+/// mouse-X, pitch from mouse-Y — so the camera looks exactly where the player aims.
+///
+/// Replaces M1's over-the-shoulder `update_camera_and_aim` with a true first-person placement
+/// following the materialized [`LocalNetPlayer`]. No-op until the local player is bodied
 /// (pre-connect / pre-replication).
 fn follow_local_net_player(
     player: Option<LocalNetPlayerTransform>,
     cam: Option<CameraTransform>,
     yaw: Res<CameraYaw>,
+    pitch: Res<AimPitch>,
 ) {
     let (Some(player), Some(mut cam)) = (player, cam) else {
         return;
     };
-    let yaw_rot = Quat::from_axis_angle(Vec3::Y, yaw.0);
-    let focus = player.translation + CAM_LOOK_AT;
-    cam.translation = player.translation + yaw_rot * CAM_OFFSET;
-    cam.look_at(focus, Vec3::Y);
+    cam.translation = player.translation + Vec3::Y * EYE_HEIGHT;
+    cam.rotation =
+        Quat::from_axis_angle(Vec3::Y, yaw.0) * Quat::from_axis_angle(Vec3::X, pitch.0);
 }
 
 /// After animation has set bone Transforms, apply the aim pitch on top of the
@@ -211,6 +218,10 @@ fn follow_local_net_player(
 /// `wisp/src/player/controller.rs:219-249` (the spine-pitch system), with the
 /// body marker renamed to [`ArenaBody`] and the pitch source switched from
 /// wisp's first-person `Facing.pitch` to the [`AimPitch`] resource.
+///
+/// Only applied to REMOTE (opponent) bodies — the LOCAL body is tagged
+/// [`LocalPlayerBody`] and hidden in first-person, so leaning it is moot; we
+/// skip it here so the spine cost is only paid for the visible opponent.
 ///
 /// Runs in `PostUpdate`, ordered between `AnimationSystems` and
 /// `TransformSystems::Propagate`, so the modification is included in the
@@ -221,6 +232,7 @@ pub fn apply_aim_pitch_to_local_spine(
     bones: Query<(Entity, &Name)>,
     parents: Query<&ChildOf>,
     body_marker: Query<(), With<ArenaBody>>,
+    local_body_marker: Query<(), With<LocalPlayerBody>>,
     mut transforms: Query<&mut Transform>,
 ) {
     // Bone-local axes on the gltf-imported Polysplit chest bone: X runs along
@@ -235,6 +247,11 @@ pub fn apply_aim_pitch_to_local_spine(
             continue;
         }
         if !ancestor_has_body_marker(entity, &parents, &body_marker) {
+            continue;
+        }
+        // Local body is hidden in first-person; skip so only the remote
+        // (opponent) torso leans to aim.
+        if ancestor_has_local_body(entity, &parents, &local_body_marker) {
             continue;
         }
         if let Ok(mut tf) = transforms.get_mut(entity) {
@@ -256,6 +273,26 @@ fn ancestor_has_body_marker(
     let mut cur = entity;
     loop {
         if marker.contains(cur) {
+            return true;
+        }
+        match parents.get(cur) {
+            Ok(p) => cur = p.0,
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Walk the `ChildOf` parent chain to check if a bone belongs to the LOCAL
+/// player's body (tagged [`LocalPlayerBody`]). Used by
+/// [`apply_aim_pitch_to_local_spine`] to skip leaning the hidden local body.
+fn ancestor_has_local_body(
+    entity: Entity,
+    parents: &Query<&ChildOf>,
+    local_body: &Query<(), With<LocalPlayerBody>>,
+) -> bool {
+    let mut cur = entity;
+    loop {
+        if local_body.contains(cur) {
             return true;
         }
         match parents.get(cur) {
