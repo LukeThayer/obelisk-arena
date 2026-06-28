@@ -19,7 +19,7 @@ use lightyear::prelude::server::ClientOf;
 use lightyear::prelude::{LocalId, MessageSender, PeerId};
 
 use crate::net::protocol::{
-    CastChannel, CastRequestMessage, InputChannel, NetworkOwner, NetworkedId, NetworkedPlayer,
+    CastChannel, CastRequestMessage, InputChannel, NetworkOwner, NetworkedPlayer,
     NetworkedPosition, PlayerInputMessage,
 };
 
@@ -182,34 +182,28 @@ fn send_local_player_input(
     });
 }
 
-/// Send a `CastRequestMessage` on the reliable `CastChannel` when [`CastIntent`] is set. Picks the
-/// nearest OTHER networked player as `target_hint` (its `NetworkedId`) and computes `aim_dir` toward
-/// it from the replicated `NetworkedPosition`s — both are HINTS; the server re-acquires the real
-/// target via `ObeliskSpatial::nearest_enemy` and re-validates (guide §5.2). The client NEVER
-/// validates or resolves. Clears the intent after sending (one cast per intent). `Single` sender
+/// Send a `CastRequestMessage` on the reliable `CastChannel` when [`CastIntent`] is set.
+/// `aim_dir` is the camera forward vector built from [`CameraYaw`] + [`AimPitch`] (free aim — the
+/// projectile flies exactly where the camera looks, pitch included; it can miss). The server fires
+/// along this direction via `cast_skill_dir` — no auto-acquire. The client NEVER validates or
+/// resolves. Clears the intent after sending (one cast per intent). `Single` sender
 /// (multiple would panic — guide §1.2); no-op until the sender exists + we own a local player.
 #[allow(clippy::type_complexity)]
 fn send_cast_requests(
     mut intent: ResMut<CastIntent>,
     local: Query<
-        (
-            &NetworkOwner,
-            &NetworkedPosition,
-            &crate::net::protocol::ObeliskNetId,
-        ),
+        (&NetworkedPosition, &crate::net::protocol::ObeliskNetId),
         (With<NetworkedPlayer>, With<LocalNetPlayer>),
-    >,
-    others: Query<
-        (&NetworkOwner, &NetworkedId, &NetworkedPosition),
-        (With<NetworkedPlayer>, Without<LocalNetPlayer>),
     >,
     sender: Option<Single<&mut MessageSender<CastRequestMessage>>>,
     mut predicted: MessageWriter<PredictedCast>,
+    yaw: Res<super::controller::CameraYaw>,
+    pitch: Res<super::controller::AimPitch>,
 ) {
     let Some(skill_id) = intent.0.clone() else {
         return;
     };
-    let Ok((_owner, local_pos, local_obelisk_id)) = local.single() else {
+    let Ok((local_pos, local_obelisk_id)) = local.single() else {
         return; // no local player yet
     };
     let Some(mut sender) = sender else {
@@ -217,33 +211,22 @@ fn send_cast_requests(
     };
     let here = local_pos.to_vec3();
 
-    // Nearest other player → the target hint + aim direction.
-    let nearest = others
-        .iter()
-        .map(|(_, nid, pos)| (nid.0, pos.to_vec3()))
-        .min_by(|a, b| {
-            a.1.distance_squared(here)
-                .partial_cmp(&b.1.distance_squared(here))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-    let (target_hint, aim_dir) = match nearest {
-        Some((nid, pos)) => {
-            let dir = (pos - here).normalize_or_zero();
-            (Some(nid), [dir.x, dir.y, dir.z])
-        }
-        // No opponent visible yet: still send (server re-acquires); aim straight ahead.
-        None => (None, [0.0, 0.0, 1.0]),
-    };
+    // Compute aim direction from the camera look vector (yaw + pitch = first-person forward).
+    // Matches the camera placement in `controller::follow_local_net_player`: the camera rotation
+    // is `Quat::from_axis_angle(Y, yaw) * Quat::from_axis_angle(X, pitch)`, so the forward
+    // vector is that rotation applied to `-Z`. Full 3D: pitch is included so looking up/down
+    // aims the bolt there. The projectile can miss — this is intentional (free aim).
+    let rot = Quat::from_axis_angle(Vec3::Y, yaw.0) * Quat::from_axis_angle(Vec3::X, pitch.0);
+    let aim_dir_vec = (rot * -Vec3::Z).normalize();
+    let aim_dir = [aim_dir_vec.x, aim_dir_vec.y, aim_dir_vec.z];
 
     sender.send::<CastChannel>(CastRequestMessage {
         skill_id: skill_id.clone(),
-        target_hint,
         aim_dir,
     });
     crate::trace::event(
         "cast_request_sent",
-        serde_json::json!({ "skill_id": skill_id, "target_hint": target_hint, "aim_dir": aim_dir }),
+        serde_json::json!({ "skill_id": skill_id, "aim_dir": aim_dir }),
     );
 
     // PREDICTED own-cast feedback (Task 17): fire the local on_cast cosmetics IMMEDIATELY so the

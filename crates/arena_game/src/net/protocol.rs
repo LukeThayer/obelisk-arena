@@ -134,13 +134,14 @@ pub struct PlayerInputMessage {
 }
 
 /// Cast request — replaces M1's direct `cast_skill_at` on the local entity (spec §5.2). The server
-/// re-validates server-side; `target_hint` is a hint the server may re-acquire.
+/// fires along `aim_dir` (the client's camera forward vector) via `cast_skill_dir` — free aim, no
+/// auto-acquire. The server re-validates caster validity + already-casting; obelisk's
+/// `validate_casts` gates mana/cooldown/already-casting.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CastRequestMessage {
     pub skill_id: String,
-    /// `NetworkedId` of the intended target (a HINT; server re-acquires via spatial query).
-    pub target_hint: Option<u64>,
-    /// For direction-targeted skills + cosmetic projectile aim.
+    /// Camera-forward unit vector in world space (yaw + pitch applied). The server fires the
+    /// projectile along this direction; the client uses it for predicted own-cast cosmetics.
     pub aim_dir: [f32; 3],
 }
 
