@@ -136,9 +136,15 @@ pub fn spawn_cue_cosmetics(
 
             // 2) Cosmetic flying projectile (OnCast lane only, for firebolt).
             if let Some(proj) = &lane.projectile {
-                // Direction: the caster's stashed aim (set when the cast was issued), keyed by the
-                // caster's `ObeliskId` — the OnCast cue's `source_id` IS the caster. Default +Z.
-                let dir = aim.0.get(&m.source_id).copied().unwrap_or(Vec3::Z);
+                // Direction (Bug 1b): prefer the cue's OWN aim_dir (carried over the wire from the
+                // server, so an OBSERVER flies the bolt the right way). Fall back to the local
+                // `AimDirs` lookup (the local-prediction path stashes it keyed by `ObeliskId` — the
+                // OnCast cue's `source_id` IS the caster), then to +Z.
+                let dir = if m.aim_dir != Vec3::ZERO {
+                    m.aim_dir
+                } else {
+                    aim.0.get(&m.source_id).copied().unwrap_or(Vec3::Z)
+                };
                 let c = LinearRgba::rgb(proj.color[0], proj.color[1], proj.color[2]);
                 commands.spawn((
                     Mesh3d(meshes.add(Sphere::new(proj.radius))),
