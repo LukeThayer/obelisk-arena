@@ -141,6 +141,7 @@ impl Plugin for ClientNetPlayerPlugin {
                     send_customization,
                     drain_customize_broadcasts,
                     trace_received_remote_pose,
+                    trace_remote_cast_phase,
                 ),
             );
     }
@@ -361,6 +362,36 @@ fn drain_customize_broadcasts(
             crate::trace::event(
                 "customize_received",
                 serde_json::json!({ "player": msg.player }),
+            );
+        }
+    }
+}
+
+/// [H] check support (Bug 1a): edge-triggered trace of a REMOTE player's replicated cast phase, so
+/// the headless harness can confirm the server's stamped `NetworkedPosition.cast_phase` (Bug 1a)
+/// actually propagates server → this observer (which is what drives the remote cast animation).
+/// Fires one `remote_cast_phase` line each time a remote player's `cast_phase` byte changes value
+/// (keyed by `NetworkOwner`), not every frame — a cast walks 0→1→2→3→0 so it emits a handful of
+/// lines per cast. The local player is excluded (its cast is driven locally, not from the wire).
+#[allow(clippy::type_complexity)]
+fn trace_remote_cast_phase(
+    remotes: Query<
+        (&NetworkOwner, &crate::net::protocol::NetworkedPosition),
+        (
+            With<NetworkedPlayer>,
+            Without<LocalNetPlayer>,
+            Changed<crate::net::protocol::NetworkedPosition>,
+        ),
+    >,
+    mut last: Local<std::collections::HashMap<u64, u8>>,
+) {
+    for (owner, netpos) in &remotes {
+        let prev = last.insert(owner.0, netpos.cast_phase);
+        if prev != Some(netpos.cast_phase) {
+            crate::trace::event(
+                "remote_cast_phase",
+                serde_json::json!({ "owner": owner.0, "cast_phase": netpos.cast_phase,
+                    "cast_skill": netpos.cast_skill }),
             );
         }
     }
