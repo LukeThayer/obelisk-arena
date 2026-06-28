@@ -15,13 +15,14 @@ use bevy::prelude::*;
 use lightyear::prelude::MessageReceiver;
 
 use crate::client::controller::FollowCamera;
-use crate::client::net::LocalNetPlayer;
+use crate::client::net::{ChargeState, LocalNetPlayer};
 use crate::net::protocol::{
     NetEventMessage, NetworkedHealth, NetworkedPlayer, NetworkedPosition, ObeliskNetId,
 };
 
 /// Plugin: the windowed HUD. Builds the bar widgets at startup, drives them from `NetworkedHealth`,
-/// spawns floating damage + hit flashes from `DamageResolved`, and renders the round/score label.
+/// spawns floating damage + hit flashes from `DamageResolved`, renders the round/score label, and
+/// drives the charge bar + spell indicator (C6).
 pub struct ArenaHudPlugin;
 
 impl Plugin for ArenaHudPlugin {
@@ -37,6 +38,7 @@ impl Plugin for ArenaHudPlugin {
                     age_hit_flashes,
                     receive_round_state,
                     update_round_label,
+                    update_charge_bar,
                 ),
             );
     }
@@ -67,8 +69,32 @@ struct HealthBarLabel {
 #[derive(Component)]
 struct RoundLabel;
 
+// ---------------------------------------------------------------------------------------------
+// Charge bar (C6)
+// ---------------------------------------------------------------------------------------------
+
+/// Marker on the charge-bar track (dark background). Its `Node.display` is toggled by
+/// `update_charge_bar` — `Display::None` when not charging, `Display::Flex` when charging.
+#[derive(Component)]
+struct ChargeBarRoot;
+
+/// Marker on the charge-bar fill child. Its `Node.width` is set to `Val::Percent(frac * 100)`
+/// each frame from [`ChargeState::frac`].
+#[derive(Component)]
+struct ChargeBarFill;
+
+/// Marker on the spell-selected label ("Firebolt"). Static for now; structured so more spells
+/// can slot in later (e.g. a hotbar row with one label per slot).
+#[derive(Component)]
+struct SpellLabel;
+
 const BAR_WIDTH_PX: f32 = 280.0;
 const BAR_HEIGHT_PX: f32 = 26.0;
+
+/// Width of the charge bar in pixels. Narrower than the HP bar — it's a transient indicator.
+const CHARGE_BAR_WIDTH: f32 = 160.0;
+/// Height of the charge bar in pixels.
+const CHARGE_BAR_HEIGHT: f32 = 10.0;
 
 /// Build the two hp bars (own bottom-left, opponent top-right) + the round banner. A `bevy_ui`
 /// `Node` tree; the fill nodes are resized each frame by `update_health_bars`.
@@ -135,6 +161,58 @@ fn setup_hud(mut commands: Commands) {
             ..default()
         },
         BackgroundColor(Color::WHITE),
+    ));
+
+    // Charge bar: centered horizontally, 14 px below the crosshair center. Hidden via
+    // `Display::None` until charging; `update_charge_bar` toggles display and fill width each frame.
+    commands
+        .spawn((
+            ChargeBarRoot,
+            Node {
+                display: Display::None, // hidden until charging
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                top: Val::Percent(50.0),
+                // Center the bar horizontally and place it below the crosshair.
+                margin: UiRect {
+                    left: Val::Px(-(CHARGE_BAR_WIDTH / 2.0)),
+                    top: Val::Px(14.0),
+                    ..default()
+                },
+                width: Val::Px(CHARGE_BAR_WIDTH),
+                height: Val::Px(CHARGE_BAR_HEIGHT),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+        ))
+        .with_children(|frame| {
+            frame.spawn((
+                ChargeBarFill,
+                Node {
+                    width: Val::Percent(0.0), // driven each frame by update_charge_bar
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.25, 0.6, 1.0)), // cyan-blue charge color
+            ));
+        });
+
+    // Spell-selected indicator: static "Firebolt" label at bottom-left, above the local HP bar.
+    // Structured as a named component so more spells can slot in later (one label per hotbar slot).
+    commands.spawn((
+        SpellLabel,
+        Text::new("Firebolt"),
+        TextFont {
+            font_size: 14.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.95, 0.85, 0.4)), // gold to match the firebolt theme
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(20.0),
+            bottom: Val::Px(50.0), // just above the local HP bar (bar is at bottom: 20, height 26)
+            ..default()
+        },
     ));
 }
 
@@ -404,4 +482,34 @@ fn update_round_label(state: Res<RoundHudState>, mut label: Query<&mut Text, Wit
         _ => score,
     };
     *text = Text::new(banner);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Charge bar update (C6)
+// ---------------------------------------------------------------------------------------------
+
+/// Drive the charge bar each frame from [`ChargeState`].
+///
+/// - While charging: show the bar (`Display::Flex`) and fill it to `frac * 100%`.
+/// - When not charging: hide the bar (`Display::None`) and reset fill to 0%.
+///
+/// Uses `Without` guards to make the two `&mut Node` queries disjoint — `ChargeBarRoot` and
+/// `ChargeBarFill` are always on different entities (parent and child), so the borrow is safe.
+fn update_charge_bar(
+    charge: Res<ChargeState>,
+    mut roots: Query<&mut Node, (With<ChargeBarRoot>, Without<ChargeBarFill>)>,
+    mut fills: Query<&mut Node, (With<ChargeBarFill>, Without<ChargeBarRoot>)>,
+) {
+    let (display, frac) = if charge.charging {
+        (Display::Flex, charge.frac())
+    } else {
+        (Display::None, 0.0)
+    };
+
+    for mut node in &mut roots {
+        node.display = display;
+    }
+    for mut node in &mut fills {
+        node.width = Val::Percent(frac * 100.0);
+    }
 }
