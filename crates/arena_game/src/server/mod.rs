@@ -115,7 +115,10 @@ impl NetworkedIdAlloc {
 /// The two fixed arena spawn markers (spec §11 hard-coded geometry). Players are placed by
 /// connection order: the first connected client at marker 0, the second at marker 1. Facing each
 /// other across the +Z axis.
-const SPAWN_MARKERS: [Vec3; 2] = [Vec3::new(-4.0, 1.0, 0.0), Vec3::new(4.0, 1.0, 0.0)];
+const SPAWN_MARKERS: [Vec3; 2] = [
+    Vec3::new(-4.0, crate::net::GROUND_Y, 0.0),
+    Vec3::new(4.0, crate::net::GROUND_Y, 0.0),
+];
 
 /// Resolve a netcode `PeerId` to its `u64` client id, matching every id-carrying variant.
 fn peer_to_u64(peer: &PeerId) -> Option<u64> {
@@ -254,18 +257,18 @@ fn sync_networked_players(
         commands.entity(player).grant_skill("firebolt");
         // Hurtbox so the server-side hit detection resolves firebolt hits against this player. We
         // build it by hand (instead of `insert_hurtbox`, which is a sphere) so the hittable volume
-        // matches the VISIBLE BODY: a vertical capsule, not a waist-height sphere. The `character.glb`
-        // origin sits 1.0 above the feet (feet at origin Y−1.0 ≈ world 0, head ≈ origin Y+0.9 ≈ world
-        // 1.9). The collider is centered on the player entity Transform (the origin), so a capsule of
-        // total extent ±1.0 spans origin Y−1.0 → origin Y+1.0 = the FEET up to just above the head —
-        // i.e. the feet line up with the bottom of the hitbox and the head is covered. avian's
-        // `capsule(radius, length)` excludes the hemispheres, so extent = length/2 + radius:
-        // `capsule(0.45, 1.1)` → 0.55 + 0.45 = 1.0. `RigidBody::Static` still tracks the owner's
-        // Transform (obelisk CLAUDE: static ≠ frozen), so the hurtbox follows the moving/jumping player.
+        // matches the VISIBLE BODY: a vertical capsule. The player origin is the BODY CENTER and the
+        // measured `character.glb` body is ~1.18 tall (half-height ~0.59), so a capsule centered on
+        // the player entity Transform (the origin) with total extent ±0.59 spans the FEET (origin
+        // Y−0.59 = world 0) up to the HEAD (origin Y+0.59) — feet at the bottom of the hitbox, head at
+        // the top, tightly. avian's `capsule(radius, length)` excludes the hemispheres, so extent =
+        // length/2 + radius: `capsule(0.35, 0.48)` → 0.24 + 0.35 = 0.59. `RigidBody::Static` still
+        // tracks the owner's Transform (obelisk CLAUDE: static ≠ frozen), so the hurtbox follows the
+        // moving/jumping player.
         commands.entity(player).insert((
             Hurtbox { owner: player },
             RigidBody::Static,
-            Collider::capsule(0.45, 1.1),
+            Collider::capsule(0.35, 0.48),
             Transform::from_translation(spawn),
         ));
 

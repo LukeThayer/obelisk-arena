@@ -48,9 +48,12 @@ struct RigAttached;
 /// LOCAL player bodies are tagged [`LocalPlayerBody`] and spawned with `Visibility::Hidden` so the
 /// first-person camera is never inside the local player's head. REMOTE (opponent) bodies are
 /// `Visibility::default()` (inherited → visible).
-/// Vertical offset applied to the feet-rooted `character.glb` body so its feet line up with the
-/// bottom of the hurtbox capsule (origin−1.0) and the platform. See `attach_rig_to_players`.
-const RIG_FOOT_OFFSET: f32 = -1.0;
+/// Vertical offset applied to the feet-rooted `character.glb` body so the model's CENTER sits at the
+/// player origin (= the hurtbox-capsule center / body center). MEASURED: the glb's feet are ~0.03 and
+/// its head ~1.21 above its scene origin (≈ feet-rooted), so the body center is ~0.62 above the scene
+/// origin; offsetting the SceneRoot down by 0.62 puts the center at the player origin, the feet at
+/// origin−0.59 (= world 0, on the platform / hitbox bottom), and the head at origin+0.59 (hitbox top).
+const RIG_FOOT_OFFSET: f32 = -0.62;
 
 #[allow(clippy::type_complexity)]
 fn attach_rig_to_players(

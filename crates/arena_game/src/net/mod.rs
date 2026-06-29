@@ -28,19 +28,20 @@ pub const TICK_HZ: u32 = 60;
 /// along `aim_dir` (camera forward) — so the crosshair ray IS the bolt path and a shot aimed at the
 /// opponent connects. Defined once here so the two values can never drift apart.
 ///
-/// Value `0.7` is wisp's first-person eye offset for this exact `character.glb`: the player origin
-/// sits 1.0 above the model's feet (feet at origin Y−1.0, head ≈ origin Y+0.9), so `+0.7` puts the
-/// eye at head level (just below the hat). The HURTBOX capsule (`server::sync_networked_players`)
-/// spans origin Y±1.0 = feet→just-above-head, so the eye-height muzzle fires from inside the body's
-/// vertical span and a level shot lands. (Previously `1.6` floated the camera ~0.7 above the head.)
-pub const ARENA_EYE_HEIGHT: f32 = 0.7;
+/// MEASURED geometry (the `character.glb` body AABB, feet-rooted): the model is ~1.18 tall, so with
+/// the player origin at the BODY CENTER (see `GROUND_Y` / `present::RIG_FOOT_OFFSET`) the feet sit at
+/// origin Y−0.59 and the head at origin Y+0.59. `+0.5` puts the eye just below the top of the head =
+/// natural first-person eye level. The HURTBOX capsule (`server::sync_networked_players`) spans origin
+/// Y±0.59 = feet→head, so the eye-height muzzle fires from inside the body span and a level shot lands.
+pub const ARENA_EYE_HEIGHT: f32 = 0.5;
 
-/// The stand height (world Y of a grounded player origin) — the witch's feet rest on the green
-/// visual plane at origin Y=1.0. The manual gravity clamp floors the player here. Shared by the
-/// server controller (`server::run_player_controller`) and the client prediction
+/// The stand height: world Y of a grounded player ORIGIN. The origin is the BODY CENTER, and the body
+/// half-height is ~0.59 (measured `character.glb`), so at `GROUND_Y = 0.59` the feet rest exactly on
+/// the green platform (world 0): feet = origin − 0.59 = 0. The manual gravity clamp floors the player
+/// here. Shared by the server controller (`server::run_player_controller`) and the client prediction
 /// (`client::prediction::predict_local_movement`) so the two integrate IDENTICALLY (prediction
-/// lockstep).
-pub const GROUND_Y: f32 = 1.0;
+/// lockstep). Also the Y of `server::SPAWN_MARKERS`.
+pub const GROUND_Y: f32 = 0.59;
 
 /// Manual downward acceleration (m/s²) applied to a player's vertical velocity each tick. The
 /// controller is KINEMATIC (avian's gravity is not applied), so gravity is integrated by hand,
