@@ -8,12 +8,11 @@
 //! costume/recolor/viewmodel/render-layer/locomotion-blend logic — those
 //! arrive with the third-person controller in a later task.
 
+use avian3d::prelude::{LinearVelocity, Rotation};
 use bevy::{gltf::Gltf, prelude::*};
-use obelisk_bevy::prelude::{ActiveCast, SkillPhase};
 
 use super::net::{ChargeState, LocalNetPlayer};
-use super::replication::NetworkedPositionSmoothing;
-use crate::net::protocol::NetworkedPosition;
+use crate::net::protocol::NetworkedCastState;
 
 /// Animation clip names baked into `character.glb`. Verified against the
 /// glb's `gltf.named_animations` keys: `idle`, `walk_forward`,
@@ -314,9 +313,9 @@ pub fn drive_animation(
     parents: Query<&ChildOf>,
     body_marker: Query<(), With<ArenaBody>>,
     mut roots: Query<(
-        Option<&ActiveCast>,
-        &NetworkedPosition,
-        Option<&NetworkedPositionSmoothing>,
+        Option<&NetworkedCastState>,
+        Option<&LinearVelocity>,
+        Option<&Rotation>,
         &mut LocalAnimBlend,
         Has<LocalNetPlayer>,
     )>,
@@ -334,52 +333,49 @@ pub fn drive_animation(
         let Some(root) = rig_root_of(anim_entity, &parents, &body_marker, &roots) else {
             continue;
         };
-        let Ok((active_cast, netpos, smoothing, mut blend, is_local)) = roots.get_mut(root) else {
+        let Ok((cast_state, lin_vel, rotation, mut blend, is_local)) = roots.get_mut(root) else {
             continue;
         };
+        let cast_phase = cast_state.map(|c| c.cast_phase).unwrap_or(0);
 
-        // Map the cast state to a casting-layer blend target (guide §4).
-        // - LOCAL player: drive from the local-only `ActiveCast` (+ the charge hold wind-up). C5:
-        //   while the LOCAL player is charging (holding the cast button), drive the blend to 1.0 as
-        //   a wind-up so the caster visibly prepares the spell — the `ActiveCast` only starts on
-        //   release, so this pre-emptively cues the casting pose during the hold phase.
-        // - REMOTE player (Bug 1a): the local-only `ActiveCast` is never present, so drive from the
-        //   replicated `NetworkedPosition.cast_phase` the server stamps (1 windup / 2 active → 1.0,
-        //   3 recovery → 0.5, 0 none → 0.0). This is what makes A's cast animate on B's screen.
-        let casting_target = if is_local {
-            if charge.charging {
-                1.0 // wind-up: hold drives the casting pose
-            } else {
-                match active_cast.map(|c| c.phase) {
-                    Some(SkillPhase::Windup) | Some(SkillPhase::Active) => 1.0,
-                    Some(SkillPhase::Recovery) => 0.5,
-                    _ => 0.0,
-                }
-            }
+        // Map the cast state to a casting-layer blend target (guide §4). Both local + remote read
+        // the replicated `NetworkedCastState.cast_phase` the server stamps (1 windup / 2 active →
+        // 1.0, 3 recovery → 0.5, 0 none → 0.0 — this is what makes A's cast animate on B's screen).
+        // For the LOCAL player, a charge hold also drives the blend to 1.0 as a pre-release wind-up
+        // (the server-side `ActiveCast`, hence cast_phase, only starts on release).
+        let phase_target = match cast_phase {
+            1 | 2 => 1.0,
+            3 => 0.5,
+            _ => 0.0,
+        };
+        let casting_target = if is_local && charge.charging {
+            1.0
         } else {
-            match netpos.cast_phase {
-                1 | 2 => 1.0,
-                3 => 0.5,
-                _ => 0.0,
-            }
+            phase_target
         };
         blend.casting = step_casting_blend(blend.casting, casting_target);
 
         // Per-rig locomotion (Bug 2): the LOCAL player uses the camera yaw + zero velocity (it's
         // first-person/hidden, so its walk clip is never seen). Each REMOTE rig uses ITS OWN yaw
-        // (the replicated `NetworkedPosition.yaw`) and ITS OWN world velocity (derived from the
-        // pose-stream smoothing buffer) so a moving opponent plays the correct directional walk
-        // clip facing the right way instead of sliding while idle.
+        // (the interpolated avian `Rotation`) and ITS OWN planar velocity (the replicated/interpolated
+        // `LinearVelocity`) so a moving opponent plays the correct directional walk clip facing the
+        // right way instead of sliding while idle.
         let (rig_velocity, rig_yaw) = if is_local {
             (Vec3::ZERO, body_yaw)
         } else {
-            let vel = smoothing.map(|s| s.velocity()).unwrap_or(Vec3::ZERO);
-            (vel, netpos.yaw)
+            let vel = lin_vel.map(|v| v.0).unwrap_or(Vec3::ZERO);
+            let yaw = rotation.map(|r| yaw_of(r.0)).unwrap_or(0.0);
+            (vel, yaw)
         };
         for (node, weight) in locomotion_blend(&rig, rig_velocity, rig_yaw, blend.casting) {
             player.play(node).repeat().set_weight(weight);
         }
     }
+}
+
+/// Extract the Y-axis rotation (yaw) from a quaternion (the body only rotates around Y).
+fn yaw_of(q: Quat) -> f32 {
+    q.to_euler(EulerRot::YXZ).0
 }
 
 /// Walk the `ChildOf` chain from an `AnimationPlayer` entity up to the nearest ancestor that is BOTH
@@ -392,9 +388,9 @@ fn rig_root_of(
     parents: &Query<&ChildOf>,
     body_marker: &Query<(), With<ArenaBody>>,
     roots: &Query<(
-        Option<&ActiveCast>,
-        &NetworkedPosition,
-        Option<&NetworkedPositionSmoothing>,
+        Option<&NetworkedCastState>,
+        Option<&LinearVelocity>,
+        Option<&Rotation>,
         &mut LocalAnimBlend,
         Has<LocalNetPlayer>,
     )>,

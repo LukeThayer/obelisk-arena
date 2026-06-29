@@ -36,24 +36,22 @@ pub const TICK_HZ: u32 = 60;
 /// Y±0.59 = feet→head, so the eye-height muzzle fires from inside the body span and a level shot lands.
 pub const ARENA_EYE_HEIGHT: f32 = 0.5;
 
-/// The stand height: world Y of a grounded player ORIGIN. The origin is the BODY CENTER, and the body
-/// half-height is ~0.59 (measured `character.glb`), so at `GROUND_Y = 0.59` the feet rest exactly on
-/// the green platform (world 0): feet = origin − 0.59 = 0. The manual gravity clamp floors the player
-/// here. Shared by the server controller (`server::run_player_controller`) and the client prediction
-/// (`client::prediction::predict_local_movement`) so the two integrate IDENTICALLY (prediction
-/// lockstep). Also the Y of `server::SPAWN_MARKERS`.
+/// The stand height: world Y of a grounded player ORIGIN. The Dynamic body is `capsule(0.35, 0.48)`
+/// (half-height 0.59) resting on the static arena floor (top at world 0), so its origin settles at
+/// ≈0.59 and its feet at world 0. Used by the shared controller's ground check
+/// (`shared_controller::apply_arena_movement`) — a player meaningfully above this is airborne — and
+/// as the Y of `server::SPAWN_MARKERS`. With a real floor collider this is the EMERGENT rest height,
+/// not a clamp.
 pub const GROUND_Y: f32 = 0.59;
 
-/// Manual downward acceleration (m/s²) applied to a player's vertical velocity each tick. The
-/// controller is KINEMATIC (avian's gravity is not applied), so gravity is integrated by hand,
-/// identically on server + client. Shared so the two can't drift.
+/// Magnitude of the arena's avian `Gravity` (m/s²), set in `add_avian_with_lightyear`. Snappier than
+/// Earth for an arcade jump arc; with `shared_controller::JUMP_SPEED` (7 m/s) the apex is ≈1.22 m.
 pub const GRAVITY: f32 = 20.0;
 
-/// Upward velocity (m/s) imparted on a grounded jump (Space). Shared server + client.
-pub const JUMP_SPEED: f32 = 7.0;
-
-/// Netcode protocol id. Bumped whenever the wire format changes incompatibly. Dev: 0.
-pub const PROTOCOL_ID: u64 = 0;
+/// Netcode protocol id. Bumped whenever the wire format changes incompatibly. Bumped to 1 for the
+/// lightyear-native prediction wire (native input + avian Position/Rotation replication, dropping
+/// the `PlayerInputMessage`/`NetworkedPosition` streams).
+pub const PROTOCOL_ID: u64 = 1;
 
 /// Shared netcode private key. Dev/test only — a real deployment holds the key server-side and
 /// hands clients a signed `ConnectToken` from a backend auth service.

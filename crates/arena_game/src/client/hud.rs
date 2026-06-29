@@ -14,11 +14,11 @@
 use bevy::prelude::*;
 use lightyear::prelude::MessageReceiver;
 
+use avian3d::prelude::Position;
+
 use crate::client::controller::FollowCamera;
 use crate::client::net::{ChargeState, LocalNetPlayer};
-use crate::net::protocol::{
-    NetEventMessage, NetworkedHealth, NetworkedPlayer, NetworkedPosition, ObeliskNetId,
-};
+use crate::net::protocol::{NetEventMessage, NetworkedHealth, NetworkedPlayer, ObeliskNetId};
 
 /// Plugin: the windowed HUD. Builds the bar widgets at startup, drives them from `NetworkedHealth`,
 /// spawns floating damage + hit flashes from `DamageResolved`, renders the round/score label, and
@@ -333,7 +333,7 @@ struct HitFlash {
 #[allow(clippy::type_complexity)]
 fn spawn_damage_feedback(
     mut receivers: Query<&mut MessageReceiver<NetEventMessage>>,
-    targets: Query<(&ObeliskNetId, &NetworkedPosition, Has<LocalNetPlayer>), With<NetworkedPlayer>>,
+    targets: Query<(&ObeliskNetId, &Position, Has<LocalNetPlayer>), With<NetworkedPlayer>>,
     mut commands: Commands,
 ) {
     use obelisk_bevy::net::NetEvent;
@@ -348,11 +348,11 @@ fn spawn_damage_feedback(
                 continue;
             };
             // Find the replicated body for this obelisk id.
-            let Some((_, netpos, is_local)) = targets.iter().find(|(id, _, _)| id.0 == target)
+            let Some((_, position, is_local)) = targets.iter().find(|(id, _, _)| id.0 == target)
             else {
                 continue;
             };
-            let world_anchor = netpos.to_vec3() + Vec3::Y * 1.8;
+            let world_anchor = position.0 + Vec3::Y * 1.8;
             commands.spawn((
                 FloatingDamage {
                     elapsed: 0.0,

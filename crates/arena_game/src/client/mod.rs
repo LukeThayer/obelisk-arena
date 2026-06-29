@@ -17,16 +17,17 @@ pub mod customization;
 pub mod hud;
 pub mod net;
 pub mod parts;
-pub mod prediction;
 pub mod present;
-pub mod replication;
 pub mod rig;
 
 use arena_skills::SkillFxRegistry;
+use avian3d::prelude::{Position, Rotation};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use controller::{ArenaControllerPlugin, FollowCamera};
 use cosmetics::{age_lifetimes, fly_cosmetic_projectiles, spawn_cue_cosmetics, AimDirs};
+use lightyear::prelude::Predicted;
+use lightyear_frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 use obelisk_bevy::prelude::*;
 use std::path::PathBuf;
 
@@ -179,13 +180,16 @@ pub fn run_windowed_client() {
         app.add_systems(Update, windowed_autocast);
     }
 
-    // Net-driven player layer (M2.2): materialize a body per replicated NetworkedPlayer, interpolate
-    // remote players, predict + send local input. The windowed controller's CameraYaw/AimPitch +
-    // WASD feed `LocalInput` so server-authoritative movement is driven by real input.
+    // Net-driven player layer: attach the predicted local body + interpolated remote bodies, buffer
+    // native input, predict movement (the shared force controller, re-run during rollback). The
+    // windowed controller's CameraYaw/AimPitch + WASD feed `LocalInput` → `buffer_arena_input`.
     app.add_plugins(net::ClientNetPlayerPlugin);
-    app.add_plugins(replication::ReplicationSmoothingPlugin);
-    // Stage-A own-movement prediction (predict-locally-snap-to-server fallback, see prediction.rs).
-    app.add_plugins(prediction::LocalPredictionPlugin);
+    // Visual frame-interpolation of the predicted local player's Position/Rotation between
+    // FixedUpdate ticks (the avian_3d_character renderer pattern). Interpolated remotes are already
+    // smooth via lightyear interpolation.
+    app.add_plugins(FrameInterpolationPlugin::<Position>::default());
+    app.add_plugins(FrameInterpolationPlugin::<Rotation>::default());
+    app.add_observer(add_frame_interpolation_to_predicted);
     // Trace the replicated NetEvent stream (Task 15) + consume the replicated cues → cosmetics
     // (Task 16): `register_client_cue_binding` drains CueWireMessage, de-dups the local player's own
     // predicted cue, and feeds survivors to `spawn_cue_cosmetics` via the LocalCue channel. So
@@ -394,9 +398,11 @@ pub fn run_headless_client() {
     app.insert_resource(controller::CameraYaw(headless_yaw))
         .insert_resource(controller::AimPitch(headless_pitch));
 
-    app.add_plugins(replication::ReplicationSmoothingPlugin);
-    // Stage-A own-movement prediction (predict-locally-snap-to-server fallback, see prediction.rs).
-    app.add_plugins(prediction::LocalPredictionPlugin);
+    // Static floor collider so the predicted Dynamic body rests on it (headless prediction needs
+    // physics too).
+    app.add_systems(Startup, |mut commands: Commands| {
+        crate::spawn_arena_floor(&mut commands)
+    });
     // [H] Trace the replicated combat events (NetEventMessage), and consume the replicated cues
     // (CueWireMessage → trace + de-dup + dispatch). Headless has no cosmetics reader, so the
     // dispatched LocalCues clear harmlessly; the trace lines are what the [H] checks assert on.
@@ -599,12 +605,14 @@ fn trace_replicated_round_state(
 }
 
 /// [H] AUTOMOVE: write a constant forward movement into [`net::LocalInput`] so the headless client
-/// drives the server controller. `movement.y = 1.0` (full forward), `yaw = 0` (faces -Z). The
-/// server's controller turns this into motion; the resulting NetworkedPosition change is what the
-/// movement-replication check asserts on (server pose changes + the OTHER client observes it).
-fn automove_input(mut input: ResMut<net::LocalInput>) {
+/// drives the shared controller (predicted locally + authoritative on the server). `movement.y = 1`
+/// (full forward) in the `CameraYaw` frame — so the mover walks ALONG its look/aim axis (the cast
+/// fires along the same axis, keeping a moving caster on the firing line). The resulting avian
+/// `Position` change is what the movement-replication check asserts on (server pose changes + the
+/// OTHER client observes the interpolated pose move).
+fn automove_input(mut input: ResMut<net::LocalInput>, yaw: Res<controller::CameraYaw>) {
     input.movement = Vec2::new(0.0, 1.0);
-    input.yaw = 0.0;
+    input.yaw = yaw.0;
     input.pitch = 0.0;
     input.jump = false;
 }
@@ -628,6 +636,31 @@ fn setup_scene(
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(20.0, 20.0))),
         MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))),
+    ));
+    // Static floor collider the predicted Dynamic player body rests on (top face at world 0).
+    crate::spawn_arena_floor(&mut commands);
+}
+
+/// Insert `FrameInterpolate<Position/Rotation>` on a newly-`Predicted` player so its render is
+/// smoothed between FixedUpdate ticks. Triggered on `Add<Position>` (avian adds Position after the
+/// RigidBody, by which point `Predicted` is present), mirroring the avian_3d_character renderer.
+fn add_frame_interpolation_to_predicted(
+    trigger: On<Add, Position>,
+    query: Query<(), With<Predicted>>,
+    mut commands: Commands,
+) {
+    if !query.contains(trigger.entity) {
+        return;
+    }
+    commands.entity(trigger.entity).insert((
+        FrameInterpolate::<Position> {
+            trigger_change_detection: true,
+            ..default()
+        },
+        FrameInterpolate::<Rotation> {
+            trigger_change_detection: true,
+            ..default()
+        },
     ));
 }
 

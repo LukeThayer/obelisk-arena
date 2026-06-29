@@ -10,17 +10,23 @@ use std::collections::{HashMap, HashSet};
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::ClientOf;
 use lightyear::prelude::{Connected, MessageReceiver, PeerId, RemoteId, Replicate};
+use lightyear::prelude::{
+    ControlledBy, InterpolationTarget, NetworkTarget, Predicted, PredictionTarget,
+};
 use obelisk_bevy::prelude::*;
 use serde_json::json;
 use stat_core::StatBlock;
 
+use crate::net::input::ArenaInput;
 use crate::net::protocol::{
     CastRequestMessage, CustomizeBroadcast, CustomizeMessage, EventChannel, NetworkOwner,
-    NetworkedHealth, NetworkedId, NetworkedPlayer, NetworkedPosition, ObeliskNetId,
-    PlayerCustomization, PlayerInputMessage, RoundStateMessage,
+    NetworkedCastState, NetworkedHealth, NetworkedId, NetworkedPlayer, ObeliskNetId,
+    PlayerCustomization, RoundStateMessage,
 };
+use crate::shared_controller::{apply_arena_movement, apply_arena_yaw};
 use crate::trace;
 use lightyear::prelude::MessageSender;
 
@@ -36,20 +42,19 @@ impl Plugin for ArenaServerPlugin {
             // windowed client loads these itself (`client::load_cast_assets`); the headless server
             // must too — it is the combat authority.
             .init_resource::<PendingServerCastAssets>()
-            .add_systems(Startup, load_server_cast_assets)
+            .add_systems(Startup, (load_server_cast_assets, spawn_floor))
             .add_systems(Update, (poll_server_cast_assets, trace_server_net_events))
             .add_systems(
                 Update,
                 (
                     sync_networked_players,
-                    refresh_replicate_on_connect,
-                    // Movement pipeline (Task 10): drain client input (Update) → controller
-                    // (FixedUpdate, below) → ship the avian-integrated pose back (Update).
-                    drain_player_inputs,
-                    sync_player_positions,
-                    // Bug 1a: stamp each player's obelisk cast phase into the replicated pose so
-                    // the OTHER client can animate this player's cast. Every Update (a caster
-                    // stands still while casting, so this is NOT gated on Changed<Position>).
+                    // Throttled trace of each player's authoritative avian Position so the headless
+                    // movement-replication check has the server-side ground truth to compare the
+                    // observers' interpolated pose against.
+                    trace_server_pose,
+                    // Bug 1a: stamp each player's obelisk cast phase into the replicated cast-state
+                    // so the OTHER client can animate this player's cast. Every Update (a caster
+                    // stands still while casting, so this is NOT gated on Changed).
                     sync_cast_state,
                     // HP mirror (Task 18): mirror each player's obelisk life → replicated
                     // NetworkedHealth so the client HUD reads server-authoritative hp.
@@ -80,15 +85,21 @@ impl Plugin for ArenaServerPlugin {
                     .after(sync_networked_players),
             )
             // The authoritative controller runs in FixedUpdate so it ticks at the fixed 60 Hz the
-            // physics group integrates on. `apply_player_rotation` (writes avian `Rotation`) is a
-            // separate system from `run_player_controller` (writes avian `Position`) to keep each
-            // a small, single-responsibility write — mirroring wisp's two-system split. Both write
-            // avian components, never Transform (guide §1.2: the per-tick sync clobbers Transform).
+            // physics group integrates on. It reads the `ActionState<ArenaInput>` lightyear keeps in
+            // sync for each client's controlled entity (no manual input drain). `server_apply_yaw`
+            // (writes avian `Rotation`) is a separate system from `server_apply_movement` (avian
+            // `Forces`) because avian's `Forces` borrows `Rotation` internally; chained so the body
+            // faces the input yaw before the movement force is applied.
             .add_systems(
                 FixedUpdate,
-                (apply_player_rotation, run_player_controller).chain(),
+                (server_apply_yaw, server_apply_movement).chain(),
             );
     }
+}
+
+/// Spawn the static arena floor collider (server-side) the Dynamic player bodies rest on.
+fn spawn_floor(mut commands: Commands) {
+    crate::spawn_arena_floor(&mut commands);
 }
 
 /// Lookup: connected client id → their `NetworkedPlayer` entity. Populated by
@@ -135,11 +146,13 @@ fn peer_to_u64(peer: &PeerId) -> Option<u64> {
 /// before the connection lifecycle is settled (wisp's rationale, `server.rs:279-283`).
 ///
 /// Each player is a full obelisk combatant: `make_combatant(StatBlock::with_id(...))` +
-/// `Faction::Player` + `grant_skill("firebolt")` + a hurtbox + the replicated networked component
-/// set (`NetworkedPlayer`/`NetworkOwner`/`NetworkedId`/`ObeliskNetId`/`NetworkedHealth`/
-/// `NetworkedPosition`) + a server-authoritative dynamic avian body. Replicated with
-/// `Replicate::manual(current_senders)` (NOT `NetworkTarget::All`, which snapshots senders at
-/// insert and silently breaks the 2nd client — guide §1.2, §5.7).
+/// `Faction::Player` + `grant_skill("firebolt")` + a CHILD hurtbox + the replicated networked
+/// component set (`NetworkedPlayer`/`NetworkOwner`/`NetworkedId`/`ObeliskNetId`/`NetworkedHealth`/
+/// `NetworkedCastState`/`PlayerCustomization`) + a Dynamic avian body driven by the shared force
+/// controller. Replicated with `Replicate::to_clients(NetworkTarget::All)` +
+/// `PredictionTarget::Single(owner)` + `InterpolationTarget::AllExceptSingle(owner)`: lightyear
+/// auto-creates a `Predicted` entity on the owner's client and `Interpolated` entities elsewhere
+/// (the canonical `avian_3d_character`/`simple_box` pattern; `All` widens to late joiners).
 #[allow(clippy::type_complexity)] // the lightyear ClientOf+Connected filter query is idiomatic
 fn sync_networked_players(
     connections: Query<(Entity, &RemoteId), (With<ClientOf>, With<Connected>)>,
@@ -149,7 +162,6 @@ fn sync_networked_players(
     mut client_map: ResMut<ClientPlayerMap>,
 ) {
     let existing_ids: HashSet<u64> = existing.iter().map(|o| o.0).collect();
-    let senders: Vec<Entity> = connections.iter().map(|(e, _)| e).collect();
 
     // Stable slot assignment by SORTED client id over all players that will exist (already-spawned +
     // the new connections this frame). This MUST match `reset_for_new_round`'s sorted-client-id slot
@@ -167,7 +179,7 @@ fn sync_networked_players(
     }
     all_ids.sort_unstable();
 
-    for (_, RemoteId(peer_id)) in &connections {
+    for (conn_entity, RemoteId(peer_id)) in &connections {
         let Some(client_id) = peer_to_u64(peer_id) else {
             continue;
         };
@@ -198,8 +210,7 @@ fn sync_networked_players(
 
         info!(
             "Spawning NetworkedPlayer for client {client_id} (obelisk_id={obelisk_id}, \
-             net_id={net_id}, senders={})",
-            senders.len()
+             net_id={net_id})"
         );
         trace::event(
             "player_spawned",
@@ -211,7 +222,7 @@ fn sync_networked_players(
             }),
         );
 
-        // Spawn the combatant root + networked + physics components.
+        // Spawn the combatant root + networked + Dynamic physics components.
         let player = commands
             .spawn_empty()
             .make_combatant(StatBlock::with_id(obelisk_id.clone()))
@@ -225,206 +236,119 @@ fn sync_networked_players(
                 NetworkedHealth::default(),
                 // Replicated appearance — default witch on spawn; live edits arrive via D6.
                 PlayerCustomization::default(),
-                NetworkedPosition::from_vec3(spawn),
-                // Latest input from this client, written by `drain_player_inputs` (Update) and read
-                // by the FixedUpdate controller. Defaults to no-movement so an idle player stands.
-                PlayerInputState::default(),
+                // Replicated cast state (remote cast animation). Starts idle.
+                NetworkedCastState::default(),
+                // Native input — lightyear syncs this with the controlling client's input each tick.
+                ActionState::<ArenaInput>::default(),
             ))
             .insert((
-                // Server-authoritative KINEMATIC body. The controller integrates the avian
-                // `Position`/`Rotation` directly (kinematic velocity integration) rather than
-                // applying forces to a Dynamic body. Rationale: under `LightyearAvianPlugin`'s
-                // `Position` mode WITHOUT lightyear frame-interpolation, the `transform_to_position`
-                // sync in `RunFixedMainLoop` resets a Dynamic body's Position/velocity from the
-                // (stale) Transform each tick, so a force-driven Dynamic body never accumulates
-                // motion (empirically: lv stayed 0 despite an 800N force; the plugin's own line-124
-                // TODO documents this no-frame-interp footgun). A Kinematic body the server moves by
-                // writing `Position` sidesteps that entirely, satisfies the "write avian
-                // Position/Rotation, never Transform" rule (guide §1.2), stays deterministic, and is
-                // sufficient for the flat hard-coded arena geometry (spec §11). The body still
-                // collides (kinematic capsule) so obelisk hit-detection sees it.
-                Transform::from_translation(spawn),
+                // Server-authoritative Dynamic body driven by the shared force controller. Rotation
+                // axes locked (the body only yaws via the controller's direct `Rotation` write);
+                // zero friction so the force controller fully owns the planar velocity (avian's
+                // `move_towards` recipe). The capsule (half-height 0.59) rests on the static floor
+                // with feet at world 0. Position/Rotation/LinearVelocity/AngularVelocity replicate
+                // (predicted on the owner, interpolated elsewhere).
                 Position(spawn),
                 Rotation::default(),
                 LinearVelocity::default(),
-                RigidBody::Kinematic,
-                Collider::capsule(0.4, 1.2),
-                LockedAxes::ROTATION_LOCKED,
+                AngularVelocity::default(),
+                RigidBody::Dynamic,
+                Collider::capsule(0.35, 0.48),
+                LockedAxes::default()
+                    .lock_rotation_x()
+                    .lock_rotation_y()
+                    .lock_rotation_z(),
+                Friction::new(0.0).with_combine_rule(CoefficientCombine::Min),
             ))
-            .insert(Replicate::manual(senders.clone()))
+            .insert((
+                Replicate::to_clients(NetworkTarget::All),
+                PredictionTarget::to_clients(NetworkTarget::Single(*peer_id)),
+                InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(*peer_id)),
+                ControlledBy {
+                    owner: conn_entity,
+                    lifetime: Default::default(),
+                },
+            ))
             .id();
 
         commands.entity(player).grant_skill("firebolt");
-        // Hurtbox so the server-side hit detection resolves firebolt hits against this player. We
-        // build it by hand (instead of `insert_hurtbox`, which is a sphere) so the hittable volume
-        // matches the VISIBLE BODY: a vertical capsule. The player origin is the BODY CENTER and the
-        // measured `character.glb` body is ~1.18 tall (half-height ~0.59), so a capsule centered on
-        // the player entity Transform (the origin) with total extent ±0.59 spans the FEET (origin
-        // Y−0.59 = world 0) up to the HEAD (origin Y+0.59) — feet at the bottom of the hitbox, head at
-        // the top, tightly. avian's `capsule(radius, length)` excludes the hemispheres, so extent =
-        // length/2 + radius: `capsule(0.35, 0.48)` → 0.24 + 0.35 = 0.59. `RigidBody::Static` still
-        // tracks the owner's Transform (obelisk CLAUDE: static ≠ frozen), so the hurtbox follows the
-        // moving/jumping player.
-        commands.entity(player).insert((
-            Hurtbox { owner: player },
-            RigidBody::Static,
-            Collider::capsule(0.35, 0.48),
-            Transform::from_translation(spawn),
-        ));
+        // Hurtbox so the server-side hit detection resolves firebolt hits against this player. It
+        // lives on a CHILD entity (NOT the player root) so the player stays `RigidBody::Dynamic` —
+        // a `RigidBody::Static` hurtbox on the same entity would conflict with the Dynamic body. The
+        // child carries only `Hurtbox` + a `Collider` (no RigidBody), so avian attaches it to the
+        // parent Dynamic body as a compound child collider that TRACKS the moving/jumping player and
+        // stays in the SpatialQuery pipeline (obelisk's `detect_overlaps` resolves the child entity
+        // to its `Hurtbox.owner` = the player). A `Sensor` so it adds a queryable volume without
+        // contributing contact forces. capsule(0.35, 0.48) spans the body feet→head (origin ±0.59).
+        commands.entity(player).with_children(|c| {
+            c.spawn((
+                Name::new("Hurtbox"),
+                Hurtbox { owner: player },
+                Collider::capsule(0.35, 0.48),
+                Sensor,
+                Transform::default(),
+            ));
+        });
 
         client_map.0.insert(client_id, player);
     }
 }
 
-/// When the set of connected clients changes, refresh `Replicate` on every `NetworkedPlayer` with
-/// a fresh `manual(senders)` list rebuilt from the currently-connected `ClientOf` set. Required so
-/// a late-joining 2nd client receives the 1st client's already-spawned player.
-///
-/// Copied VERBATIM from `wisp/src/net/server.rs:208-232` (adapted to the arena's single
-/// `NetworkedPlayer` target — no lantern/prop/portal classes). `NetworkTarget::All` snapshots the
-/// sender list at spawn and doesn't widen on later connects; `manual` fed on the count delta does.
-fn refresh_replicate_on_connect(
-    senders: Query<Entity, (With<ClientOf>, With<Connected>)>,
-    targets: Query<Entity, With<NetworkedPlayer>>,
-    mut commands: Commands,
-    mut prev_count: Local<usize>,
-) {
-    let current: Vec<Entity> = senders.iter().collect();
-    if current.len() == *prev_count {
-        return;
-    }
-    *prev_count = current.len();
-    for entity in &targets {
-        commands
-            .entity(entity)
-            .insert(Replicate::manual(current.clone()));
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
-// Movement (Task 10): server-authoritative controller (guide §5.3a, §5.4, §5.6).
+// Movement: lightyear-native server controller (the shared force controller over the replicated
+// `ActionState<ArenaInput>` lightyear keeps in sync for each client's controlled entity).
 //
-// Stage-A movement is server-authoritative (the netcode's option (b), wisp's proven path): the
-// client sends only input (`PlayerInputMessage`), the server runs the controller against the
-// dynamic avian body, avian integrates, and the resulting pose ships back via `NetworkedPosition`.
-// `drain_player_inputs`/`apply_player_rotation`/`run_player_controller`/`sync_player_positions` are
-// adapted from `wisp/src/net/server.rs:402-551`, with two arena divergences:
-//   1. the pose carries obelisk cast state (`cast_phase`/`cast_elapsed`/`cast_skill`) instead of
-//      wisp's single `casting` bool — those are stamped from the player's `ActiveCast` in M2.3;
-//      for M2.2 they stay at their `NetworkedPosition::default()` (no-cast) values.
-//   2. movement is camera-relative third-person and matches the CLIENT `controller::move_player`
-//      convention EXACTLY (movement.x = strafe +right, movement.y = forward; world dir built in
-//      the camera-yaw frame, forward = -Z) so the M2.2 client-side predicted controller and the
-//      server agree on the same motion.
+// `Without<Predicted>` is a host-server safety guard (the server has no Predicted entities on a
+// dedicated build, so it's a no-op there) mirroring `simple_box`/`avian_3d_character`.
 // ---------------------------------------------------------------------------------------------
 
-/// Per-player latest input, written each `Update` by `drain_player_inputs`, consumed each
-/// `FixedUpdate` by `run_player_controller`/`apply_player_rotation`. Defaults to no movement.
-#[derive(Component, Default, Clone, Copy)]
-pub struct PlayerInputState {
-    /// Camera-relative WASD axis: x = strafe (+right), y = forward.
-    movement: Vec2,
-    /// Camera yaw (radians) the client is facing; the body faces this.
-    yaw: f32,
-    /// Aim pitch (radians); cosmetic spine lean, replicated for remote cast animation.
-    pitch: f32,
-    jump: bool,
-    /// True while this client is holding the cast button to charge (pre-release). Drives the
-    /// opponent-facing windup telegraph in `sync_cast_state` (Bug 4).
-    charging: bool,
-}
-
-/// Drain `PlayerInputMessage`s from each connected client onto that client's `PlayerInputState`.
-/// Latest-wins (the channel is unreliable / latest-wins), matching wisp's `drain_player_inputs`
-/// (`server.rs:414-444`).
-fn drain_player_inputs(
-    mut receivers: Query<(&RemoteId, &mut MessageReceiver<PlayerInputMessage>), With<ClientOf>>,
-    mut players: Query<(&NetworkOwner, &mut PlayerInputState), With<NetworkedPlayer>>,
-) {
-    for (RemoteId(peer_id), mut receiver) in &mut receivers {
-        let Some(client_id) = peer_to_u64(peer_id) else {
-            continue;
-        };
-        let mut latest: Option<PlayerInputMessage> = None;
-        for msg in receiver.receive() {
-            latest = Some(msg);
-        }
-        let Some(msg) = latest else { continue };
-        for (owner, mut input) in &mut players {
-            if owner.0 == client_id {
-                input.movement = Vec2::new(msg.movement[0], msg.movement[1]);
-                input.yaw = msg.yaw;
-                input.pitch = msg.pitch;
-                input.jump = msg.jump;
-                input.charging = msg.charging;
-            }
-        }
-    }
-}
-
-/// Set each player's body yaw from its input. Writes avian `Rotation` (NOT Transform). Separate
-/// from `run_player_controller` because avian's `Forces` borrows `Rotation` internally
-/// (wisp/src/net/server.rs:453-459).
-fn apply_player_rotation(mut q: Query<(&PlayerInputState, &mut Rotation), With<NetworkedPlayer>>) {
-    for (input, mut rot) in &mut q {
-        rot.0 = Quat::from_axis_angle(Vec3::Y, input.yaw);
-    }
-}
-
-/// Server controller (FixedUpdate): integrate the player's avian `Position` from camera-relative
-/// input (kinematic velocity integration), then store the planar velocity so the M2.4 locomotion
-/// blend + airborne derivation can read it. Writes avian `Position` directly (NOT Transform — guide
-/// §1.2). The movement frame matches the client controller exactly (forward = -Z in the camera-yaw
-/// frame, movement.x strafes +right, movement.y is forward) so the M2.2 Task 12 client-side
-/// predicted controller and the server agree on the same motion.
-///
-/// Kinematic (not force-driven Dynamic) per the spawn-site rationale: the `LightyearAvianPlugin`
-/// Position-mode transform→position sync clobbers a Dynamic body's velocity without frame interp.
-/// We exponentially approach the desired ground velocity (a cheap accel feel) and step Position.
+/// Face each authoritative character to its input yaw (writes avian `Rotation`).
 #[allow(clippy::type_complexity)]
-fn run_player_controller(
-    time: Res<Time>,
-    mut players: Query<
-        (&PlayerInputState, &mut Position, &mut LinearVelocity),
-        With<NetworkedPlayer>,
+fn server_apply_yaw(
+    mut q: Query<
+        (&ActionState<ArenaInput>, &mut Rotation),
+        (With<NetworkedPlayer>, Without<Predicted>),
     >,
 ) {
-    const MAX_SPEED: f32 = 4.0; // matches client controller::MOVE_SPEED
-                                // Per-tick smoothing toward the desired velocity (~accel feel). 1.0 = instant, smaller = softer.
-    const ACCEL_LERP: f32 = 0.35;
-    let dt = time.delta_secs().max(1e-5);
+    for (action, mut rot) in &mut q {
+        apply_arena_yaw(&action.0, &mut rot);
+    }
+}
 
-    for (input, mut position, mut lin_vel) in &mut players {
-        // Camera-relative WASD → world direction. Matches client `controller::move_player`:
-        // local = (strafe, 0, -forward); world = RotY(yaw) * local.
-        let local = Vec3::new(input.movement.x, 0.0, -input.movement.y);
-        let world_dir = Quat::from_axis_angle(Vec3::Y, input.yaw) * local;
-        let desired = world_dir.normalize_or_zero() * MAX_SPEED;
+/// Apply the planar movement force + jump impulse for each authoritative character.
+#[allow(clippy::type_complexity)]
+fn server_apply_movement(
+    time: Res<Time>,
+    mut q: Query<
+        (&ComputedMass, &ActionState<ArenaInput>, Forces),
+        (With<NetworkedPlayer>, Without<Predicted>),
+    >,
+) {
+    let dt = time.delta_secs();
+    for (mass, action, forces) in &mut q {
+        apply_arena_movement(mass, dt, &action.0, forces);
+    }
+}
 
-        // Approach the desired planar velocity (the vertical velocity is handled below).
-        let cur = Vec3::new(lin_vel.0.x, 0.0, lin_vel.0.z);
-        let new_planar = cur.lerp(desired, ACCEL_LERP);
-        lin_vel.0.x = new_planar.x;
-        lin_vel.0.z = new_planar.z;
-
-        // Integrate Position from the planar velocity (kinematic).
-        position.0.x += new_planar.x * dt;
-        position.0.z += new_planar.z * dt;
-
-        // Vertical physics (manual gravity + jump + ground clamp), applied IDENTICALLY on the client
-        // prediction (client::prediction::predict_local_movement) using the SAME shared constants so
-        // the two integrate in lockstep. Avian's own gravity is NOT applied (kinematic body), so we
-        // integrate Y by hand. Order: read groundedness, jump on the rising input, apply gravity,
-        // integrate, then clamp to the platform.
-        let grounded = position.0.y <= crate::net::GROUND_Y + 0.001;
-        if input.jump && grounded {
-            lin_vel.0.y = crate::net::JUMP_SPEED;
-        }
-        lin_vel.0.y -= crate::net::GRAVITY * dt;
-        position.0.y += lin_vel.0.y * dt;
-        if position.0.y <= crate::net::GROUND_Y {
-            position.0.y = crate::net::GROUND_Y;
-            lin_vel.0.y = 0.0;
+/// Throttled trace of each player's authoritative avian `Position` so the headless
+/// movement-replication check can confirm the server's ground-truth pose changes for a moving
+/// player. Keyed by `NetworkOwner`; gated on `Changed<Position>` so an idle player is silent.
+#[allow(clippy::type_complexity)]
+fn trace_server_pose(
+    q: Query<(Entity, &Position, &NetworkOwner), (With<NetworkedPlayer>, Changed<Position>)>,
+    mut throttle: Local<HashMap<Entity, u32>>,
+) {
+    for (entity, position, owner) in &q {
+        let n = throttle.entry(entity).or_insert(0);
+        *n += 1;
+        if *n % 30 == 1 {
+            trace::event(
+                "server_pose",
+                json!({
+                    "owner": owner.0,
+                    "pos": [position.0.x, position.0.y, position.0.z],
+                }),
+            );
         }
     }
 }
@@ -535,55 +459,7 @@ fn drain_customize_requests(
     }
 }
 
-/// Each `Update` on `Changed<Position>`, copy the avian-integrated pose into the replicated
-/// `NetworkedPosition` so clients see the authoritative position + facing. Reads avian `Position`
-/// (the canonical source the controller writes — guide §1.2 — not Transform, which lags one
-/// position→transform sync behind). Derives `airborne` server-side (never trusts the client).
-/// Adapted from `wisp/src/net/server.rs:519-551`; the cast fields stay at default until M2.3 stamps
-/// them from `ActiveCast`.
-#[allow(clippy::type_complexity)]
-fn sync_player_positions(
-    mut q: Query<
-        (
-            Entity,
-            &Position,
-            &PlayerInputState,
-            &NetworkOwner,
-            &mut NetworkedPosition,
-        ),
-        (With<NetworkedPlayer>, Changed<Position>),
-    >,
-    mut throttle: Local<HashMap<Entity, u32>>,
-) {
-    for (entity, position, input, owner, mut netpos) in &mut q {
-        netpos.x = position.0.x;
-        netpos.y = position.0.y;
-        netpos.z = position.0.z;
-        netpos.yaw = input.yaw;
-        netpos.pitch = input.pitch;
-        // Derive airborne server-side from the manual ground clamp (the green plane has no collider,
-        // so a downward raycast finds nothing and would report "always airborne"). The controller
-        // floors the player at `GROUND_Y`; a player meaningfully above it is airborne (jumping).
-        netpos.airborne = position.0.y > crate::net::GROUND_Y + 0.05;
-
-        // Throttled pose trace (every ~30th change) so the headless movement-replication check can
-        // confirm the server's authoritative NetworkedPosition is changing for the moving player.
-        let n = throttle.entry(entity).or_insert(0);
-        *n += 1;
-        if *n % 30 == 1 {
-            trace::event(
-                "server_pose",
-                json!({
-                    "owner": owner.0,
-                    "pos": [netpos.x, netpos.y, netpos.z],
-                    "yaw": netpos.yaw,
-                }),
-            );
-        }
-    }
-}
-
-/// Map an optional obelisk `SkillPhase` to the replicated `NetworkedPosition.cast_phase` byte:
+/// Map an optional obelisk `SkillPhase` to the replicated `NetworkedCastState.cast_phase` byte:
 /// `None` → 0 (not casting), `Windup` → 1, `Active` → 2, `Recovery` → 3. `SkillPhase::Done` is the
 /// terminal phase obelisk removes the `ActiveCast` on, so it maps to 0 (no cast) too. Pure helper so
 /// the byte mapping is unit-testable without booting an app.
@@ -596,45 +472,42 @@ fn cast_phase_byte(phase: Option<SkillPhase>) -> u8 {
     }
 }
 
-/// Stamp each player's obelisk cast state into its replicated `NetworkedPosition` so the OTHER
-/// client can drive a cast animation on this player's remote rig (Bug 1a). Runs every `Update`
-/// (NOT gated on `Changed<Position>` — a caster usually stands still while casting, so a
-/// position-gated system would never fire). The `ActiveCast` lives on the SAME entity as the
-/// `NetworkedPlayer` (the server calls `cast_skill_dir_charged` on the player entity, and obelisk
-/// inserts `ActiveCast` there), so `Option<&ActiveCast>` reads it directly.
+/// Stamp each player's obelisk cast state into its replicated `NetworkedCastState` so the OTHER
+/// client can drive a cast animation on this player's remote rig (Bug 1a). Runs every `Update` (a
+/// caster usually stands still while casting, so this is NOT gated on `Changed`). The `ActiveCast`
+/// (the real obelisk cast, post-release) takes precedence; before release, a player CHARGING shows
+/// Windup (1) so the opponent sees the cast wind up the instant charging begins (Bug 4). The
+/// charging signal rides the replicated `ActionState<ArenaInput>` lightyear maintains.
 ///
-/// Writes `cast_phase`/`cast_skill` ONLY when they change so we don't trip
-/// `Changed<NetworkedPosition>` (and re-replicate) every frame the player is idle.
+/// Writes `cast_phase`/`cast_skill` ONLY when they change so a delta is shipped, not every frame.
+#[allow(clippy::type_complexity)]
 fn sync_cast_state(
     mut q: Query<
         (
             Option<&ActiveCast>,
-            &PlayerInputState,
-            &mut NetworkedPosition,
+            Option<&ActionState<ArenaInput>>,
+            &mut NetworkedCastState,
         ),
         With<NetworkedPlayer>,
     >,
 ) {
-    for (active, input, mut netpos) in &mut q {
-        // ActiveCast (the real obelisk cast, post-release) takes precedence. Before release, a
-        // player who is CHARGING shows Windup (1) so the opponent sees the cast wind up the instant
-        // charging begins — a telegraph held through the hold into the actual cast (Bug 4).
+    for (active, action, mut cast) in &mut q {
         let active_phase = cast_phase_byte(active.map(|c| c.phase));
+        let charging = action.map(|a| a.0.charging).unwrap_or(false);
         let phase = if active_phase != 0 {
             active_phase
-        } else if input.charging {
+        } else if charging {
             1
         } else {
             0
         };
-        // A simple "is casting" marker is enough here (the client only needs phase to animate); we
-        // don't resolve the real skill-id table. 1 = casting, 0 = idle.
+        // A simple "is casting" marker is enough here (the client only needs phase to animate).
         let skill = if phase == 0 { 0 } else { 1 };
-        if netpos.cast_phase != phase {
-            netpos.cast_phase = phase;
+        if cast.cast_phase != phase {
+            cast.cast_phase = phase;
         }
-        if netpos.cast_skill != skill {
-            netpos.cast_skill = skill;
+        if cast.cast_skill != skill {
+            cast.cast_skill = skill;
         }
     }
 }
@@ -929,8 +802,7 @@ fn run_round_machine(
             &ObeliskNetId,
             &mut Attributes,
             &mut Position,
-            &mut Transform,
-            &mut NetworkedPosition,
+            &mut LinearVelocity,
             &NetworkOwner,
         ),
         With<NetworkedPlayer>,
@@ -1010,8 +882,9 @@ fn run_round_machine(
 
 /// Per-round reset (runs on the Countdown→Active edge): heal every player to full, clear effects
 /// (drops a leftover burn DoT), interrupt any in-flight cast, and teleport both back to their fixed
-/// spawn markers (avian `Position` + `Transform` + the replicated `NetworkedPosition`). Slot is by
-/// the player's connection order in `ClientPlayerMap` so the two land at the two markers consistently.
+/// spawn markers (avian `Position`, zeroing `LinearVelocity` so a falling/jumping body lands clean).
+/// lightyear replicates the Position reset; the predicted owner rolls back to it. Slot is by the
+/// player's connection order in `ClientPlayerMap` so the two land at the two markers consistently.
 #[allow(clippy::type_complexity)]
 fn reset_for_new_round(
     players: &mut Query<
@@ -1020,8 +893,7 @@ fn reset_for_new_round(
             &ObeliskNetId,
             &mut Attributes,
             &mut Position,
-            &mut Transform,
-            &mut NetworkedPosition,
+            &mut LinearVelocity,
             &NetworkOwner,
         ),
         With<NetworkedPlayer>,
@@ -1039,9 +911,7 @@ fn reset_for_new_round(
         .map(|(i, (_, e))| (*e, i))
         .collect();
 
-    for (entity, net_id, mut attrs, mut position, mut transform, mut netpos, _owner) in
-        players.iter_mut()
-    {
+    for (entity, net_id, mut attrs, mut position, mut lin_vel, _owner) in players.iter_mut() {
         // Heal to full + restore mana + clear effects (drop any lingering DoT/buff).
         let max_life = attrs.0.computed_max_life();
         let max_mana = attrs.0.computed_max_mana();
@@ -1052,7 +922,8 @@ fn reset_for_new_round(
         // Interrupt any in-flight cast so the new round starts clean.
         commands.entity(entity).interrupt_cast();
 
-        // Respawn at the fixed marker for this player's slot.
+        // Respawn at the fixed marker for this player's slot; zero velocity so the Dynamic body
+        // doesn't carry momentum (or a fall) into the new round.
         let slot = slot_of
             .get(&entity)
             .copied()
@@ -1060,10 +931,7 @@ fn reset_for_new_round(
             .min(SPAWN_MARKERS.len() - 1);
         let spawn = SPAWN_MARKERS[slot];
         position.0 = spawn;
-        transform.translation = spawn;
-        netpos.x = spawn.x;
-        netpos.y = spawn.y;
-        netpos.z = spawn.z;
+        lin_vel.0 = Vec3::ZERO;
 
         trace::event(
             "player_respawn",

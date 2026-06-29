@@ -14,21 +14,26 @@
 //! mouse-yaw) and the headless `ARENA_AUTOMOVE` hook can both feed the same send path. The send
 //! path mirrors `wisp/src/net/client.rs:116-146` (`Single<&mut MessageSender<…>>`).
 
+use avian3d::prelude::*;
 use bevy::prelude::*;
-use lightyear::prelude::server::ClientOf;
-use lightyear::prelude::{LocalId, MessageReceiver, MessageSender, PeerId};
+use lightyear::prelude::client::input::InputSystems;
+use lightyear::prelude::input::native::{ActionState, InputMarker};
+use lightyear::prelude::{Controlled, Interpolated, MessageReceiver, MessageSender, Predicted};
 
 use crate::client::parts::PartSelection;
+use crate::net::input::ArenaInput;
 use crate::net::protocol::{
-    CastChannel, CastRequestMessage, CustomizeBroadcast, CustomizeMessage, InputChannel,
-    NetworkOwner, NetworkedId, NetworkedPlayer, NetworkedPosition, PlayerCustomization,
-    PlayerInputMessage,
+    CastChannel, CastRequestMessage, CustomizeBroadcast, CustomizeMessage, NetworkOwner,
+    NetworkedCastState, NetworkedId, NetworkedPlayer, PlayerCustomization,
 };
+use crate::shared_controller::{apply_arena_movement, apply_arena_yaw};
 
-/// The local player's current input, written each frame by whichever input source is active
-/// (the windowed controller, or the headless `ARENA_AUTOMOVE` hook) and read by
-/// [`send_local_player_input`]. Camera-relative: `movement.x` strafes +right, `movement.y` is
-/// forward; `yaw` is the camera/body yaw the server faces the body toward.
+/// The local player's current input, written each frame by whichever input source is active (the
+/// windowed controller's `bridge_windowed_input_to_local_input`, or the headless `ARENA_AUTOMOVE`
+/// hook) and read by [`buffer_arena_input`], which copies it onto the predicted entity's
+/// `ActionState<ArenaInput>` for lightyear to ship. This is a PURE-LOCAL staging resource now (no
+/// wire) — native input owns the wire. Camera-relative: `movement.x` strafes +right, `movement.y`
+/// is forward; `yaw` is the camera/body yaw.
 #[derive(Resource, Default, Clone, Copy)]
 pub struct LocalInput {
     pub movement: Vec2,
@@ -104,14 +109,14 @@ pub struct PredictedCast {
 #[derive(Resource, Default)]
 pub struct CustomizeDirty(pub bool);
 
-/// Marker on the local player's materialized body — the replicated `NetworkedPlayer` whose
-/// `NetworkOwner` equals our own `LocalId`. The windowed client attaches the follow camera + rig to
-/// this; M2.2 Task 12 marks the predicted/controlled body.
+/// Marker on the local player's predicted entity — the `Predicted` `NetworkedPlayer` lightyear
+/// created for the entity this client `Controlled`. The windowed client attaches the follow camera +
+/// (hidden) rig to this; the shared controller predicts its movement.
 #[derive(Component)]
 pub struct LocalNetPlayer;
 
-/// Marker on a replicated `NetworkedPlayer` that this client has already materialized a body for, so
-/// `materialize_replicated_players` is idempotent (it runs every frame, polling for new replicas).
+/// Marker on a `NetworkedPlayer` (Predicted or Interpolated) that this client has already attached a
+/// body/rig for, so the materialize systems are idempotent (they poll for new replicas + late joins).
 #[derive(Component)]
 pub struct MaterializedBody;
 
@@ -132,11 +137,23 @@ impl Plugin for ClientNetPlayerPlugin {
             // it even without `PartsPlugin`. `init_resource` is idempotent.
             .init_resource::<PartSelection>()
             .add_message::<PredictedCast>()
+            // Buffer native input onto the predicted entity's ActionState (FixedPreUpdate, the
+            // WriteClientInputs set lightyear samples from).
+            .add_systems(
+                FixedPreUpdate,
+                buffer_arena_input.in_set(InputSystems::WriteClientInputs),
+            )
+            // The shared force controller, predicted on the local `Predicted` entity (lightyear
+            // re-runs it during rollback). Chained so the body yaws before the movement force.
+            .add_systems(
+                FixedUpdate,
+                (client_apply_yaw, client_apply_movement).chain(),
+            )
             .add_systems(
                 Update,
                 (
-                    materialize_replicated_players,
-                    send_local_player_input,
+                    materialize_predicted_players,
+                    materialize_interpolated_players,
                     send_cast_requests,
                     send_customization,
                     drain_customize_broadcasts,
@@ -147,106 +164,127 @@ impl Plugin for ClientNetPlayerPlugin {
     }
 }
 
-/// Resolve a netcode `PeerId` to its `u64` client id (matches every id-carrying variant).
-fn peer_to_u64(peer: &PeerId) -> Option<u64> {
-    match peer {
-        PeerId::Netcode(id) | PeerId::Steam(id) | PeerId::Local(id) | PeerId::Entity(id) => {
-            Some(*id)
-        }
-        _ => None,
+/// Buffer the staged [`LocalInput`] (+ charge-hold) onto the predicted entity's
+/// `ActionState<ArenaInput>` each `FixedPreUpdate`. lightyear ships it to the server (which applies
+/// it to that client's authoritative entity) and re-applies it during rollback. Mirrors
+/// `simple_box::buffer_input`. No-op until the `InputMarker<ArenaInput>` entity exists (post-spawn).
+fn buffer_arena_input(
+    input: Res<LocalInput>,
+    charge: Res<ChargeState>,
+    mut query: Query<&mut ActionState<ArenaInput>, With<InputMarker<ArenaInput>>>,
+) {
+    let Ok(mut action_state) = query.single_mut() else {
+        return;
+    };
+    action_state.0 = ArenaInput {
+        movement: input.movement,
+        yaw: input.yaw,
+        jump: input.jump,
+        charging: charge.charging,
+    };
+}
+
+/// Predict the local player's body yaw from its input (avian `Rotation`), `With<Predicted>`.
+fn client_apply_yaw(mut q: Query<(&ActionState<ArenaInput>, &mut Rotation), With<Predicted>>) {
+    for (action, mut rot) in &mut q {
+        apply_arena_yaw(&action.0, &mut rot);
     }
 }
 
-/// The local client's own id, read off the `LocalId` on the connected (non-`ClientOf`) client
-/// entity. `None` until the handshake completes.
-fn local_client_id(local_ids: &Query<&LocalId, Without<ClientOf>>) -> Option<u64> {
-    local_ids.iter().next().and_then(|l| peer_to_u64(&l.0))
+/// Predict the local player's movement force + jump, `With<Predicted>`. lightyear keeps
+/// `ActionState<ArenaInput>` correct for the (re)simulated tick during rollback.
+fn client_apply_movement(
+    time: Res<Time>,
+    mut q: Query<(&ComputedMass, &ActionState<ArenaInput>, Forces), With<Predicted>>,
+) {
+    let dt = time.delta_secs();
+    for (mass, action, forces) in &mut q {
+        apply_arena_movement(mass, dt, &action.0, forces);
+    }
 }
 
-/// For every replicated `NetworkedPlayer` we haven't bodied yet, attach a local avian body
-/// (`Transform` + `Position` + `Rotation` + a kinematic-ish capsule) so the pose stream has
-/// something to drive, and tag the local one with [`LocalNetPlayer`]. Idempotent via
-/// [`MaterializedBody`]. Polled (not an `Add` observer) because `NetworkOwner` and
-/// `NetworkedPosition` arrive in separate replication packets — we wait until `NetworkOwner` is
-/// present so the local/remote tag is correct on the first body.
+/// Attach the local player's physics body + input marker to its newly-`Predicted` `NetworkedPlayer`
+/// (the avian_3d_character `handle_new_character` pattern). lightyear creates exactly one Predicted
+/// entity per client — the one it `Controlled` — so this is the local player. The Dynamic body lets
+/// the client predict + roll back physics; `InputMarker`/`ActionState` carry native input. Tags
+/// [`LocalNetPlayer`] (camera + hidden rig hang off it) + [`MaterializedBody`] (rig attach poll).
 #[allow(clippy::type_complexity)]
-fn materialize_replicated_players(
+fn materialize_predicted_players(
     new_players: Query<
+        (Entity, &NetworkOwner, Has<Controlled>),
         (
-            Entity,
-            &NetworkOwner,
-            &crate::net::protocol::NetworkedPosition,
+            With<NetworkedPlayer>,
+            With<Predicted>,
+            Without<MaterializedBody>,
         ),
-        (With<NetworkedPlayer>, Without<MaterializedBody>),
     >,
-    local_ids: Query<&LocalId, Without<ClientOf>>,
     mut commands: Commands,
 ) {
-    let my_id = local_client_id(&local_ids);
-    for (entity, owner, netpos) in &new_players {
-        let is_local = my_id == Some(owner.0);
-        let spawn = netpos.to_vec3();
-        // Every materialized player gets a Transform + Visibility for rendering.
+    for (entity, owner, is_controlled) in &new_players {
         commands.entity(entity).insert((
             MaterializedBody,
-            Transform::from_translation(spawn),
             Visibility::default(),
+            // Predicted physics body — Dynamic so the shared controller + rollback drive it. Mirrors
+            // the server spawn (capsule(0.35, 0.48), rotation locked, zero friction). No hurtbox:
+            // the client never resolves combat (Stage A) — that stays server-authoritative.
+            RigidBody::Dynamic,
+            Collider::capsule(0.35, 0.48),
+            LockedAxes::default()
+                .lock_rotation_x()
+                .lock_rotation_y()
+                .lock_rotation_z(),
+            Friction::new(0.0).with_combine_rule(CoefficientCombine::Min),
         ));
-        if is_local {
-            // Only the LOCAL player gets an avian body: the local controller (Task 12 prediction)
-            // runs physics on it, and the Task 11 smoothing/snap writes its Position/Rotation.
-            // Kinematic so it never fights those writes. The server is authoritative for combat.
+        if is_controlled {
             commands.entity(entity).insert((
-                avian3d::prelude::RigidBody::Kinematic,
-                avian3d::prelude::Position(spawn),
-                avian3d::prelude::Rotation::default(),
-                avian3d::prelude::Collider::capsule(0.4, 1.2),
+                LocalNetPlayer,
+                InputMarker::<ArenaInput>::default(),
+                ActionState::<ArenaInput>::default(),
             ));
-            commands.entity(entity).insert(LocalNetPlayer);
         }
-        // Bug 2: the REMOTE player gets NO avian body — it's a pure transform proxy. The client
-        // never raycasts/collides the opponent (server is the combat authority), so a remote avian
-        // Kinematic body only competed with `smooth_networked_transforms`' manual pose smoothing,
-        // causing the positional stutter. `smooth_networked_transforms` takes `Option<&mut Position>`
-        // /`Option<&mut Rotation>`, so it gracefully writes Transform-only for the proxy.
         info!(
-            "materialized {} body for NetworkedPlayer owner={} at {spawn:?}",
-            if is_local { "LOCAL" } else { "remote" },
+            "materialized LOCAL (predicted) NetworkedPlayer owner={} controlled={is_controlled}",
             owner.0
         );
         crate::trace::event(
             "materialized_player",
-            serde_json::json!({ "owner": owner.0, "local": is_local,
-                "pos": [spawn.x, spawn.y, spawn.z] }),
+            serde_json::json!({ "owner": owner.0, "local": is_controlled }),
         );
     }
 }
 
-/// Send the local player's input to the server each `Update`. Reads [`LocalInput`] (written by the
-/// windowed controller or the `ARENA_AUTOMOVE` hook) and ships it on the unreliable `InputChannel`.
-/// `Single<&mut MessageSender<…>>` — multiple senders would panic (guide §1.2); there's exactly one
-/// client→server message sender per peer. No-op until the sender exists (post-connect).
-fn send_local_player_input(
-    input: Res<LocalInput>,
-    charge: Res<ChargeState>,
-    local_players: Query<(), (With<NetworkedPlayer>, With<LocalNetPlayer>)>,
-    sender: Option<Single<&mut MessageSender<PlayerInputMessage>>>,
+/// Mark a remote player's newly-`Interpolated` `NetworkedPlayer` as materialized so the rig attaches.
+/// No physics body — lightyear interpolation drives its `Position`/`Rotation`. We wait until BOTH
+/// `Position` AND `Rotation` are present (the avian Position↔Transform sync only runs when both
+/// exist, else the rig would briefly sit at `Transform::default()` — lightyear_avian's documented
+/// caveat).
+#[allow(clippy::type_complexity)]
+fn materialize_interpolated_players(
+    new_players: Query<
+        (Entity, &NetworkOwner),
+        (
+            With<NetworkedPlayer>,
+            With<Interpolated>,
+            With<Position>,
+            With<Rotation>,
+            Without<MaterializedBody>,
+        ),
+    >,
+    mut commands: Commands,
 ) {
-    // Only send once we actually own a local player (else the server has nothing to apply it to).
-    if local_players.iter().next().is_none() {
-        return;
+    for (entity, owner) in &new_players {
+        commands
+            .entity(entity)
+            .insert((MaterializedBody, Visibility::default()));
+        info!(
+            "materialized remote (interpolated) NetworkedPlayer owner={}",
+            owner.0
+        );
+        crate::trace::event(
+            "materialized_player",
+            serde_json::json!({ "owner": owner.0, "local": false }),
+        );
     }
-    let Some(mut sender) = sender else {
-        return;
-    };
-    sender.send::<InputChannel>(PlayerInputMessage {
-        movement: [input.movement.x, input.movement.y],
-        yaw: input.yaw,
-        pitch: input.pitch,
-        jump: input.jump,
-        // Replicate the charge-hold so the opponent sees the windup begin at charge-start (Bug 4).
-        charging: charge.charging,
-    });
 }
 
 /// Send a `CastRequestMessage` on the reliable `CastChannel` when [`CastIntent`] is set.
@@ -264,7 +302,7 @@ fn send_cast_requests(
     mut intent: ResMut<CastIntent>,
     mut charge_state: ResMut<ChargeState>,
     local: Query<
-        (&NetworkedPosition, &crate::net::protocol::ObeliskNetId),
+        (&Position, &crate::net::protocol::ObeliskNetId),
         (With<NetworkedPlayer>, With<LocalNetPlayer>),
     >,
     sender: Option<Single<&mut MessageSender<CastRequestMessage>>>,
@@ -281,7 +319,7 @@ fn send_cast_requests(
     let Some(mut sender) = sender else {
         return; // sender not ready (pre-connect)
     };
-    let here = local_pos.to_vec3();
+    let here = local_pos.0;
 
     // Compute aim direction from the camera look vector (yaw + pitch = first-person forward).
     // Matches the camera placement in `controller::follow_local_net_player`: the camera rotation
@@ -379,51 +417,51 @@ fn drain_customize_broadcasts(
 #[allow(clippy::type_complexity)]
 fn trace_remote_cast_phase(
     remotes: Query<
-        (&NetworkOwner, &crate::net::protocol::NetworkedPosition),
+        (&NetworkOwner, &NetworkedCastState),
         (
             With<NetworkedPlayer>,
             Without<LocalNetPlayer>,
-            Changed<crate::net::protocol::NetworkedPosition>,
+            Changed<NetworkedCastState>,
         ),
     >,
     mut last: Local<std::collections::HashMap<u64, u8>>,
 ) {
-    for (owner, netpos) in &remotes {
-        let prev = last.insert(owner.0, netpos.cast_phase);
-        if prev != Some(netpos.cast_phase) {
+    for (owner, cast) in &remotes {
+        let prev = last.insert(owner.0, cast.cast_phase);
+        if prev != Some(cast.cast_phase) {
             crate::trace::event(
                 "remote_cast_phase",
-                serde_json::json!({ "owner": owner.0, "cast_phase": netpos.cast_phase,
-                    "cast_skill": netpos.cast_skill }),
+                serde_json::json!({ "owner": owner.0, "cast_phase": cast.cast_phase,
+                    "cast_skill": cast.cast_skill }),
             );
         }
     }
 }
 
-/// [H] check support: throttled trace of a REMOTE player's received `NetworkedPosition` (the local
-/// player is excluded). Lets the headless movement-replication check confirm that the OTHER client
-/// observes a moving player's pose change propagate server → this client. Keyed by `NetworkOwner`.
+/// [H] check support: throttled trace of a REMOTE (Interpolated) player's avian `Position` (the
+/// local player is excluded). Lets the headless movement-replication check confirm the OTHER client
+/// observes a moving player's interpolated pose propagate server → this client. Keyed by
+/// `NetworkOwner`, gated on `Changed<Position>` (lightyear interpolation writes Position each frame).
 #[allow(clippy::type_complexity)]
 fn trace_received_remote_pose(
     remotes: Query<
-        (&NetworkOwner, &crate::net::protocol::NetworkedPosition),
+        (&NetworkOwner, &Position),
         (
             With<NetworkedPlayer>,
             Without<LocalNetPlayer>,
-            Changed<crate::net::protocol::NetworkedPosition>,
+            Changed<Position>,
         ),
     >,
     mut throttle: Local<u32>,
 ) {
-    for (owner, netpos) in &remotes {
+    for (owner, position) in &remotes {
         *throttle += 1;
         if *throttle % 30 == 1 {
             crate::trace::event(
                 "remote_pose",
                 serde_json::json!({
                     "owner": owner.0,
-                    "pos": [netpos.x, netpos.y, netpos.z],
-                    "yaw": netpos.yaw,
+                    "pos": [position.0.x, position.0.y, position.0.z],
                 }),
             );
         }
