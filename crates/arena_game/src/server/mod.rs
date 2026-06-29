@@ -47,7 +47,6 @@ impl Plugin for ArenaServerPlugin {
             .add_systems(
                 Update,
                 (
-                    sync_networked_players,
                     // Throttled trace of each player's authoritative avian Position so the headless
                     // movement-replication check has the server-side ground truth to compare the
                     // observers' interpolated pose against.
@@ -80,9 +79,7 @@ impl Plugin for ArenaServerPlugin {
             // before `run_round_machine` so a death this frame is consumed by the FSM the same frame.
             .add_systems(
                 Update,
-                (detect_round_end, run_round_machine, broadcast_round_state)
-                    .chain()
-                    .after(sync_networked_players),
+                (detect_round_end, run_round_machine, broadcast_round_state).chain(),
             )
             // The authoritative controller runs in FixedUpdate so it ticks at the fixed 60 Hz the
             // physics group integrates on. It reads the `ActionState<ArenaInput>` lightyear keeps in
@@ -93,7 +90,10 @@ impl Plugin for ArenaServerPlugin {
             .add_systems(
                 FixedUpdate,
                 (server_apply_yaw, server_apply_movement).chain(),
-            );
+            )
+            // Spawn each player when its client connects (canonical observer-driven spawn, so the
+            // owner's replication sender is ready before Replicate/PredictionTarget resolve).
+            .add_observer(spawn_player_on_connect);
     }
 }
 
@@ -141,157 +141,156 @@ fn peer_to_u64(peer: &PeerId) -> Option<u64> {
     }
 }
 
-/// Poll each frame to ensure exactly one `NetworkedPlayer` per connected client. A regular system,
-/// NOT an observer on `Add<Connected>`, to avoid `Replicate`'s on-insert hook resolving senders
-/// before the connection lifecycle is settled (wisp's rationale, `server.rs:279-283`).
-///
 /// Each player is a full obelisk combatant: `make_combatant(StatBlock::with_id(...))` +
 /// `Faction::Player` + `grant_skill("firebolt")` + a CHILD hurtbox + the replicated networked
 /// component set (`NetworkedPlayer`/`NetworkOwner`/`NetworkedId`/`ObeliskNetId`/`NetworkedHealth`/
 /// `NetworkedCastState`/`PlayerCustomization`) + a Dynamic avian body driven by the shared force
 /// controller. Replicated with `Replicate::to_clients(NetworkTarget::All)` +
 /// `PredictionTarget::Single(owner)` + `InterpolationTarget::AllExceptSingle(owner)`: lightyear
-/// auto-creates a `Predicted` entity on the owner's client and `Interpolated` entities elsewhere
-/// (the canonical `avian_3d_character`/`simple_box` pattern; `All` widens to late joiners).
-#[allow(clippy::type_complexity)] // the lightyear ClientOf+Connected filter query is idiomatic
-fn sync_networked_players(
+/// auto-creates a `Predicted` entity on the owner's client and `Interpolated` entities elsewhere.
+///
+/// Spawn one `NetworkedPlayer` per client in the `On<Add, Connected>` OBSERVER (the canonical
+/// lightyear `avian_3d_character`/`simple_box` pattern). Spawning here — NOT the old polled system —
+/// guarantees the just-connected client's replication SENDER is established before `Replicate` +
+/// `PredictionTarget`/`InterpolationTarget` resolve, so the OWNER reliably receives its `Predicted`
+/// entity. (The polled spawn raced the per-connection sender setup: the owner that connected the
+/// same frame the spawn ran was skipped by `to_clients(All)` and received NO replication at all —
+/// no `Predicted` entity, hence no local player, hence no cast. The old "polled to avoid the
+/// on-insert sender race" rationale was for the removed `Replicate::manual` path; the codebase
+/// already drives connection setup from `On<Add, Connected>` observers, so this is consistent.)
+#[allow(clippy::type_complexity)]
+fn spawn_player_on_connect(
+    trigger: On<Add, Connected>,
     connections: Query<(Entity, &RemoteId), (With<ClientOf>, With<Connected>)>,
     existing: Query<&NetworkOwner>,
     mut commands: Commands,
     mut id_alloc: ResMut<NetworkedIdAlloc>,
     mut client_map: ResMut<ClientPlayerMap>,
 ) {
+    let conn_entity = trigger.entity;
+    let Ok((_, RemoteId(peer_id))) = connections.get(conn_entity) else {
+        return;
+    };
+    let Some(client_id) = peer_to_u64(peer_id) else {
+        return;
+    };
     let existing_ids: HashSet<u64> = existing.iter().map(|o| o.0).collect();
-
-    // Stable slot assignment by SORTED client id over all players that will exist (already-spawned +
-    // the new connections this frame). This MUST match `reset_for_new_round`'s sorted-client-id slot
-    // assignment — otherwise the first round reset (Countdown→Active, before any death) would
-    // teleport/swap both players when connection order ≠ client-id order. Sorting here (not counting
-    // connection order) makes the initial spawn position equal the reset position, so players don't
-    // jump at round start. Also robust to two clients connecting in the same frame.
-    let mut all_ids: Vec<u64> = existing_ids.iter().copied().collect();
-    for (_, RemoteId(pid)) in &connections {
-        if let Some(cid) = peer_to_u64(pid) {
-            if !all_ids.contains(&cid) {
-                all_ids.push(cid);
-            }
-        }
+    if existing_ids.contains(&client_id) {
+        return; // already spawned (idempotent guard)
     }
+
+    // Stable slot by SORTED client id over all currently-connected clients (matches
+    // `reset_for_new_round`'s sorted-client-id slots so the initial spawn == the reset position and
+    // players don't teleport/swap at the first round reset).
+    let mut all_ids: Vec<u64> = connections
+        .iter()
+        .filter_map(|(_, RemoteId(p))| peer_to_u64(p))
+        .collect();
     all_ids.sort_unstable();
+    all_ids.dedup();
+    let slot = all_ids
+        .iter()
+        .position(|&id| id == client_id)
+        .unwrap_or(0)
+        .min(SPAWN_MARKERS.len() - 1);
+    let spawn = SPAWN_MARKERS[slot];
+    // OPPOSING factions so firebolt's `hit_filter: Enemies` (target_faction != caster_faction)
+    // can resolve a hit player→player, and `nearest_enemy` acquires the opponent. With obelisk's
+    // 3-faction model (Player/Enemy/Neutral), a 2-player duel puts slot 0 on Player and slot 1
+    // on Enemy — they are mutual enemies. (If both shared `Faction::Player`, every cast would
+    // pass validation but resolve ZERO hits — the filter rejects same-faction targets.)
+    let faction = if slot == 0 {
+        Faction::Player
+    } else {
+        Faction::Enemy
+    };
+    let net_id = id_alloc.allocate();
+    // Stable obelisk id per client. `make_combatant` enforces ObeliskId == StatBlock.id.
+    let obelisk_id = format!("player_{client_id}");
 
-    for (conn_entity, RemoteId(peer_id)) in &connections {
-        let Some(client_id) = peer_to_u64(peer_id) else {
-            continue;
-        };
-        if existing_ids.contains(&client_id) {
-            continue;
-        }
-
-        // Slot from the stable sorted-id order (matches `reset_for_new_round` exactly).
-        let slot = all_ids
-            .iter()
-            .position(|&id| id == client_id)
-            .unwrap_or(0)
-            .min(SPAWN_MARKERS.len() - 1);
-        let spawn = SPAWN_MARKERS[slot];
-        // OPPOSING factions so firebolt's `hit_filter: Enemies` (target_faction != caster_faction)
-        // can resolve a hit player→player, and `nearest_enemy` acquires the opponent. With obelisk's
-        // 3-faction model (Player/Enemy/Neutral), a 2-player duel puts slot 0 on Player and slot 1
-        // on Enemy — they are mutual enemies. (If both shared `Faction::Player`, every cast would
-        // pass validation but resolve ZERO hits — the filter rejects same-faction targets.)
-        let faction = if slot == 0 {
-            Faction::Player
-        } else {
-            Faction::Enemy
-        };
-        let net_id = id_alloc.allocate();
-        // Stable obelisk id per client. `make_combatant` enforces ObeliskId == StatBlock.id.
-        let obelisk_id = format!("player_{client_id}");
-
-        info!(
-            "Spawning NetworkedPlayer for client {client_id} (obelisk_id={obelisk_id}, \
+    info!(
+        "Spawning NetworkedPlayer for client {client_id} (obelisk_id={obelisk_id}, \
              net_id={net_id})"
-        );
-        trace::event(
-            "player_spawned",
-            json!({
-                "client_id": client_id,
-                "net_id": net_id,
-                "obelisk_id": obelisk_id,
-                "pos": [spawn.x, spawn.y, spawn.z],
-            }),
-        );
+    );
+    trace::event(
+        "player_spawned",
+        json!({
+            "client_id": client_id,
+            "net_id": net_id,
+            "obelisk_id": obelisk_id,
+            "pos": [spawn.x, spawn.y, spawn.z],
+        }),
+    );
 
-        // Spawn the combatant root + networked + Dynamic physics components.
-        let player = commands
-            .spawn_empty()
-            .make_combatant(StatBlock::with_id(obelisk_id.clone()))
-            .insert((
-                Name::new(format!("NetworkedPlayer({client_id})")),
-                faction,
-                NetworkedPlayer,
-                NetworkOwner(client_id),
-                NetworkedId(net_id),
-                ObeliskNetId(obelisk_id.clone()),
-                NetworkedHealth::default(),
-                // Replicated appearance — default witch on spawn; live edits arrive via D6.
-                PlayerCustomization::default(),
-                // Replicated cast state (remote cast animation). Starts idle.
-                NetworkedCastState::default(),
-                // Native input — lightyear syncs this with the controlling client's input each tick.
-                ActionState::<ArenaInput>::default(),
-            ))
-            .insert((
-                // Server-authoritative Dynamic body driven by the shared force controller. Rotation
-                // axes locked (the body only yaws via the controller's direct `Rotation` write);
-                // zero friction so the force controller fully owns the planar velocity (avian's
-                // `move_towards` recipe). The capsule (half-height 0.59) rests on the static floor
-                // with feet at world 0. Position/Rotation/LinearVelocity/AngularVelocity replicate
-                // (predicted on the owner, interpolated elsewhere).
-                Position(spawn),
-                Rotation::default(),
-                LinearVelocity::default(),
-                AngularVelocity::default(),
-                RigidBody::Dynamic,
-                Collider::capsule(0.35, 0.48),
-                LockedAxes::default()
-                    .lock_rotation_x()
-                    .lock_rotation_y()
-                    .lock_rotation_z(),
-                Friction::new(0.0).with_combine_rule(CoefficientCombine::Min),
-            ))
-            .insert((
-                Replicate::to_clients(NetworkTarget::All),
-                PredictionTarget::to_clients(NetworkTarget::Single(*peer_id)),
-                InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(*peer_id)),
-                ControlledBy {
-                    owner: conn_entity,
-                    lifetime: Default::default(),
-                },
-            ))
-            .id();
+    // Spawn the combatant root + networked + Dynamic physics components.
+    let player = commands
+        .spawn_empty()
+        .make_combatant(StatBlock::with_id(obelisk_id.clone()))
+        .insert((
+            Name::new(format!("NetworkedPlayer({client_id})")),
+            faction,
+            NetworkedPlayer,
+            NetworkOwner(client_id),
+            NetworkedId(net_id),
+            ObeliskNetId(obelisk_id.clone()),
+            NetworkedHealth::default(),
+            // Replicated appearance — default witch on spawn; live edits arrive via D6.
+            PlayerCustomization::default(),
+            // Replicated cast state (remote cast animation). Starts idle.
+            NetworkedCastState::default(),
+            // Native input — lightyear syncs this with the controlling client's input each tick.
+            ActionState::<ArenaInput>::default(),
+        ))
+        .insert((
+            // Server-authoritative Dynamic body driven by the shared force controller. Rotation
+            // axes locked (the body only yaws via the controller's direct `Rotation` write);
+            // zero friction so the force controller fully owns the planar velocity (avian's
+            // `move_towards` recipe). The capsule (half-height 0.59) rests on the static floor
+            // with feet at world 0. Position/Rotation/LinearVelocity/AngularVelocity replicate
+            // (predicted on the owner, interpolated elsewhere).
+            Position(spawn),
+            Rotation::default(),
+            LinearVelocity::default(),
+            AngularVelocity::default(),
+            RigidBody::Dynamic,
+            Collider::capsule(0.35, 0.48),
+            LockedAxes::default()
+                .lock_rotation_x()
+                .lock_rotation_y()
+                .lock_rotation_z(),
+            Friction::new(0.0).with_combine_rule(CoefficientCombine::Min),
+        ))
+        .insert((
+            Replicate::to_clients(NetworkTarget::All),
+            PredictionTarget::to_clients(NetworkTarget::Single(*peer_id)),
+            InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(*peer_id)),
+            ControlledBy {
+                owner: conn_entity,
+                lifetime: Default::default(),
+            },
+        ))
+        .id();
 
-        commands.entity(player).grant_skill("firebolt");
-        // Hurtbox so the server-side hit detection resolves firebolt hits against this player. It
-        // lives on a CHILD entity (NOT the player root) so the player stays `RigidBody::Dynamic` —
-        // a `RigidBody::Static` hurtbox on the same entity would conflict with the Dynamic body. The
-        // child carries only `Hurtbox` + a `Collider` (no RigidBody), so avian attaches it to the
-        // parent Dynamic body as a compound child collider that TRACKS the moving/jumping player and
-        // stays in the SpatialQuery pipeline (obelisk's `detect_overlaps` resolves the child entity
-        // to its `Hurtbox.owner` = the player). A `Sensor` so it adds a queryable volume without
-        // contributing contact forces. capsule(0.35, 0.48) spans the body feet→head (origin ±0.59).
-        commands.entity(player).with_children(|c| {
-            c.spawn((
-                Name::new("Hurtbox"),
-                Hurtbox { owner: player },
-                Collider::capsule(0.35, 0.48),
-                Sensor,
-                Transform::default(),
-            ));
-        });
+    commands.entity(player).grant_skill("firebolt");
+    // Hurtbox so the server-side hit detection resolves firebolt hits against this player. It
+    // lives on a CHILD entity (NOT the player root) so the player stays `RigidBody::Dynamic` —
+    // a `RigidBody::Static` hurtbox on the same entity would conflict with the Dynamic body. The
+    // child carries only `Hurtbox` + a `Collider` (no RigidBody), so avian attaches it to the
+    // parent Dynamic body as a compound child collider that TRACKS the moving/jumping player and
+    // stays in the SpatialQuery pipeline (obelisk's `detect_overlaps` resolves the child entity
+    // to its `Hurtbox.owner` = the player). A `Sensor` so it adds a queryable volume without
+    // contributing contact forces. capsule(0.35, 0.48) spans the body feet→head (origin ±0.59).
+    commands.entity(player).with_children(|c| {
+        c.spawn((
+            Name::new("Hurtbox"),
+            Hurtbox { owner: player },
+            Collider::capsule(0.35, 0.48),
+            Sensor,
+            Transform::default(),
+        ));
+    });
 
-        client_map.0.insert(client_id, player);
-    }
+    client_map.0.insert(client_id, player);
 }
 
 // ---------------------------------------------------------------------------------------------
