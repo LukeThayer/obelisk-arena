@@ -8,6 +8,7 @@
 //! `WISP_*` env prefix to `ARENA_*`), the authoritative working lightyear 0.26 reference.
 
 pub mod client;
+pub mod input;
 pub mod protocol;
 pub mod server;
 
