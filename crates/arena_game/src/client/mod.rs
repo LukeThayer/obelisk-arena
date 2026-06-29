@@ -263,7 +263,6 @@ fn windowed_autocast(
 /// Autocast paths (`windowed_autocast`, `headless_autocast`) bypass this and set `CastIntent`
 /// directly; `send_cast_requests` uses the `pending_charge` tap-default (85) for those.
 fn bridge_windowed_cast_hold(
-    keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
     mut intent: ResMut<net::CastIntent>,
@@ -276,9 +275,9 @@ fn bridge_windowed_cast_hold(
         charge.charging = false;
         return;
     }
-    let held = keys.pressed(KeyCode::Space) || mouse.pressed(MouseButton::Left);
-    let just_released =
-        keys.just_released(KeyCode::Space) || mouse.just_released(MouseButton::Left);
+    // Cast is LEFT-MOUSE only: Space is reserved for jumping (see `bridge_windowed_input_to_local_input`).
+    let held = mouse.pressed(MouseButton::Left);
+    let just_released = mouse.just_released(MouseButton::Left);
 
     if held {
         charge.secs = (charge.secs + time.delta_secs()).min(net::MAX_CHARGE_SECS);
