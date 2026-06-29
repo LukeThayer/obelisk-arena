@@ -18,9 +18,15 @@ serde_json = "1"
 ron = "0.8"
 thiserror = "1"
 anyhow = "1"
-# lightyear 0.26.4: the transport + replication + interpolation layer. NO `input_bei` (the arena
-# hand-rolls input messages; bei is a version-mismatch dead weight per the netcode guide §1.1).
-lightyear = { version = "0.26.4", features = ["netcode", "udp", "avian3d", "interpolation"] }
+# lightyear 0.26.4: the transport + replication + interpolation layer. `input_native` adds the
+# native input plugin (`ActionState<ArenaInput>` over the wire); `prediction` adds client-side
+# prediction + rollback (and pulls in `lightyear_frame_interpolation`). NO `input_bei` (bei is a
+# version-mismatch dead weight per the netcode guide §1.1).
+lightyear = { version = "0.26.4", features = ["netcode", "udp", "avian3d", "interpolation", "input_native", "prediction"] }
+# Visual frame-interpolation of the predicted local player's Position/Rotation between FixedUpdate
+# ticks (the avian_3d_character example pattern). Pulled in transitively by lightyear's `prediction`
+# feature; named directly here so `FrameInterpolationPlugin`/`FrameInterpolate` are importable.
+lightyear_frame_interpolation = "0.26.4"
 obelisk-bevy = { path = "../obelisk-bevy" }
 # The pure-Rust stat library obelisk-bevy wraps; arena_game names `StatBlock` directly when
 # building combatants (obelisk-bevy doesn't re-export it). Same path the plugin uses.

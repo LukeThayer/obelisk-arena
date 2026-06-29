@@ -302,6 +302,7 @@ dependencies = [
  "avian3d",
  "bevy",
  "lightyear",
+ "lightyear_frame_interpolation",
  "obelisk-bevy",
  "ron 0.8.1",
  "serde",

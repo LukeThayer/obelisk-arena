@@ -36,3 +36,5 @@ serde_json.workspace = true
 ron.workspace = true
 # lightyear 0.26.4 transport/replication/interpolation (workspace pin; features set there).
 lightyear.workspace = true
+# Visual frame-interpolation of the predicted local player (workspace pin).
+lightyear_frame_interpolation.workspace = true
