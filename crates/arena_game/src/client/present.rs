@@ -48,6 +48,10 @@ struct RigAttached;
 /// LOCAL player bodies are tagged [`LocalPlayerBody`] and spawned with `Visibility::Hidden` so the
 /// first-person camera is never inside the local player's head. REMOTE (opponent) bodies are
 /// `Visibility::default()` (inherited → visible).
+/// Vertical offset applied to the feet-rooted `character.glb` body so its feet line up with the
+/// bottom of the hurtbox capsule (origin−1.0) and the platform. See `attach_rig_to_players`.
+const RIG_FOOT_OFFSET: f32 = -1.0;
+
 #[allow(clippy::type_complexity)]
 fn attach_rig_to_players(
     new_players: Query<
@@ -66,7 +70,15 @@ fn attach_rig_to_players(
             assets.load(GltfAssetLabel::Scene(0).from_asset("character.glb"));
         // The π yaw offset is the gltf import convention M1 relied on (the character's mesh
         // faces +Z after this) so `NetworkedPosition.yaw` (body facing) reads correctly.
-        let base_tf = Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI));
+        //
+        // The `character.glb` is FEET-ROOTED — the model's feet sit at its scene origin. Attached at
+        // the player origin with no Y offset, the feet float at the origin (world 1.0). But the player
+        // origin is the CENTER of the hurtbox capsule (`server::sync_networked_players`,
+        // `capsule(0.45,1.1)`, extent ±1.0 → bottom at origin−1.0) and the green platform sits at
+        // origin−1.0 (world 0). So shift the body DOWN by 1.0 to line the feet up with the bottom of
+        // the hitbox and rest them on the platform. (Matches wisp's `body_offset` for this glb.)
+        let base_tf = Transform::from_translation(Vec3::Y * RIG_FOOT_OFFSET)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::PI));
         let body = if is_local {
             commands
                 .spawn((
