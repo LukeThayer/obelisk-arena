@@ -252,9 +252,22 @@ fn sync_networked_players(
             .id();
 
         commands.entity(player).grant_skill("firebolt");
-        // Hurtbox so the server-side hit detection can resolve firebolt hits against this player.
-        // `insert_hurtbox` (re)sets the entity Transform to `spawn`, keeping it at the marker.
-        insert_hurtbox(&mut commands, player, 0.6, spawn);
+        // Hurtbox so the server-side hit detection resolves firebolt hits against this player. We
+        // build it by hand (instead of `insert_hurtbox`, which is a sphere) so the hittable volume
+        // matches the VISIBLE BODY: a vertical capsule, not a waist-height sphere. The `character.glb`
+        // origin sits 1.0 above the feet (feet at origin Y−1.0 ≈ world 0, head ≈ origin Y+0.9 ≈ world
+        // 1.9). The collider is centered on the player entity Transform (the origin), so a capsule of
+        // total extent ±1.0 spans origin Y−1.0 → origin Y+1.0 = the FEET up to just above the head —
+        // i.e. the feet line up with the bottom of the hitbox and the head is covered. avian's
+        // `capsule(radius, length)` excludes the hemispheres, so extent = length/2 + radius:
+        // `capsule(0.45, 1.1)` → 0.55 + 0.45 = 1.0. `RigidBody::Static` still tracks the owner's
+        // Transform (obelisk CLAUDE: static ≠ frozen), so the hurtbox follows the moving/jumping player.
+        commands.entity(player).insert((
+            Hurtbox { owner: player },
+            RigidBody::Static,
+            Collider::capsule(0.45, 1.1),
+            Transform::from_translation(spawn),
+        ));
 
         client_map.0.insert(client_id, player);
     }

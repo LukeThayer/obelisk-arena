@@ -27,7 +27,13 @@ pub const TICK_HZ: u32 = 60;
 /// firebolt now spawns at `origin + Y*ARENA_EYE_HEIGHT`, the bolt originates at the eye and travels
 /// along `aim_dir` (camera forward) — so the crosshair ray IS the bolt path and a shot aimed at the
 /// opponent connects. Defined once here so the two values can never drift apart.
-pub const ARENA_EYE_HEIGHT: f32 = 1.6;
+///
+/// Value `0.7` is wisp's first-person eye offset for this exact `character.glb`: the player origin
+/// sits 1.0 above the model's feet (feet at origin Y−1.0, head ≈ origin Y+0.9), so `+0.7` puts the
+/// eye at head level (just below the hat). The HURTBOX capsule (`server::sync_networked_players`)
+/// spans origin Y±1.0 = feet→just-above-head, so the eye-height muzzle fires from inside the body's
+/// vertical span and a level shot lands. (Previously `1.6` floated the camera ~0.7 above the head.)
+pub const ARENA_EYE_HEIGHT: f32 = 0.7;
 
 /// The stand height (world Y of a grounded player origin) — the witch's feet rest on the green
 /// visual plane at origin Y=1.0. The manual gravity clamp floors the player here. Shared by the
