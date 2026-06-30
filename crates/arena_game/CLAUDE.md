@@ -12,7 +12,7 @@
 
 ## Load-bearing plugin composition order
 
-Identical on server (`bin/server.rs:20-58`) and windowed client (`client/mod.rs:88-216`); get it wrong and you get a `PhysicsSchedulePlugin already added` panic or replication that silently never flows.
+Identical on server (`bin/server.rs`) and windowed client (`run_windowed_client`, `client/app_windowed.rs`); get it wrong and you get a `PhysicsSchedulePlugin already added` panic or replication that silently never flows.
 
 1. Base plugins + `Time::<Fixed>::from_hz(60.0)`. Server/headless: `MinimalPlugins` + `LogPlugin` + `AssetPlugin` + `TransformPlugin` + `MeshPlugin` + `ScenePlugin` (avian's collider cache needs the asset/mesh/scene plugins even with no rendering). Windowed: `DefaultPlugins` with `AssetPlugin.file_path = <root>/assets`.
 2. **lightyear net stack FIRST** — `ServerNetPlugin`/`ClientNetPlugin`, which add `ProtocolPlugin` + `TracePlugin`. Then reapply `ConnectTo`/`ServerBind` from `parse_addr_args(default)`.
@@ -87,10 +87,10 @@ Per-component `*_should_rollback` with 0.01 epsilons (matches the canonical `avi
 
 A Dynamic-body force controller shared verbatim by both peers and re-run by lightyear during rollback.
 
-1. Input source → `LocalInput` resource: windowed `bridge_windowed_input_to_local_input` (`client/mod.rs:329`, WASD + `CameraYaw`/`AimPitch`, camera-relative: forward = -Z, strafe = +X in the yaw frame) or headless `automove_input` (`client/mod.rs:645`).
+1. Input source → `LocalInput` resource: windowed `bridge_windowed_input_to_local_input` (`client/app_windowed.rs`, WASD + `CameraYaw`/`AimPitch`, camera-relative: forward = -Z, strafe = +X in the yaw frame) or headless `automove_input` (`client/app_headless.rs`).
 2. `buffer_arena_input` (`client/net.rs:171`) copies `LocalInput` + `ChargeState.charging` onto the Predicted entity's `ActionState<ArenaInput>` in `FixedPreUpdate`/`InputSystems::WriteClientInputs` — lightyear samples it there and ships it.
 3. Controller execution (FixedUpdate, chained yaw-then-movement on both peers): server `server_apply_yaw`/`server_apply_movement` (`With<NetworkedPlayer>, Without<Predicted>`); client `client_apply_yaw`/`client_apply_movement` (`With<Predicted>`). `apply_arena_movement` accelerates planar velocity toward `move_dir * MAX_SPEED` via avian's `move_towards`, applying `required_acceleration * mass`; a grounded jump applies an upward impulse to reach `JUMP_SPEED`. Yaw is a **separate** system because avian's `Forces` borrows `Rotation` internally.
-4. Render smoothing: the local Predicted player gets `FrameInterpolate<Position/Rotation>` (`client/mod.rs:679`); Interpolated remotes are already smooth via lightyear.
+4. Render smoothing: the local Predicted player gets `FrameInterpolate<Position/Rotation>` (`add_frame_interpolation_to_predicted`, `client/harness.rs`); Interpolated remotes are already smooth via lightyear.
 
 Note: movement force is applied **unconditionally of ground state** (full-strength air control); only the jump is ground-gated. Friction is 0 so the controller fully owns planar velocity (releasing input decelerates at the full `MAX_ACCELERATION`).
 
@@ -98,7 +98,7 @@ Note: movement force is applied **unconditionally of ground state** (full-streng
 
 Combat is 100% server-authoritative (obelisk). The client only *requests* casts and *predicts cosmetics*.
 
-1. `bridge_windowed_cast_hold` (`client/mod.rs:272`): LMB-hold accumulates `ChargeState.secs` (clamped to `MAX_CHARGE_SECS`); on release `pending_charge = (85 + frac*170)` (85 ≈ tap ≈1.0×, 255 = full hold 2.0×) and sets `CastIntent`.
+1. `bridge_windowed_cast_hold` (`client/app_windowed.rs`): LMB-hold accumulates `ChargeState.secs` (clamped to `MAX_CHARGE_SECS`); on release `pending_charge = charge_byte_from_frac(frac)` (`TAP_CHARGE_BYTE`=85 ≈ tap ≈1.0×, 255 = full hold 2.0×) and sets `CastIntent`.
 2. `send_cast_requests` (`client/net.rs:301`): ships `CastRequestMessage` on `CastChannel`, where `aim_dir` is the camera-forward vector `Quat(Y,yaw)*Quat(X,pitch) * -Z`. It also emits a `PredictedCast` for zero-latency own-cast cosmetics, then clears the intent.
 3. `drain_cast_requests` (`server/cast_pipeline.rs:27`): resolves sender `RemoteId` → caster via `ClientPlayerMap`, skips a caster mid-`ActiveCast`, and fires `cast_skill_dir_charged_from(skill, dir, charge, Vec3::Y*ARENA_EYE_HEIGHT)`. Free aim from the eye, no auto-acquire — it can miss.
 4. obelisk FixedUpdate sets resolve the rest: `validate_casts` (mana/cooldown/already-casting gate) → `advance_casts` → `move_projectiles` → `detect_overlaps` (hit → `DamageResolved`). Only the server runs `ObeliskSet::ResolveHits`.
