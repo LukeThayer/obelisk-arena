@@ -1,12 +1,12 @@
-//! Windowed-client presentation glue (M2.5 Task 21): attach the rigged character to every
-//! materialized networked player so BOTH the local + remote players render as the real M1 rig
-//! (`rig.rs`) rather than the bare capsule. Windowed-only — the headless client has no rendering.
+//! Windowed-client presentation glue: attach the rigged character to every materialized networked
+//! player so BOTH the local + remote players render as the real `character.glb` rig (`rig.rs`)
+//! rather than the bare capsule. Windowed-only — the headless client has no rendering.
 //!
 //! The server replicates each player as a `NetworkedPlayer` + identity + avian `Position`/`Rotation`;
 //! `client::net::materialize_predicted_players` (local Dynamic body) /
 //! `materialize_interpolated_players` (remotes, lightyear-driven pose) tag each with
-//! `MaterializedBody`. This module hangs the `character.glb` `ArenaBody` scene under that body (as a child,
-//! with the same π gltf-yaw offset M1 used) + the `LocalAnimBlend` the rig animation driver reads, so
+//! `MaterializedBody`. This module hangs the `character.glb` `ArenaBody` scene under that body (as a
+//! child, with the π gltf-yaw import offset) + the `LocalAnimBlend` the rig animation driver reads, so
 //! the player appears as a costumed character. Idempotent via [`RigAttached`] (polls for new
 //! replicas + the late joiner).
 
@@ -40,15 +40,6 @@ pub struct LocalPlayerBody;
 #[derive(Component)]
 struct RigAttached;
 
-/// For every materialized `NetworkedPlayer` lacking a rig, spawn the `character.glb` `ArenaBody`
-/// scene as a child (π gltf-yaw offset, matching M1's `spawn_combatants`) + insert `LocalAnimBlend`
-/// on the player root (the rig's `drive_animation` reads it). The capsule `Collider` on the proxy
-/// body stays (it never renders — no `Mesh3d`), so the only visible thing is the rig. Polls for new
-/// replicas, so the second (late-joining) player gets a rig too.
-///
-/// LOCAL player bodies are tagged [`LocalPlayerBody`] and spawned with `Visibility::Hidden` so the
-/// first-person camera is never inside the local player's head. REMOTE (opponent) bodies are
-/// `Visibility::default()` (inherited → visible).
 /// Vertical offset applied to the feet-rooted `character.glb` body so the model's CENTER sits at the
 /// player origin (= the hurtbox-capsule center / body center). MEASURED: the glb's feet are ~0.03 and
 /// its head ~1.21 above its scene origin (≈ feet-rooted), so the body center is ~0.62 above the scene
@@ -56,6 +47,15 @@ struct RigAttached;
 /// origin−0.59 (= world 0, on the platform / hitbox bottom), and the head at origin+0.59 (hitbox top).
 const RIG_FOOT_OFFSET: f32 = -0.62;
 
+/// For every materialized `NetworkedPlayer` lacking a rig, spawn the `character.glb` `ArenaBody`
+/// scene as a child (π gltf-yaw offset) + insert `LocalAnimBlend` on the player root (the rig's
+/// `drive_animation` reads it). The capsule `Collider` on the proxy body stays (it never renders — no
+/// `Mesh3d`), so the only visible thing is the rig. Polls for new replicas, so the second
+/// (late-joining) player gets a rig too.
+///
+/// LOCAL player bodies are tagged [`LocalPlayerBody`] and spawned with `Visibility::Hidden` so the
+/// first-person camera is never inside the local player's head. REMOTE (opponent) bodies are
+/// `Visibility::default()` (inherited → visible).
 #[allow(clippy::type_complexity)]
 fn attach_rig_to_players(
     new_players: Query<

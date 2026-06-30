@@ -2,7 +2,7 @@
 
 `arena_game` is a 1v1 online wizard duel: **Bevy 0.18.1 + Avian3d 0.5 + lightyear 0.26.4**, with combat owned by `obelisk-bevy`. It is **server-authoritative** with **lightyear-native client prediction + interpolation**. Movement is a Dynamic-body FORCE controller (`shared_controller.rs`) driven by native `ActionState<ArenaInput>`; each player replicates as a lightyear `Predicted` entity (the owner) + `Interpolated` entities (everyone else).
 
-> The pre-migration hand-rolled netcode is GONE: `NetworkedPosition` pose stream, `PlayerInputMessage`/`InputChannel`, the kinematic `run_player_controller`/`sync_player_positions`/`drain_player_inputs`, `prediction.rs`, `replication.rs`, `materialize_replicated_players`, and `LinkStart`. Several in-code doc comments still reference these — see the "Stale comments" section; do not trust them.
+> The pre-migration hand-rolled netcode is GONE: `NetworkedPosition` pose stream, `PlayerInputMessage`/`InputChannel`, the kinematic `run_player_controller`/`sync_player_positions`/`drain_player_inputs`, `prediction.rs`, `replication.rs`, `materialize_replicated_players`, and `LinkStart`. If you find an in-code comment naming any of these, it is stale — fix it.
 
 ## Crate + binary layout
 
@@ -128,14 +128,6 @@ Damage stays 100% obelisk-authoritative; this machine only reads deaths and rese
 10. **`Collider::capsule(0.35, 0.48)` is duplicated in 3 spawns** (server body `:256`, server hurtbox `:287`, client predicted body `net.rs:231`) and MUST stay identical or prediction/hurtbox desync. Player mass is implicit (avian default density) and intentionally cancels in the controller (`force = accel*mass`, `impulse = dv*mass`) — any future knockback/external impulse must account for this.
 11. **Spawn faction is assigned once at connect by slot** (`server/mod.rs:202`) and never re-asserted. The slot derivation is order-sensitive — see top findings; treat shared-faction (zero-damage) as a known hazard until fixed. The round reset re-derives *position* by sorted id but not faction.
 12. **Flat-floor ground check.** `grounded = pos_y <= GROUND_Y + 0.05` assumes a single flat floor; stacked bodies / knock-up / ramps break it silently.
-
-### ⚠️ Stale in-code comments (do NOT trust them; they predate the migration)
-- `client/net.rs:1-15` describes a `NetworkedPosition` pose stream + `PlayerInputMessage`/`InputChannel`. Reality: native `ActionState<ArenaInput>` + avian `Position` replication. `:412` cites `NetworkedPosition.cast_phase` (now `NetworkedCastState`).
-- `client/controller.rs:1-24` calls movement "all kinematic … writes `Transform.translation` directly"; `:33-34` has a dangling fragment + "over-the-shoulder"; `:97` references the deleted `client::prediction`. The camera is first-person and this plugin no longer moves a Transform.
-- `client/present.rs:6,75-82` reference `materialize_replicated_players`, `NetworkedPosition.yaw`, `capsule(0.45,1.1)`/offset `1.0`. Reality: `materialize_predicted_players`/`materialize_interpolated_players`, avian `Rotation`, `capsule(0.35,0.48)`/`RIG_FOOT_OFFSET=-0.62`.
-- `client/rig.rs:6-9` says locomotion-blend was dropped (it's implemented here); `:214` cites `spawn_combatants`; `:295-304` cites `NetworkedPosition.yaw` + claims remote velocity isn't threaded (it is).
-- `server/mod.rs:1-7,63,69,78,106,903,982` + `net/mod.rs:35` cite `sync_networked_players`/`refresh_replicate_on_connect` (don't exist — spawn is the `spawn_player_on_connect` observer); `:61-62` says "re-acquire target" (it's free aim).
-- `client/cosmetics.rs:18-47`, `skills.rs:191-192` (`register_cue_egress`), `bin/client.rs:2` ("M1 gameplay"), `bin/server.rs:5-6,57` ("late-joiner refresh"), `observer.rs:7` (`NetworkedPosition`) are all stale.
 
 ## Net-test harness (`crates/arena_game/tools/net-test/`) — do not break
 
