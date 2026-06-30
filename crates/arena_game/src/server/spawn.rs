@@ -7,7 +7,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use avian3d::prelude::*;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::ClientOf;
@@ -15,14 +14,12 @@ use lightyear::prelude::{Connected, PeerId, RemoteId, Replicate};
 use lightyear::prelude::{ControlledBy, InterpolationTarget, NetworkTarget, PredictionTarget};
 use obelisk_bevy::prelude::*;
 use serde_json::json;
-use stat_core::StatBlock;
 
 use crate::net::input::ArenaInput;
 use crate::net::protocol::{
     NetworkOwner, NetworkedCastState, NetworkedHealth, NetworkedId, NetworkedPlayer, ObeliskNetId,
     PlayerCustomization,
 };
-use crate::net::{PLAYER_CAPSULE_LENGTH, PLAYER_CAPSULE_RADIUS};
 use crate::trace;
 
 use super::rounds::faction_for_slot;
@@ -53,13 +50,10 @@ impl NetworkedIdAlloc {
     }
 }
 
-/// The two fixed arena spawn markers (spec §11 hard-coded geometry). Players are placed by
-/// connection order: the first connected client at marker 0, the second at marker 1. Facing each
-/// other across the +Z axis.
-pub(crate) const SPAWN_MARKERS: [Vec3; 2] = [
-    Vec3::new(-4.0, crate::net::GROUND_Y, 0.0),
-    Vec3::new(4.0, crate::net::GROUND_Y, 0.0),
-];
+/// The two fixed arena spawn markers (spec §11 hard-coded geometry) — now lifted into `arena_sim`
+/// and re-exported so the spawn + per-round reset still place players by connection-sorted slot
+/// (marker 0 / marker 1, facing each other across the +Z axis).
+pub(crate) use arena_sim::spawn::SPAWN_MARKERS;
 
 /// Resolve a netcode `PeerId` to its `u64` client id, matching every id-carrying variant.
 pub(crate) fn peer_to_u64(peer: &PeerId) -> Option<u64> {
@@ -150,13 +144,21 @@ pub(crate) fn spawn_player_on_connect(
         }),
     );
 
-    // Spawn the combatant root + networked + Dynamic physics components.
-    let player = commands
-        .spawn_empty()
-        .make_combatant(StatBlock::with_id(obelisk_id.clone()))
+    // The transport-agnostic combatant recipe (shared with the editor preview): obelisk combatant
+    // (`make_combatant(StatBlock::with_id(...))` → `Combatant`/`Attributes`/`ObeliskId`) + the slot
+    // `Faction` + the server-authoritative Dynamic avian body (rotation axes locked, zero friction so
+    // the shared force controller owns planar velocity; capsule half-height 0.59 rests on the floor
+    // with feet at world 0; `Position` set to the spawn marker) + a CHILD `Hurtbox` `Sensor` capsule
+    // (on a child so the root stays Dynamic; tracks the moving body in the SpatialQuery pipeline).
+    let player = arena_sim::spawn::make_arena_combatant(&mut commands, &obelisk_id, faction, spawn);
+
+    // Layer the networked + replicated component set on top of the bare combatant. The body's
+    // Position/Rotation/LinearVelocity/AngularVelocity (set by `make_arena_combatant`) replicate
+    // (predicted on the owner, interpolated elsewhere).
+    commands
+        .entity(player)
         .insert((
             Name::new(format!("NetworkedPlayer({client_id})")),
-            faction,
             NetworkedPlayer,
             NetworkOwner(client_id),
             NetworkedId(net_id),
@@ -170,25 +172,6 @@ pub(crate) fn spawn_player_on_connect(
             ActionState::<ArenaInput>::default(),
         ))
         .insert((
-            // Server-authoritative Dynamic body driven by the shared force controller. Rotation
-            // axes locked (the body only yaws via the controller's direct `Rotation` write);
-            // zero friction so the force controller fully owns the planar velocity (avian's
-            // `move_towards` recipe). The capsule (half-height 0.59) rests on the static floor
-            // with feet at world 0. Position/Rotation/LinearVelocity/AngularVelocity replicate
-            // (predicted on the owner, interpolated elsewhere).
-            Position(spawn),
-            Rotation::default(),
-            LinearVelocity::default(),
-            AngularVelocity::default(),
-            RigidBody::Dynamic,
-            Collider::capsule(PLAYER_CAPSULE_RADIUS, PLAYER_CAPSULE_LENGTH),
-            LockedAxes::default()
-                .lock_rotation_x()
-                .lock_rotation_y()
-                .lock_rotation_z(),
-            Friction::new(0.0).with_combine_rule(CoefficientCombine::Min),
-        ))
-        .insert((
             Replicate::to_clients(NetworkTarget::All),
             PredictionTarget::to_clients(NetworkTarget::Single(*peer_id)),
             InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(*peer_id)),
@@ -197,26 +180,7 @@ pub(crate) fn spawn_player_on_connect(
                 lifetime: Default::default(),
             },
         ))
-        .id();
-
-    commands.entity(player).grant_skill("firebolt");
-    // Hurtbox so the server-side hit detection resolves firebolt hits against this player. It
-    // lives on a CHILD entity (NOT the player root) so the player stays `RigidBody::Dynamic` —
-    // a `RigidBody::Static` hurtbox on the same entity would conflict with the Dynamic body. The
-    // child carries only `Hurtbox` + a `Collider` (no RigidBody), so avian attaches it to the
-    // parent Dynamic body as a compound child collider that TRACKS the moving/jumping player and
-    // stays in the SpatialQuery pipeline (obelisk's `detect_overlaps` resolves the child entity
-    // to its `Hurtbox.owner` = the player). A `Sensor` so it adds a queryable volume without
-    // contributing contact forces. The shared player capsule spans the body feet→head (origin ±0.59).
-    commands.entity(player).with_children(|c| {
-        c.spawn((
-            Name::new("Hurtbox"),
-            Hurtbox { owner: player },
-            Collider::capsule(PLAYER_CAPSULE_RADIUS, PLAYER_CAPSULE_LENGTH),
-            Sensor,
-            Transform::default(),
-        ));
-    });
+        .grant_skill("firebolt");
 
     client_map.0.insert(client_id, player);
 }

@@ -43,13 +43,7 @@ use super::spawn::{peer_to_u64, ClientPlayerMap, SPAWN_MARKERS};
 /// the slot comes from the sorted id list, the two duelists land on slots 0 and 1 regardless of
 /// connect order, so they can NEVER share a faction — which would make firebolt's `Enemies`
 /// hit-filter resolve zero hits and hang the match unwinnable (see invariant §11).
-pub(crate) fn faction_for_slot(slot: usize) -> Faction {
-    if slot == 0 {
-        Faction::Player
-    } else {
-        Faction::Enemy
-    }
-}
+pub(crate) use arena_sim::spawn::faction_for_slot;
 
 /// Tear down per-client server state when a client's `Connected` is removed (disconnect). Removes
 /// the client from `ClientPlayerMap` and drops its score entry from `RoundState` so a stale ghost

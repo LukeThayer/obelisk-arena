@@ -27,8 +27,8 @@ use crate::net::protocol::{
     CastChannel, CastRequestMessage, CustomizeBroadcast, CustomizeMessage, NetworkOwner,
     NetworkedCastState, NetworkedId, NetworkedPlayer, PlayerCustomization,
 };
-use crate::net::{PLAYER_CAPSULE_LENGTH, PLAYER_CAPSULE_RADIUS};
 use crate::shared_controller::{apply_arena_movement, apply_arena_yaw};
+use arena_sim::tuning::{PLAYER_CAPSULE_LENGTH, PLAYER_CAPSULE_RADIUS};
 
 /// The local player's current input, written each frame by whichever input source is active (the
 /// windowed controller's `bridge_windowed_input_to_local_input`, or the headless `ARENA_AUTOMOVE`

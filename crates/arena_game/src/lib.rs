@@ -70,22 +70,10 @@ pub fn add_avian_with_lightyear(app: &mut App) {
     app.insert_resource(Gravity(Vec3::new(0.0, -crate::net::GRAVITY, 0.0)));
 }
 
-/// Spawn the STATIC arena floor collider on this peer. The Dynamic player bodies rest on it. A
-/// cuboid spanning `±FLOOR_HALF` horizontally + 1 m thick, positioned so its TOP face is at world
-/// Y = 0 (the green visual plane); a capsule(0.35, 0.48) body (half-height 0.59) then rests with
-/// its origin at [`net::GROUND_Y`] = 0.59 and its feet at world 0. Spawned locally (identical on
-/// every peer — no need to replicate static geometry).
-pub fn spawn_arena_floor(commands: &mut Commands) {
-    const FLOOR_SIZE: f32 = 40.0;
-    const FLOOR_THICKNESS: f32 = 1.0;
-    commands.spawn((
-        Name::new("ArenaFloor"),
-        RigidBody::Static,
-        Collider::cuboid(FLOOR_SIZE, FLOOR_THICKNESS, FLOOR_SIZE),
-        Position(Vec3::new(0.0, -FLOOR_THICKNESS / 2.0, 0.0)),
-        Rotation::default(),
-    ));
-}
+/// The STATIC arena floor collider spawn (the Dynamic player bodies rest on it) — now lifted into the
+/// transport-agnostic `arena_sim` crate and re-exported here so the game keeps its
+/// `crate::spawn_arena_floor` call sites unchanged.
+pub use arena_sim::spawn::spawn_arena_floor;
 
 /// Compose obelisk-bevy's sim sub-plugins INDIVIDUALLY — the shared body behind
 /// [`add_obelisk_sim_headless`] and [`add_obelisk_sim_client`]. Both paths deliberately omit
