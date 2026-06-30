@@ -125,20 +125,16 @@ pub struct ArenaControllerPlugin;
 
 impl Plugin for ArenaControllerPlugin {
     fn build(&self, app: &mut App) {
-        // Debug pitch override: a fixed lean for headless screenshot verification.
-        let (pitch0, locked) = std::env::var("ARENA_TEST_PITCH")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .map(|p| (p, true))
-            .unwrap_or((0.0, false));
-
-        // Initial camera yaw. `ARENA_CAM_YAW` (radians) seeds a 3/4 view for screenshot verification
-        // so the cast pose + muzzle particle + flying projectile are all legible (a straight-behind
-        // shot hides them behind the character). Default 0 → straight behind; mouse-X drives it.
-        let yaw0 = std::env::var("ARENA_CAM_YAW")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(0.0);
+        // Camera-aim env hooks via the SHARED parser (`harness::EnvConfig`), so the headless client
+        // (`app_headless.rs`) reads `ARENA_CAM_YAW`/`ARENA_TEST_PITCH` the exact same way.
+        //   - `ARENA_TEST_PITCH`: a fixed lean for headless screenshot verification; when set it
+        //     pins the pitch (`locked`) so `accumulate_mouse_look` skips the mouse-Y update.
+        //   - `ARENA_CAM_YAW` (radians): seeds a 3/4 view for screenshot verification so the cast
+        //     pose + muzzle particle + flying projectile are all legible (a straight-behind shot
+        //     hides them behind the character). Default 0 → straight behind; mouse-X drives it.
+        let env = super::harness::EnvConfig::from_env();
+        let (pitch0, locked) = (env.test_pitch, env.test_pitch_locked);
+        let yaw0 = env.cam_yaw;
 
         // Mouse sensitivity: `ARENA_MOUSE_SENS` (radians/pixel) overrides the 0.0035 default.
         let mouse_sens = std::env::var("ARENA_MOUSE_SENS")

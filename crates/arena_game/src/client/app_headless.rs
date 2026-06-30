@@ -1,0 +1,273 @@
+//! The headless scriptable client (`ARENA_HEADLESS=1`, the `arena-observer` bin): MinimalPlugins +
+//! the lightyear net stack, materializes players, traces the replicated combat/cue streams, and
+//! (under `ARENA_AUTOCAST`/`ARENA_AUTOMOVE`/`ARENA_CUSTOMIZE`) scripts casts / movement / appearance
+//! over the wire. This is the net-regression vehicle the `tools/net-test` harness drives.
+//!
+//! Also home to the [`autocast`] system + the local/remote player query filters it shares with the
+//! windowed client (`app_windowed.rs`), since the headless `[H]` hooks here (e.g.
+//! [`headless_customize_once`]) lean on the same [`LocalPlayerFilter`].
+
+use bevy::prelude::*;
+
+use super::controller;
+use super::harness::EnvConfig;
+use super::net;
+use super::parts;
+
+use crate::{add_avian_with_lightyear, arena_root};
+
+/// Query filter for THIS peer's local (predicted, owned) networked player.
+pub(super) type LocalPlayerFilter = (
+    With<crate::net::protocol::NetworkedPlayer>,
+    With<net::LocalNetPlayer>,
+);
+/// Query filter for the REMOTE (interpolated, opponent) networked players.
+pub(super) type RemotePlayerFilter = (
+    With<crate::net::protocol::NetworkedPlayer>,
+    Without<net::LocalNetPlayer>,
+);
+
+/// Run the headless connectivity/movement client: MinimalPlugins + LogPlugin (no window, no
+/// rendering, no HUD) + the lightyear client net stack + the avian-lightyear physics + the
+/// net-driven player layer (materialize bodies + send input). Gated by `ARENA_HEADLESS=1` so two
+/// clients can be brought up under the net-test harness to verify connection + replication +
+/// movement without windows.
+///
+/// It materializes a body for every replicated `NetworkedPlayer` (tracing `materialized_player`
+/// with the owner's client_id + local flag so the late-joiner check still passes) and — under
+/// `ARENA_AUTOMOVE=1` — feeds a constant forward input so the movement-replication check can drive
+/// the server controller headlessly.
+pub fn run_headless_client() {
+    let root = arena_root();
+    let mut app = App::new();
+
+    app.add_plugins((
+        MinimalPlugins,
+        bevy::log::LogPlugin::default(),
+        AssetPlugin {
+            file_path: root.join("assets").to_string_lossy().into_owned(),
+            ..default()
+        },
+        TransformPlugin,
+        bevy::mesh::MeshPlugin,
+        bevy::scene::ScenePlugin,
+    ));
+    app.insert_resource(Time::<Fixed>::from_hz(60.0));
+
+    crate::net::client::connect_to_configured(&mut app);
+    add_avian_with_lightyear(&mut app);
+
+    // Net-driven player layer: attach a body to each materialized NetworkedPlayer + stage input
+    // (lightyear drives prediction + remote interpolation). Also traces replicated/materialized
+    // players for the late-joiner check.
+    app.add_plugins(net::ClientNetPlayerPlugin);
+
+    // Seed CameraYaw + AimPitch from env vars so `send_cast_requests` has an aim direction.
+    // `ARENA_CAM_YAW` (radians) steers the cast; `ARENA_TEST_PITCH` seeds the pitch (both
+    // default to 0.0 if unset). These mirror the env-var seeding in `ArenaControllerPlugin`
+    // (windowed client) via the SHARED `EnvConfig` parser, giving the headless harness the same
+    // knob to aim the caster.
+    let env = EnvConfig::from_env();
+    app.insert_resource(controller::CameraYaw(env.cam_yaw))
+        .insert_resource(controller::AimPitch(env.test_pitch));
+
+    // Static floor collider so the predicted Dynamic body rests on it (headless prediction needs
+    // physics too).
+    app.add_systems(Startup, |mut commands: Commands| {
+        crate::spawn_arena_floor(&mut commands)
+    });
+    // [H] Trace the replicated combat events (NetEventMessage), and consume the replicated cues
+    // (CueWireMessage → trace + de-dup + dispatch). Headless has no cosmetics reader, so the
+    // dispatched LocalCues clear harmlessly; the trace lines are what the net-test asserts on.
+    crate::skills::register_client_event_trace(&mut app);
+    crate::skills::register_client_cue_binding(&mut app);
+    app.add_systems(
+        Update,
+        (
+            trace_replicated_players,
+            trace_replicated_health,
+            trace_replicated_round_state,
+        ),
+    );
+
+    // [H] AUTOMOVE hook: feed a constant forward movement input so the headless movement-replication
+    // check can drive the server controller without a keyboard. Off unless ARENA_AUTOMOVE=1.
+    if std::env::var("ARENA_AUTOMOVE").ok().as_deref() == Some("1") {
+        app.add_systems(Update, automove_input);
+    }
+
+    // [H] CUSTOMIZE hook (D6 verification): if `ARENA_CUSTOMIZE=<top_index>` is set, change the
+    // local PartSelection's Top slot once (after we own a local player) and mark it dirty so
+    // `send_customization` ships a `CustomizeMessage`. The server applies + broadcasts it, and the
+    // OTHER observer's `drain_customize_broadcasts` emits a `customize_received` trace — proving the
+    // live appearance change propagates to the opponent over the wire.
+    if let Some(top) = std::env::var("ARENA_CUSTOMIZE")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+    {
+        app.insert_resource(HeadlessCustomize(top));
+        app.add_systems(Update, headless_customize_once);
+    }
+
+    // [H] AUTOCAST hook: once we own a local player AND an opponent is replicated, set the cast
+    // intent once so `net::send_cast_requests` fires a `CastRequestMessage`. This is the
+    // headless verification vehicle — a server `CastBegan` (and downstream the egress of
+    // damage + cues) follows. Off unless ARENA_AUTOCAST=1.
+    if std::env::var("ARENA_AUTOCAST").ok().as_deref() == Some("1") {
+        app.add_systems(Update, autocast);
+    }
+
+    app.run();
+}
+
+/// AUTOCAST (`ARENA_AUTOCAST=1`), shared by the windowed and headless clients: set [`net::CastIntent`]
+/// to firebolt on a CADENCE once the local player + an opponent are materialized, so
+/// `net::send_cast_requests` ships a `CastRequestMessage` over the wire (the server re-validates +
+/// resolves — Stage A). This is the headless verification + windowed visual-gate vehicle: it drives a
+/// firebolt cast (predicted own-cast cosmetics + the replicated server cue + the server-authoritative
+/// damage) without a keyboard.
+///
+/// Repeating (not one-shot) so an AUTOCAST client drives a FULL best-of-3 match across rounds.
+/// Cadence is `ARENA_AUTOCAST_PERIOD` seconds (default 0.8) — comfortably above firebolt's ~0.6s cast
+/// time so requests don't pile up behind an in-flight cast (the server skips a caster mid-cast). The
+/// server is authoritative for whether a given cast lands; firing continuously is safe — a stray cast
+/// during a countdown/round-over window is harmless (the per-round reset heals both players on entry
+/// to Active, and only deaths during Active count).
+pub(super) fn autocast(
+    time: Res<Time>,
+    mut accum: Local<f32>,
+    mut intent: ResMut<net::CastIntent>,
+    local: Query<(), LocalPlayerFilter>,
+    remotes: Query<(), RemotePlayerFilter>,
+) {
+    // Need our own player + an opponent before the request carries a useful target hint.
+    if local.iter().next().is_none() || remotes.iter().next().is_none() {
+        return;
+    }
+    let period = std::env::var("ARENA_AUTOCAST_PERIOD")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.8);
+    *accum += time.delta_secs();
+    if *accum >= period {
+        *accum = 0.0;
+        if intent.0.is_none() {
+            intent.0 = Some("firebolt".to_string());
+        }
+    }
+}
+
+/// The Top-slot index a headless observer applies once under `ARENA_CUSTOMIZE` (D6 verification).
+#[derive(Resource)]
+struct HeadlessCustomize(u8);
+
+/// [H] CUSTOMIZE (D6): once we own a local player, set its Top slot to the configured index and
+/// flag `CustomizeDirty` so `net::send_customization` ships the change. One-shot via the `done`
+/// local. Lets the net-test confirm a non-default selection propagates to the other observer.
+fn headless_customize_once(
+    cfg: Res<HeadlessCustomize>,
+    mut selection: ResMut<parts::PartSelection>,
+    mut dirty: ResMut<net::CustomizeDirty>,
+    local: Query<(), LocalPlayerFilter>,
+    mut done: Local<bool>,
+) {
+    if *done || local.iter().next().is_none() {
+        return;
+    }
+    selection.top = cfg.0;
+    dirty.0 = true;
+    *done = true;
+}
+
+/// Polling tracer: emit `replicated_player` once per replicated
+/// `NetworkedPlayer` (keyed by `NetworkOwner.client_id`) so the late-joiner check has its signal.
+fn trace_replicated_players(
+    players: Query<
+        (
+            Entity,
+            &crate::net::protocol::NetworkOwner,
+            Option<&crate::net::protocol::ObeliskNetId>,
+        ),
+        With<crate::net::protocol::NetworkedPlayer>,
+    >,
+    mut seen: Local<std::collections::HashSet<u64>>,
+) {
+    for (entity, owner, obelisk_id) in &players {
+        if seen.insert(owner.0) {
+            let obelisk_id = obelisk_id.map(|o| o.0.clone());
+            bevy::log::info!(
+                "client received replicated NetworkedPlayer: entity={entity:?} owner={} obelisk_id={obelisk_id:?}",
+                owner.0
+            );
+            crate::trace::event(
+                "replicated_player",
+                serde_json::json!({ "owner": owner.0, "obelisk_id": obelisk_id }),
+            );
+        }
+    }
+}
+
+/// [H] Trace the replicated `NetworkedHealth` whenever it CHANGES on this client — proves the
+/// server-authoritative hp mirror replicates over the wire and drops on a hit (50 → 30).
+/// `Changed<NetworkedHealth>` fires only on a real delta, so the trace mirrors the server's `hp`
+/// stream from the receiving end. Keyed by the replicated `ObeliskNetId`.
+#[allow(clippy::type_complexity)]
+fn trace_replicated_health(
+    changed: Query<
+        (
+            &crate::net::protocol::ObeliskNetId,
+            &crate::net::protocol::NetworkedHealth,
+        ),
+        (
+            With<crate::net::protocol::NetworkedPlayer>,
+            Changed<crate::net::protocol::NetworkedHealth>,
+        ),
+    >,
+) {
+    for (net_id, health) in &changed {
+        crate::trace::event(
+            "client_hp",
+            serde_json::json!({ "obelisk_id": net_id.0, "current": health.current,
+                "max": health.max }),
+        );
+    }
+}
+
+/// [H] Trace each replicated `RoundStateMessage` the headless client receives, so the round-machine
+/// check can assert the best-of-3 flow replicates over the wire (phase transitions, the
+/// score increments, and the terminal `MatchOver`). Dedups consecutive identical (phase, scores,
+/// winner) so the trace carries transitions, not the ~1/sec countdown re-broadcasts.
+#[allow(clippy::type_complexity)]
+fn trace_replicated_round_state(
+    mut receivers: Query<
+        &mut lightyear::prelude::MessageReceiver<crate::net::protocol::RoundStateMessage>,
+    >,
+    mut last: Local<Option<(u8, [(String, u8); 2], String)>>,
+) {
+    for mut rx in &mut receivers {
+        for msg in rx.receive() {
+            let key = (msg.phase, msg.scores.clone(), msg.winner.clone());
+            if last.as_ref() == Some(&key) {
+                continue; // skip the per-second countdown re-broadcasts
+            }
+            *last = Some(key);
+            crate::trace::event(
+                "client_round_state",
+                serde_json::json!({ "phase": msg.phase, "countdown": msg.countdown,
+                    "scores": msg.scores, "winner": msg.winner }),
+            );
+        }
+    }
+}
+
+/// [H] AUTOMOVE: write a constant forward movement into [`net::LocalInput`] so the headless client
+/// drives the shared controller (predicted locally + authoritative on the server). `movement.y = 1`
+/// (full forward) in the `CameraYaw` frame — so the mover walks ALONG its look/aim axis (the cast
+/// fires along the same axis, keeping a moving caster on the firing line). The resulting avian
+/// `Position` change is what the movement-replication check asserts on (server pose changes + the
+/// OTHER client observes the interpolated pose move).
+fn automove_input(mut input: ResMut<net::LocalInput>, yaw: Res<controller::CameraYaw>) {
+    input.movement = Vec2::new(0.0, 1.0);
+    input.yaw = yaw.0;
+    input.jump = false;
+}
