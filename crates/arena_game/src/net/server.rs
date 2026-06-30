@@ -11,10 +11,10 @@ use std::net::SocketAddr;
 
 use bevy::prelude::*;
 use lightyear::prelude::server::{
-    ClientOf, NetcodeConfig, NetcodeServer, ServerPlugins, ServerUdpIo,
+    ClientOf, NetcodeConfig, NetcodeServer, ServerPlugins, ServerUdpIo, Start,
 };
 use lightyear::prelude::{
-    Connected, LinkOf, LinkStart, LocalAddr, PeerId, RemoteId, ReplicationSender,
+    Connected, LinkOf, LocalAddr, PeerId, RemoteId, ReplicationSender, SendUpdatesMode,
 };
 use serde_json::json;
 
@@ -59,15 +59,30 @@ fn spawn_server(mut commands: Commands, bind: Res<ServerBind>) {
             LocalAddr(bind.addr),
         ))
         .id();
-    commands.trigger(LinkStart { entity });
+    // `Start` (NOT `LinkStart`): `Start` triggers `LinkStart` for us AND adds the `Started`
+    // component to the server entity. `Replicate::on_insert` HARD-REQUIRES `With<Started>` (verified
+    // in lightyear_replication components.rs:888) to register a newly-spawned entity to ALREADY-
+    // connected clients; with only `LinkStart` that path bails, so an entity reaches only clients
+    // that connect AFTER it spawns — the first player never replicates to its own (first) client.
+    // (The old `LinkStart` was copied from wisp's hand-rolled setup; the canonical lightyear examples
+    // all trigger `Start`. Proven in a minimal repro: `Start` makes both clients receive their own
+    // Predicted player + the opponent Interpolated.)
+    commands.trigger(Start { entity });
 }
 
 /// Each new client connection gets its own `LinkOf` entity on the server. Attach a
-/// `ReplicationSender` so replication actually flows. Copied from `wisp/src/net/server.rs:171-176`.
+/// `ReplicationSender` (canonical `new(SEND_INTERVAL, SinceLastAck, false)` — every example uses this,
+/// NOT `default()`, which sends every frame and ships a 0-tick send-interval the client uses for
+/// interpolation timing) so replication actually flows.
 fn on_new_link(trigger: On<Add, LinkOf>, mut commands: Commands) {
-    commands
-        .entity(trigger.entity)
-        .insert((Name::new("ClientLink"), ReplicationSender::default()));
+    commands.entity(trigger.entity).insert((
+        Name::new("ClientLink"),
+        ReplicationSender::new(
+            Duration::from_millis(100),
+            SendUpdatesMode::SinceLastAck,
+            false,
+        ),
+    ));
 }
 
 /// Log + trace each handshake completion. Copied from `wisp/src/net/server.rs:178-193`.

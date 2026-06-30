@@ -10,8 +10,10 @@ use std::net::SocketAddr;
 
 use bevy::prelude::*;
 use lightyear::netcode::prelude::Authentication;
-use lightyear::prelude::client::{ClientPlugins, Connect, NetcodeClient, NetcodeConfig};
-use lightyear::prelude::{Connected, LocalAddr, LocalId, PeerAddr, ReplicationReceiver, UdpIo};
+use lightyear::prelude::client::{Client, ClientPlugins, Connect, NetcodeClient, NetcodeConfig};
+use lightyear::prelude::{
+    Connected, Link, LocalAddr, LocalId, PeerAddr, PredictionManager, ReplicationReceiver, UdpIo,
+};
 use serde_json::json;
 
 use crate::net::{default_server_addr, ProtocolPlugin, NETCODE_KEY, PROTOCOL_ID, TICK_HZ};
@@ -85,11 +87,17 @@ fn spawn_client(mut commands: Commands, target: Res<ConnectTo>) {
     let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
     let entity = commands
         .spawn((
+            // `Client` + `Link` + `PredictionManager` are required by the canonical lightyear client
+            // setup (simple_setup/common client.rs): `PredictionManager` is what creates the local
+            // `Predicted` entity for an owned, prediction-targeted player.
+            Client::default(),
             client,
             UdpIo::default(),
             LocalAddr(local_addr),
             PeerAddr(target.server),
+            Link::new(None),
             ReplicationReceiver::default(),
+            PredictionManager::default(),
         ))
         .id();
     commands.trigger(Connect { entity });
