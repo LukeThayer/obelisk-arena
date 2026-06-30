@@ -9,6 +9,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use std::path::PathBuf;
 
+pub mod cast_assets;
 pub mod client;
 pub mod net;
 pub mod server;

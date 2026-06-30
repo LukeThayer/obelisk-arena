@@ -134,42 +134,50 @@ pub fn register_client_event_trace(app: &mut App) {
 /// Drain the replicated `NetEventMessage` stream → one trace line per event. The damage value here
 /// is the server's authoritative number echoed verbatim (the client never computes it).
 fn trace_received_net_events(mut receivers: Query<&mut MessageReceiver<NetEventMessage>>) {
-    use obelisk_bevy::net::NetEvent;
     for mut rx in &mut receivers {
         for NetEventMessage(ev) in rx.receive() {
-            match ev {
-                NetEvent::CastBegan {
-                    caster,
-                    skill_id,
-                    total_duration,
-                } => crate::trace::event(
-                    "client_net_cast_began",
-                    serde_json::json!({ "caster": caster, "skill_id": skill_id,
-                        "total_duration": total_duration }),
-                ),
-                NetEvent::DamageResolved {
-                    caster,
-                    target,
-                    skill_id,
-                    total_damage,
-                    is_killing_blow,
-                    life_after,
-                } => crate::trace::event(
-                    "client_net_damage_resolved",
-                    serde_json::json!({ "caster": caster, "target": target, "skill_id": skill_id,
-                        "total_damage": total_damage, "is_killing_blow": is_killing_blow,
-                        "life_after": life_after }),
-                ),
-                NetEvent::EntityDied { target, killer } => crate::trace::event(
-                    "client_net_entity_died",
-                    serde_json::json!({ "target": target, "killer": killer }),
-                ),
-                other => crate::trace::event(
-                    "client_net_event",
-                    serde_json::json!({ "event": format!("{other:?}") }),
-                ),
-            }
+            trace_net_event("client", &ev);
         }
+    }
+}
+
+/// Emit one `<prefix>_net_*` trace line for an obelisk `NetEvent`, with the same per-variant `kind`s
+/// and fields both peers use — the server passes `"server"` (`trace_server_net_events`) and the
+/// client passes `"client"` (`trace_received_net_events`). Collapses the two formerly-duplicated
+/// match arms into one site; the emitted trace KINDS + fields are byte-identical to the prior copies.
+pub fn trace_net_event(prefix: &str, ev: &obelisk_bevy::net::NetEvent) {
+    use obelisk_bevy::net::NetEvent;
+    match ev {
+        NetEvent::CastBegan {
+            caster,
+            skill_id,
+            total_duration,
+        } => crate::trace::event(
+            &format!("{prefix}_net_cast_began"),
+            serde_json::json!({ "caster": caster, "skill_id": skill_id,
+                "total_duration": total_duration }),
+        ),
+        NetEvent::DamageResolved {
+            caster,
+            target,
+            skill_id,
+            total_damage,
+            is_killing_blow,
+            life_after,
+        } => crate::trace::event(
+            &format!("{prefix}_net_damage_resolved"),
+            serde_json::json!({ "caster": caster, "target": target, "skill_id": skill_id,
+                "total_damage": total_damage, "is_killing_blow": is_killing_blow,
+                "life_after": life_after }),
+        ),
+        NetEvent::EntityDied { target, killer } => crate::trace::event(
+            &format!("{prefix}_net_entity_died"),
+            serde_json::json!({ "target": target, "killer": killer }),
+        ),
+        other => crate::trace::event(
+            &format!("{prefix}_net_event"),
+            serde_json::json!({ "event": format!("{other:?}") }),
+        ),
     }
 }
 

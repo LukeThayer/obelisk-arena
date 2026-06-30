@@ -33,7 +33,7 @@ use lightyear_frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 use obelisk_bevy::prelude::*;
 use std::path::PathBuf;
 
-use crate::{add_avian_with_lightyear, add_obelisk_sim_client, arena_root, net::ClientNetPlugin};
+use crate::{add_avian_with_lightyear, add_obelisk_sim_client, arena_root};
 
 /// Load the [`SkillFxRegistry`] (cue_id → lanes) from `assets/skills` so the cosmetics consumer
 /// (`cosmetics::spawn_cue_cosmetics`) can re-look-up lanes by `cue_id` from a replicated/predicted
@@ -89,16 +89,7 @@ pub fn run_windowed_client() {
 
     // --- lightyear client stack FIRST (ClientPlugins { 1/60 } + ProtocolPlugin + connect), so the
     //     avian-lightyear physics added below sees the replication infra (same order as the server).
-    app.add_plugins(ClientNetPlugin);
-    let server_addr = crate::net::parse_addr_args(crate::net::default_server_addr());
-    let client_id = app
-        .world()
-        .resource::<crate::net::client::ConnectTo>()
-        .client_id;
-    app.insert_resource(crate::net::client::ConnectTo {
-        server: server_addr,
-        client_id,
-    });
+    crate::net::client::connect_to_configured(&mut app);
 
     // --- physics: the SOLE avian `PhysicsPlugins` registrant (after ClientPlugins). ---
     add_avian_with_lightyear(&mut app);
@@ -124,6 +115,8 @@ pub fn run_windowed_client() {
     // Load the SkillFx registry (cue_id → lanes) for the cosmetics consumer.
     load_skillfx_registry(&mut app, &root);
     app.init_resource::<AimDirs>();
+    // Cast-timeline loading uses the SAME shared `crate::cast_assets` helpers as the headless server.
+    app.init_resource::<crate::cast_assets::PendingCastTimelines>();
 
     // Scene (camera + light + ground) + rig assets + cast timelines. NO co-located combatants.
     app.add_systems(
@@ -131,12 +124,18 @@ pub fn run_windowed_client() {
         (
             setup_scene,
             load_rig,
-            load_cast_assets,
+            crate::cast_assets::load_cast_timelines,
             init_cosmetic_assets,
         ),
     );
 
-    app.add_systems(Update, (poll_cast_assets, log_registered_skills_once));
+    app.add_systems(
+        Update,
+        (
+            crate::cast_assets::poll_cast_timelines,
+            log_registered_skills_once,
+        ),
+    );
 
     // Rig: build the animation graph, attach it + the per-player rig (`present`), apply
     // slot-based part visibility (PartsPlugin), drive the per-player animation.
@@ -180,7 +179,7 @@ pub fn run_windowed_client() {
     // `net::CastIntent` → `send_cast_requests` ships a `CastRequestMessage`). This is the same wire
     // cast the headless AUTOCAST uses. Lets a windowed client script firebolt for the visual gate.
     if std::env::var("ARENA_AUTOCAST").ok().as_deref() == Some("1") {
-        app.add_systems(Update, windowed_autocast);
+        app.add_systems(Update, autocast);
     }
 
     // Net-driven player layer: attach the predicted local body + interpolated remote bodies, buffer
@@ -219,32 +218,38 @@ pub fn run_windowed_client() {
     app.run();
 }
 
-/// AUTOCAST for the WINDOWED client (`ARENA_AUTOCAST=1`): set [`net::CastIntent`] to firebolt on a
-/// cadence once the local player + an opponent are materialized, so `net::send_cast_requests` ships a
-/// `CastRequestMessage` over the wire (the server re-validates + resolves — Stage A). This is the
-/// visual-gate vehicle: it drives a firebolt cast (predicted own-cast cosmetics + the replicated
-/// server cue + the server-authoritative damage) without a keyboard. Mirrors the headless
-/// `headless_autocast`. `ARENA_AUTOCAST_PERIOD` seconds (default 0.8) between casts.
-#[allow(clippy::type_complexity)]
-fn windowed_autocast(
+/// Query filter for THIS peer's local (predicted, owned) networked player.
+type LocalPlayerFilter = (
+    With<crate::net::protocol::NetworkedPlayer>,
+    With<net::LocalNetPlayer>,
+);
+/// Query filter for the REMOTE (interpolated, opponent) networked players.
+type RemotePlayerFilter = (
+    With<crate::net::protocol::NetworkedPlayer>,
+    Without<net::LocalNetPlayer>,
+);
+
+/// AUTOCAST (`ARENA_AUTOCAST=1`), shared by the windowed and headless clients: set [`net::CastIntent`]
+/// to firebolt on a CADENCE once the local player + an opponent are materialized, so
+/// `net::send_cast_requests` ships a `CastRequestMessage` over the wire (the server re-validates +
+/// resolves — Stage A). This is the headless verification + windowed visual-gate vehicle: it drives a
+/// firebolt cast (predicted own-cast cosmetics + the replicated server cue + the server-authoritative
+/// damage) without a keyboard.
+///
+/// Repeating (not one-shot) so an AUTOCAST client drives a FULL best-of-3 match across rounds.
+/// Cadence is `ARENA_AUTOCAST_PERIOD` seconds (default 0.8) — comfortably above firebolt's ~0.6s cast
+/// time so requests don't pile up behind an in-flight cast (the server skips a caster mid-cast). The
+/// server is authoritative for whether a given cast lands; firing continuously is safe — a stray cast
+/// during a countdown/round-over window is harmless (the per-round reset heals both players on entry
+/// to Active, and only deaths during Active count).
+fn autocast(
     time: Res<Time>,
     mut accum: Local<f32>,
     mut intent: ResMut<net::CastIntent>,
-    local: Query<
-        (),
-        (
-            With<crate::net::protocol::NetworkedPlayer>,
-            With<net::LocalNetPlayer>,
-        ),
-    >,
-    remotes: Query<
-        (),
-        (
-            With<crate::net::protocol::NetworkedPlayer>,
-            Without<net::LocalNetPlayer>,
-        ),
-    >,
+    local: Query<(), LocalPlayerFilter>,
+    remotes: Query<(), RemotePlayerFilter>,
 ) {
+    // Need our own player + an opponent before the request carries a useful target hint.
     if local.iter().next().is_none() || remotes.iter().next().is_none() {
         return;
     }
@@ -270,8 +275,8 @@ fn windowed_autocast(
 /// The charge is locked into `ChargeState.pending_charge` and `CastIntent` is set so
 /// `send_cast_requests` ships a `CastRequestMessage { charge }` on the wire.
 ///
-/// Autocast paths (`windowed_autocast`, `headless_autocast`) bypass this and set `CastIntent`
-/// directly; `send_cast_requests` uses the `pending_charge` tap-default (85) for those.
+/// The autocast path (`autocast`) bypasses this and sets `CastIntent` directly;
+/// `send_cast_requests` uses the `pending_charge` tap-default (85) for those.
 fn bridge_windowed_cast_hold(
     mouse: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
@@ -399,16 +404,7 @@ pub fn run_headless_client() {
     ));
     app.insert_resource(Time::<Fixed>::from_hz(60.0));
 
-    app.add_plugins(ClientNetPlugin);
-    let server_addr = crate::net::parse_addr_args(crate::net::default_server_addr());
-    let client_id = app
-        .world()
-        .resource::<crate::net::client::ConnectTo>()
-        .client_id;
-    app.insert_resource(crate::net::client::ConnectTo {
-        server: server_addr,
-        client_id,
-    });
+    crate::net::client::connect_to_configured(&mut app);
     add_avian_with_lightyear(&mut app);
 
     // Net-driven player layer: attach a body to each materialized NetworkedPlayer + stage input
@@ -474,7 +470,7 @@ pub fn run_headless_client() {
     // headless verification vehicle — a server `CastBegan` (and downstream the egress of
     // damage + cues) follows. Off unless ARENA_AUTOCAST=1.
     if std::env::var("ARENA_AUTOCAST").ok().as_deref() == Some("1") {
-        app.add_systems(Update, headless_autocast);
+        app.add_systems(Update, autocast);
     }
 
     app.run();
@@ -491,13 +487,7 @@ fn headless_customize_once(
     cfg: Res<HeadlessCustomize>,
     mut selection: ResMut<parts::PartSelection>,
     mut dirty: ResMut<net::CustomizeDirty>,
-    local: Query<
-        (),
-        (
-            With<crate::net::protocol::NetworkedPlayer>,
-            With<net::LocalNetPlayer>,
-        ),
-    >,
+    local: Query<(), LocalPlayerFilter>,
     mut done: Local<bool>,
 ) {
     if *done || local.iter().next().is_none() {
@@ -506,52 +496,6 @@ fn headless_customize_once(
     selection.top = cfg.0;
     dirty.0 = true;
     *done = true;
-}
-
-/// [H] AUTOCAST: set [`net::CastIntent`] to firebolt on a CADENCE (default ~0.8s), once both the
-/// local player and an opponent are materialized so `send_cast_requests` has a target hint. Repeating
-/// (not one-shot) so a headless AUTOCAST client drives a FULL best-of-3 match: it keeps casting across
-/// rounds, killing the opponent each round until one side reaches the match-win threshold.
-///
-/// Cadence is `ARENA_AUTOCAST_PERIOD` seconds (default 0.8) — comfortably above firebolt's ~0.6s cast
-/// time so requests don't pile up behind an in-flight cast (the server skips a caster mid-cast). The
-/// server is authoritative for whether a given cast lands; firing continuously is safe — a stray cast
-/// during a countdown/round-over window is harmless (the per-round reset heals both players on entry
-/// to Active, and only deaths during Active count).
-fn headless_autocast(
-    time: Res<Time>,
-    mut accum: Local<f32>,
-    mut intent: ResMut<net::CastIntent>,
-    local: Query<
-        (),
-        (
-            With<crate::net::protocol::NetworkedPlayer>,
-            With<net::LocalNetPlayer>,
-        ),
-    >,
-    remotes: Query<
-        (),
-        (
-            With<crate::net::protocol::NetworkedPlayer>,
-            Without<net::LocalNetPlayer>,
-        ),
-    >,
-) {
-    // Need our own player + an opponent before the request carries a useful target hint.
-    if local.iter().next().is_none() || remotes.iter().next().is_none() {
-        return;
-    }
-    let period = std::env::var("ARENA_AUTOCAST_PERIOD")
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.8);
-    *accum += time.delta_secs();
-    if *accum >= period {
-        *accum = 0.0;
-        if intent.0.is_none() {
-            intent.0 = Some("firebolt".to_string());
-        }
-    }
 }
 
 /// Polling tracer: emit `replicated_player` once per replicated
@@ -700,53 +644,17 @@ fn load_rig(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(rig::RigAssets::new(gltf));
 }
 
-/// The cast-timeline handles being polled to load (skill id -> handle).
-#[derive(Resource, Default)]
-struct PendingCastAssets(Vec<(String, Handle<CastTimeline>)>);
-
-/// Kick off loading a `.cast.ron` for every registered skill.
-fn load_cast_assets(mut commands: Commands, assets: Res<AssetServer>, skills: Res<SkillRegistry>) {
-    let mut ids: Vec<String> = skills.0.keys().cloned().collect();
-    ids.sort();
-
-    let mut pending = PendingCastAssets::default();
-    for id in ids {
-        let handle: Handle<CastTimeline> = assets.load(format!("skills/{id}.cast.ron"));
-        pending.0.push((id, handle));
-    }
-    commands.insert_resource(pending);
-}
-
-/// Poll the pending cast assets each frame; move loaded ones into `CastTimelineHandles`.
-fn poll_cast_assets(
-    pending: Option<ResMut<PendingCastAssets>>,
-    timelines: Res<Assets<CastTimeline>>,
-    mut registry: ResMut<CastTimelineHandles>,
-) {
-    let Some(mut pending) = pending else {
-        return;
-    };
-    pending.0.retain(|(skill, handle)| {
-        if timelines.get(handle).is_some() {
-            registry.0.insert(skill.clone(), handle.clone());
-            false
-        } else {
-            true
-        }
-    });
-}
-
 /// Log the registered skills + loaded cast timelines exactly once.
 fn log_registered_skills_once(
     mut done: Local<bool>,
-    pending: Option<Res<PendingCastAssets>>,
+    pending: Res<crate::cast_assets::PendingCastTimelines>,
     skills: Res<SkillRegistry>,
     casts: Res<CastTimelineHandles>,
 ) {
     if *done {
         return;
     }
-    if pending.map(|p| !p.0.is_empty()).unwrap_or(true) {
+    if !pending.0.is_empty() {
         return;
     }
     let mut skill_ids: Vec<&String> = skills.0.keys().collect();

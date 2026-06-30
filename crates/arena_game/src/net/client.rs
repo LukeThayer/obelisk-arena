@@ -44,6 +44,18 @@ impl Plugin for ClientNetPlugin {
     }
 }
 
+/// Install the client net stack and point it at the configured server: add [`ClientNetPlugin`]
+/// (which inserts the default [`ConnectTo`] carrying the env-derived `client_id`), then re-apply
+/// `ConnectTo` with the address from `parse_addr_args` (CLI `--ip`/`--port`, defaulting to
+/// `default_server_addr()`) while preserving that `client_id`. Shared by `run_windowed_client` and
+/// `run_headless_client` so both peers connect identically.
+pub fn connect_to_configured(app: &mut App) {
+    app.add_plugins(ClientNetPlugin);
+    let server = crate::net::parse_addr_args(default_server_addr());
+    let client_id = app.world().resource::<ConnectTo>().client_id;
+    app.insert_resource(ConnectTo { server, client_id });
+}
+
 /// The connection target. Overridable by the bin (CLI `--ip`/`--port`) before `spawn_client` runs.
 #[derive(Resource, Clone)]
 pub struct ConnectTo {
