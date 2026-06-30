@@ -255,22 +255,25 @@ pub struct NetworkedCastState {
 // Rollback helpers (every-frame, allocation-free).
 // ---------------------------------------------------------------------------------------------
 
-/// Rollback thresholds for the avian physics components, matched to the avian_3d_character
-/// reference example (0.01 epsilons). Below these we let prediction stand (avoids float-noise
-/// jitter). NOT reflexive: comparing a value to itself returns false (no rollback), which is
-/// correct — only a real divergence >= 0.01 triggers a rollback (guide §1.2 trap).
+/// Per-component rollback threshold, matched to the avian_3d_character reference example. Below this
+/// divergence we let prediction stand (avoids float-noise jitter); at or above it the predicted
+/// history is corrected. Shared by all four `*_should_rollback` fns so they can never drift apart.
+/// The comparisons are NOT reflexive: comparing a value to itself returns false (no rollback), which
+/// is correct — only a real divergence `>= ROLLBACK_EPSILON` triggers a rollback (guide §1.2 trap).
+const ROLLBACK_EPSILON: f32 = 0.01;
+
 fn position_should_rollback(this: &Position, that: &Position) -> bool {
-    (this.0 - that.0).length() >= 0.01
+    (this.0 - that.0).length() >= ROLLBACK_EPSILON
 }
 
 fn rotation_should_rollback(this: &Rotation, that: &Rotation) -> bool {
-    this.angle_between(*that) >= 0.01
+    this.angle_between(*that) >= ROLLBACK_EPSILON
 }
 
 fn velocity_should_rollback(this: &LinearVelocity, that: &LinearVelocity) -> bool {
-    (this.0 - that.0).length() >= 0.01
+    (this.0 - that.0).length() >= ROLLBACK_EPSILON
 }
 
 fn angular_velocity_should_rollback(this: &AngularVelocity, that: &AngularVelocity) -> bool {
-    (this.0 - that.0).length() >= 0.01
+    (this.0 - that.0).length() >= ROLLBACK_EPSILON
 }

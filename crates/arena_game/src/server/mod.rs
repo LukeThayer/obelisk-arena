@@ -26,6 +26,10 @@ use crate::net::protocol::{
     NetworkedCastState, NetworkedHealth, NetworkedId, NetworkedPlayer, ObeliskNetId,
     PlayerCustomization, RoundStateMessage,
 };
+use crate::net::{
+    COUNTDOWN_SECS, PLAYER_CAPSULE_LENGTH, PLAYER_CAPSULE_RADIUS, ROUND_OVER_SECS,
+    ROUND_WINS_TO_MATCH,
+};
 use crate::shared_controller::{apply_arena_movement, apply_arena_yaw};
 use crate::trace;
 use lightyear::prelude::MessageSender;
@@ -271,7 +275,7 @@ fn spawn_player_on_connect(
             LinearVelocity::default(),
             AngularVelocity::default(),
             RigidBody::Dynamic,
-            Collider::capsule(0.35, 0.48),
+            Collider::capsule(PLAYER_CAPSULE_RADIUS, PLAYER_CAPSULE_LENGTH),
             LockedAxes::default()
                 .lock_rotation_x()
                 .lock_rotation_y()
@@ -297,12 +301,12 @@ fn spawn_player_on_connect(
     // parent Dynamic body as a compound child collider that TRACKS the moving/jumping player and
     // stays in the SpatialQuery pipeline (obelisk's `detect_overlaps` resolves the child entity
     // to its `Hurtbox.owner` = the player). A `Sensor` so it adds a queryable volume without
-    // contributing contact forces. capsule(0.35, 0.48) spans the body feet→head (origin ±0.59).
+    // contributing contact forces. The shared player capsule spans the body feet→head (origin ±0.59).
     commands.entity(player).with_children(|c| {
         c.spawn((
             Name::new("Hurtbox"),
             Hurtbox { owner: player },
-            Collider::capsule(0.35, 0.48),
+            Collider::capsule(PLAYER_CAPSULE_RADIUS, PLAYER_CAPSULE_LENGTH),
             Sensor,
             Transform::default(),
         ));
@@ -461,8 +465,9 @@ fn drain_cast_requests(
                 json!({ "caster": caster_id.0, "skill_id": req.skill_id,
                         "aim_dir": req.aim_dir, "charge": req.charge }),
             );
-            // Use the charged variant: `charge_mult(Some(c)) = 0.5 + (c/255)*1.5`.
-            // charge=85 ≈ 1.0× (instant tap), charge=255 = 2.0× (full hold).
+            // Use the charged variant; the byte's gameplay meaning is documented client-side by
+            // `client::net::charge_mult` (`0.5 + (c/255)*1.5`) and produced by `charge_byte_from_frac`:
+            // charge=85 (`TAP_CHARGE_BYTE`) ≈ 1.0× (instant tap), charge=255 = 2.0× (full hold).
             // `u8` is inherently bounded [0, 255] — no extra clamp needed.
             //
             // Fire from the caster's EYE (`origin + Y*ARENA_EYE_HEIGHT`), the same height the client
@@ -714,13 +719,9 @@ fn trace_server_net_events(mut net: MessageReader<obelisk_bevy::net::NetEvent>) 
 // DoT doesn't pre-damage the next round) + interrupts any in-flight cast + teleports both back to
 // their spawn markers.
 // =============================================================================================
-
-/// Rounds needed to win the match (best-of-3 ⇒ first to 2).
-const ROUND_WINS_TO_MATCH: u8 = 2;
-/// Pre-round countdown length (seconds).
-const COUNTDOWN_SECS: f32 = 3.0;
-/// Pause between a round ending and the next countdown (seconds), so the result is readable.
-const ROUND_OVER_SECS: f32 = 2.0;
+//
+// The match-pacing constants (`ROUND_WINS_TO_MATCH`, `COUNTDOWN_SECS`, `ROUND_OVER_SECS`) live in
+// the `net` tuning surface (the "match pacing" sub-section) and are imported above.
 
 /// The match phase. Mirrors `RoundStateMessage.phase` (0..=4) but carries the live timer/winner.
 #[derive(Clone, Debug, PartialEq)]

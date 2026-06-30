@@ -44,8 +44,18 @@ type CameraTransform<'w, 's> = Single<
     ),
 >;
 
-/// Mouse sensitivity (radians of yaw/pitch per pixel of accumulated motion).
-const MOUSE_SENSITIVITY: f32 = 0.0035;
+/// Mouse sensitivity (radians of yaw/pitch per pixel of accumulated motion). A `Resource` rather
+/// than a `const` so it can be tuned at launch via the `ARENA_MOUSE_SENS` env var (mirroring the
+/// other `ARENA_*` hooks); the default `0.0035` is the historical value. Read by
+/// [`accumulate_mouse_look`].
+#[derive(Resource)]
+pub struct MouseSensitivity(pub f32);
+
+impl Default for MouseSensitivity {
+    fn default() -> Self {
+        Self(0.0035)
+    }
+}
 
 /// Aim-pitch clamp (radians). Matches wisp's 85°. Keeps the spine lean inside a
 /// readable range and stops the camera from flipping over the top/bottom.
@@ -130,9 +140,17 @@ impl Plugin for ArenaControllerPlugin {
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.0);
 
+        // Mouse sensitivity: `ARENA_MOUSE_SENS` (radians/pixel) overrides the 0.0035 default.
+        let mouse_sens = std::env::var("ARENA_MOUSE_SENS")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .map(MouseSensitivity)
+            .unwrap_or_default();
+
         app.insert_resource(CameraYaw(yaw0))
             .insert_resource(AimPitch(pitch0))
             .insert_resource(AimPitchLocked(locked))
+            .insert_resource(mouse_sens)
             .add_systems(
                 Update,
                 (
@@ -188,6 +206,7 @@ fn accumulate_mouse_look(
     mut yaw: ResMut<CameraYaw>,
     mut pitch: ResMut<AimPitch>,
     pitch_locked: Res<AimPitchLocked>,
+    sensitivity: Res<MouseSensitivity>,
     customization: Option<Res<crate::client::customization::CustomizationOpen>>,
 ) {
     // While the customizer is open the cursor is free (moving it to click buttons) and the orbit
@@ -196,10 +215,10 @@ fn accumulate_mouse_look(
         return;
     }
     let delta = motion.delta;
-    yaw.0 -= delta.x * MOUSE_SENSITIVITY;
+    yaw.0 -= delta.x * sensitivity.0;
     if !pitch_locked.0 {
         // Invert mouse-Y: pushing up (negative delta.y) looks up (positive pitch).
-        pitch.0 = (pitch.0 - delta.y * MOUSE_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        pitch.0 = (pitch.0 - delta.y * sensitivity.0).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 }
 

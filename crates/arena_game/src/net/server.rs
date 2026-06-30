@@ -22,6 +22,11 @@ use serde_json::json;
 use crate::net::{default_server_addr, ProtocolPlugin, NETCODE_KEY, PROTOCOL_ID, TICK_HZ};
 use crate::trace;
 
+/// Replication send rate (Hz). The per-client `ReplicationSender` ships component updates at this
+/// cadence (every `1000 / REPLICATION_SEND_HZ` ms ⇒ 100ms here); clients interpolate between the
+/// snapshots. Deliberately slower than [`TICK_HZ`] (60) — pose is interpolated, not sent every tick.
+const REPLICATION_SEND_HZ: u32 = 10;
+
 /// Plugin: server-side lightyear net stack — `ServerPlugins` + `ProtocolPlugin` + trace, spawns the
 /// netcode server entity bound to `ServerBind`, and attaches a `ReplicationSender` per client link.
 pub struct ServerNetPlugin;
@@ -81,7 +86,7 @@ fn on_new_link(trigger: On<Add, LinkOf>, mut commands: Commands) {
     commands.entity(trigger.entity).insert((
         Name::new("ClientLink"),
         ReplicationSender::new(
-            Duration::from_millis(100),
+            Duration::from_millis(1000 / REPLICATION_SEND_HZ as u64),
             SendUpdatesMode::SinceLastAck,
             false,
         ),

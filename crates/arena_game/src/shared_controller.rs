@@ -29,6 +29,11 @@ pub const MAX_ACCELERATION: f32 = 30.0;
 /// Upward velocity (m/s) imparted on a grounded jump. With the arena `Gravity` (−20 m/s²) this gives
 /// an apex of `JUMP_SPEED² / (2·g)` ≈ 1.22 m (the spec's 1.0–1.2 m target).
 pub const JUMP_SPEED: f32 = 7.0;
+/// Fraction of [`MAX_ACCELERATION`] available while airborne (`!grounded`). The movement force is
+/// applied UNCONDITIONALLY of ground state, but the per-tick velocity delta is scaled by this when
+/// airborne. `1.0` = full air control, identical to a grounded tick — today's behavior, preserved
+/// exactly. Lower it (<1.0) to make mid-air direction changes feel floatier/committed.
+pub const AIR_CONTROL: f32 = 1.0;
 
 /// Apply the planar movement force + jump impulse for one character from its `ArenaInput`. World Y
 /// of the body is used for the ground check (flat arena floor at world 0; body rests at
@@ -40,7 +45,16 @@ pub fn apply_arena_movement(
     mut forces: ForcesItem,
 ) {
     let dt = dt.max(1e-5);
-    let max_velocity_delta_per_tick = MAX_ACCELERATION * dt;
+
+    // Ground check first (read position as a copy, dropping the immutable borrow before the later
+    // mutable force/impulse calls) so the airborne velocity-delta scale is known up front.
+    let pos_y = forces.position().0.y;
+    let grounded = pos_y <= crate::net::GROUND_Y + 0.05;
+
+    // The movement force is applied unconditionally of ground state; only the per-tick velocity
+    // delta is scaled by AIR_CONTROL when airborne (AIR_CONTROL = 1.0 ⇒ full air control, no scale).
+    let air_factor = if grounded { 1.0 } else { AIR_CONTROL };
+    let max_velocity_delta_per_tick = MAX_ACCELERATION * dt * air_factor;
 
     // Camera-relative WASD → world direction (matches the client camera frame: forward = -Z,
     // strafe = +X, both in the yaw frame). Clamp the input magnitude so a diagonal isn't faster.
@@ -52,6 +66,12 @@ pub fn apply_arena_movement(
     let world_dir = Quat::from_axis_angle(Vec3::Y, input.yaw) * local;
     let desired_ground_velocity = world_dir * MAX_SPEED;
 
+    // `move_towards` ramps planar velocity toward the desired velocity by at most
+    // `max_velocity_delta_per_tick`. Releasing input makes `desired = 0`, so the body DECELERATES at
+    // the full `MAX_ACCELERATION` to a dead stop — there is no momentum slide. This is deliberate:
+    // avian `Friction` is 0 on the body (the controller fully owns planar velocity), so the
+    // zero-target `move_towards` IS the stopping mechanism. A non-zero friction would fight it and
+    // make the stop non-deterministic under rollback.
     let linear_velocity = forces.linear_velocity();
     let ground_velocity = Vec3::new(linear_velocity.x, 0.0, linear_velocity.z);
     let new_ground_velocity =
@@ -60,9 +80,6 @@ pub fn apply_arena_movement(
     forces.apply_force(required_acceleration * mass.value());
 
     // Jump: on any grounded tick where jump is held, bring vertical velocity up to JUMP_SPEED.
-    // Reading position drops the immutable borrow before the mutable impulse call.
-    let pos_y = forces.position().0.y;
-    let grounded = pos_y <= crate::net::GROUND_Y + 0.05;
     if input.jump && grounded {
         let dvy = (JUMP_SPEED - linear_velocity.y).max(0.0);
         if dvy > 0.0 {

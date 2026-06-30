@@ -296,7 +296,7 @@ fn bridge_windowed_cast_hold(
         if just_released && charge.charging {
             // Lock in the charge and emit the cast intent on release.
             let frac = charge.frac();
-            charge.pending_charge = (85.0 + frac * 170.0).round().clamp(0.0, 255.0) as u8;
+            charge.pending_charge = net::charge_byte_from_frac(frac);
             if intent.0.is_none() {
                 intent.0 = Some("firebolt".to_string());
             }

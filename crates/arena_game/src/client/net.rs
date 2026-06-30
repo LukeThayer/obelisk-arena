@@ -27,6 +27,7 @@ use crate::net::protocol::{
     CastChannel, CastRequestMessage, CustomizeBroadcast, CustomizeMessage, NetworkOwner,
     NetworkedCastState, NetworkedId, NetworkedPlayer, PlayerCustomization,
 };
+use crate::net::{PLAYER_CAPSULE_LENGTH, PLAYER_CAPSULE_RADIUS};
 use crate::shared_controller::{apply_arena_movement, apply_arena_yaw};
 
 /// The local player's current input, written each frame by whichever input source is active (the
@@ -50,8 +51,30 @@ pub struct LocalInput {
 pub struct CastIntent(pub Option<String>);
 
 /// Maximum hold time for the charge mechanic. A full hold of this duration maps to charge=255
-/// (2.0× multiplier); an instant tap maps to charge=85 (≈1.0×).
+/// (2.0× multiplier); an instant tap maps to charge=[`TAP_CHARGE_BYTE`] (≈1.0×).
 pub const MAX_CHARGE_SECS: f32 = 1.5;
+
+/// Charge byte for an instant tap (no hold). The value 85 is ≈ `0.333 * 255` — one-third up the
+/// 0–255 charge range — which the server's [`charge_mult`] maps to ≈1.0×. A full hold sends 255
+/// (→2.0×). Co-located with [`MAX_CHARGE_SECS`] so the tap/full charge feel is tuned in one place.
+pub const TAP_CHARGE_BYTE: u8 = 85;
+
+/// Map a hold fraction `[0, 1]` to a charge byte: tap (`frac = 0`) → [`TAP_CHARGE_BYTE`], full hold
+/// (`frac = 1`) → 255, linear between. The inverse-direction partner of [`charge_mult`].
+pub fn charge_byte_from_frac(frac: f32) -> u8 {
+    let span = 255.0 - TAP_CHARGE_BYTE as f32; // 170.0
+    (TAP_CHARGE_BYTE as f32 + frac * span)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+/// The server's charge → multiplier mapping, mirrored here for the unit test + as the single
+/// documented reference: `charge_mult(c) = 0.5 + (c / 255) * 1.5`, so [`TAP_CHARGE_BYTE`] (85) ≈ 1.0×
+/// and 255 = 2.0×. Obelisk's `cast_skill_dir_charged` owns the AUTHORITATIVE scaling on the damage
+/// path; this is the reference mapping, not a second source of truth.
+pub fn charge_mult(byte: u8) -> f32 {
+    0.5 + (byte as f32 / 255.0) * 1.5
+}
 
 /// Per-frame charge-hold state for the local player's cast. Written by `bridge_windowed_cast_hold`
 /// (real keyboard/mouse) and read by `send_cast_requests` + the charge-bar HUD.
@@ -67,8 +90,8 @@ pub struct ChargeState {
     pub secs: f32,
     /// True while the cast button is held but not yet released.
     pub charging: bool,
-    /// Charge byte locked in at release; consumed (and reset to tap-default 85) by
-    /// `send_cast_requests`. Initialized to 85 so autocast paths get ≈1.0× strength.
+    /// Charge byte locked in at release; consumed (and reset to the tap default
+    /// [`TAP_CHARGE_BYTE`]) by `send_cast_requests`. Initialized to it so autocast paths get ≈1.0×.
     pub(crate) pending_charge: u8,
 }
 
@@ -77,7 +100,7 @@ impl Default for ChargeState {
         Self {
             secs: 0.0,
             charging: false,
-            pending_charge: 85, // frac=0 → charge_mult(85) ≈ 1.0×
+            pending_charge: TAP_CHARGE_BYTE, // frac=0 → charge_mult(TAP_CHARGE_BYTE) ≈ 1.0×
         }
     }
 }
@@ -225,10 +248,10 @@ fn materialize_predicted_players(
             MaterializedBody,
             Visibility::default(),
             // Predicted physics body — Dynamic so the shared controller + rollback drive it. Mirrors
-            // the server spawn (capsule(0.35, 0.48), rotation locked, zero friction). No hurtbox:
-            // the client never resolves combat (Stage A) — that stays server-authoritative.
+            // the server spawn (same shared capsule consts, rotation locked, zero friction). No
+            // hurtbox: the client never resolves combat (Stage A) — that stays server-authoritative.
             RigidBody::Dynamic,
-            Collider::capsule(0.35, 0.48),
+            Collider::capsule(PLAYER_CAPSULE_RADIUS, PLAYER_CAPSULE_LENGTH),
             LockedAxes::default()
                 .lock_rotation_x()
                 .lock_rotation_y()
@@ -331,10 +354,11 @@ fn send_cast_requests(
     let aim_dir = [aim_dir_vec.x, aim_dir_vec.y, aim_dir_vec.z];
 
     // Consume the locked-in charge byte. Autocast paths leave `pending_charge` at the tap default
-    // (85, ≈1.0×); `bridge_windowed_cast_hold` sets it on release from the hold duration.
+    // ([`TAP_CHARGE_BYTE`], ≈1.0×); `bridge_windowed_cast_hold` sets it on release via
+    // `charge_byte_from_frac`.
     let charge = charge_state.pending_charge;
     // Reset to tap-default so the next autocast (if any) gets normal-strength, not a stale value.
-    charge_state.pending_charge = 85;
+    charge_state.pending_charge = TAP_CHARGE_BYTE;
 
     sender.send::<CastChannel>(CastRequestMessage {
         skill_id: skill_id.clone(),
@@ -465,5 +489,25 @@ fn trace_received_remote_pose(
                 }),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the charge → multiplier mapping at its two anchor bytes: the tap default ≈1.0× and a
+    /// full hold = 2.0×. Pins the CURRENT mapping (does not redefine it).
+    #[test]
+    fn charge_mult_anchors() {
+        assert!((charge_mult(TAP_CHARGE_BYTE) - 1.0).abs() < 0.01);
+        assert!((charge_mult(255) - 2.0).abs() < 1e-6);
+    }
+
+    /// `charge_byte_from_frac` hits the documented endpoints (tap byte at 0, 255 at full hold).
+    #[test]
+    fn charge_byte_endpoints() {
+        assert_eq!(charge_byte_from_frac(0.0), TAP_CHARGE_BYTE);
+        assert_eq!(charge_byte_from_frac(1.0), 255);
     }
 }
