@@ -31,42 +31,18 @@ pub use server::ServerNetPlugin;
 // the ground check reads). `shared_controller::AIR_CONTROL` scales acceleration while airborne.
 pub use crate::shared_controller::{JUMP_SPEED, MAX_ACCELERATION, MAX_SPEED};
 
-/// The stand height: world Y of a grounded player ORIGIN. The Dynamic body is `capsule(0.35, 0.48)`
-/// (half-height 0.59) resting on the static arena floor (top at world 0), so its origin settles at
-/// ≈0.59 and its feet at world 0. Used by the shared controller's ground check
-/// (`shared_controller::apply_arena_movement`) — a player meaningfully above this is airborne — and
-/// as the Y of `server::spawn::SPAWN_MARKERS`. With a real floor collider this is the EMERGENT rest height,
-/// not a clamp.
-pub const GROUND_Y: f32 = 0.59;
-
-/// Magnitude of the arena's avian `Gravity` (m/s²), set in `add_avian_with_lightyear`. Snappier than
-/// Earth for an arcade jump arc; with `shared_controller::JUMP_SPEED` (7 m/s) the apex is ≈1.22 m
-/// (pinned by `tests::jump_apex_matches_documented_height`).
-pub const GRAVITY: f32 = 20.0;
-
-/// Player body capsule dimensions, used IDENTICALLY by all three spawns — the server authoritative
-/// body, the server hurtbox child, and the client predicted body — so they can never desync (a
-/// mismatch breaks prediction/hurtbox alignment). `capsule(radius, length)` ⇒ half-height =
-/// length/2 + radius = 0.24 + 0.35 = 0.59 = [`GROUND_Y`]. Player mass is implicit (avian default
-/// density) and intentionally cancels in the controller (`force = accel*mass`, `impulse = dv*mass`).
-pub const PLAYER_CAPSULE_RADIUS: f32 = 0.35;
-pub const PLAYER_CAPSULE_LENGTH: f32 = 0.48;
+// The geometry/physics tuning constants (`GROUND_Y`, `GRAVITY`, `PLAYER_CAPSULE_RADIUS`,
+// `PLAYER_CAPSULE_LENGTH`, `ARENA_EYE_HEIGHT`) now live in `arena_sim::tuning` (the single source
+// of truth shared with the editor preview); re-exported here so existing `crate::net::*` use sites
+// resolve unchanged. The full doc rationale lives on each const in `arena_sim/src/tuning.rs`.
+pub use arena_sim::tuning::{
+    ARENA_EYE_HEIGHT, GRAVITY, GROUND_Y, PLAYER_CAPSULE_LENGTH, PLAYER_CAPSULE_RADIUS,
+};
 
 // --- camera ---
 
-/// Camera eye height above the player root (world units). Shared by BOTH the first-person camera
-/// placement (`client::controller::EYE_HEIGHT`) and the server muzzle offset
-/// (`server::cast_pipeline::drain_cast_requests`). Because the camera sits at `origin + Y*ARENA_EYE_HEIGHT` and the
-/// firebolt now spawns at `origin + Y*ARENA_EYE_HEIGHT`, the bolt originates at the eye and travels
-/// along `aim_dir` (camera forward) — so the crosshair ray IS the bolt path and a shot aimed at the
-/// opponent connects. Defined once here so the two values can never drift apart.
-///
-/// MEASURED geometry (the `character.glb` body AABB, feet-rooted): the model is ~1.18 tall, so with
-/// the player origin at the BODY CENTER (see `GROUND_Y` / `present::RIG_FOOT_OFFSET`) the feet sit at
-/// origin Y−0.59 and the head at origin Y+0.59. `+0.5` puts the eye just below the top of the head =
-/// natural first-person eye level. The HURTBOX capsule (`server::spawn::spawn_player_on_connect`) spans origin
-/// Y±0.59 = feet→head, so the eye-height muzzle fires from inside the body span and a level shot lands.
-pub const ARENA_EYE_HEIGHT: f32 = 0.5;
+// `ARENA_EYE_HEIGHT` (camera eye height / server muzzle offset) lives in `arena_sim::tuning` and is
+// re-exported above with the other geometry constants.
 // Mouse sensitivity (default 0.0035, env `ARENA_MOUSE_SENS`) + the pitch clamp live in
 // `client::controller` next to the mouse-look system that reads them.
 

@@ -15,27 +15,4 @@
 //! the installed source): `Serialize + DeserializeOwned + Clone + PartialEq + Debug + Default +
 //! MapEntities + Reflect/FromReflect`.
 
-use bevy::ecs::entity::{EntityMapper, MapEntities};
-use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
-
-/// Per-tick native input. Camera-relative movement + body yaw + jump + a charge telegraph.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default, Reflect)]
-pub struct ArenaInput {
-    /// Camera-relative WASD axis: x = strafe (+right), y = forward.
-    pub movement: Vec2,
-    /// Camera/body yaw (radians). The controller faces the body to this and builds the
-    /// camera-relative movement frame from it.
-    pub yaw: f32,
-    /// True while the jump button (Space) is held; the controller jumps on any grounded tick.
-    pub jump: bool,
-    /// True while the local player is holding the cast button to charge (pre-release). Drives the
-    /// opponent-facing windup telegraph in `server::mirrors::sync_cast_state`.
-    pub charging: bool,
-}
-
-impl MapEntities for ArenaInput {
-    fn map_entities<M: EntityMapper>(&mut self, _entity_mapper: &mut M) {
-        // No entity references in the input.
-    }
-}
+pub use arena_sim::input::ArenaInput;
