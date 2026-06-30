@@ -289,15 +289,25 @@ fn update_health_bars(
                 }
             })
             .unwrap_or(0.0);
-        node.width = Val::Percent((frac * 100.0) as f32);
+        // Only write when the width actually changed: an unconditional assign marks `Node`
+        // as Changed every frame and forces a full UI relayout even when HP is static.
+        let width = Val::Percent((frac * 100.0) as f32);
+        if node.width != width {
+            node.width = width;
+        }
     }
 
     for (label, mut text) in &mut labels {
         let snap = if label.local { &local } else { &opponent };
-        *text = Text::new(match snap {
+        let next = match snap {
             Some((cur, max, id)) => format!("{id}  {cur:.0}/{max:.0}"),
             None => "—".to_string(),
-        });
+        };
+        // Only rebuild the `Text` when the formatted string differs — re-marking `Text`
+        // Changed every frame triggers needless text-layout work.
+        if text.0 != next {
+            *text = Text::new(next);
+        }
     }
 }
 
@@ -506,10 +516,17 @@ fn update_charge_bar(
         (Display::None, 0.0)
     };
 
+    // Compare-before-assign so the idle case (not charging, bar already `Display::None` +
+    // fill already 0%) writes nothing and stops dirtying UI layout every frame.
     for mut node in &mut roots {
-        node.display = display;
+        if node.display != display {
+            node.display = display;
+        }
     }
+    let width = Val::Percent(frac * 100.0);
     for mut node in &mut fills {
-        node.width = Val::Percent(frac * 100.0);
+        if node.width != width {
+            node.width = width;
+        }
     }
 }

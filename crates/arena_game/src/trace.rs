@@ -26,6 +26,7 @@ use bevy::prelude::*;
 use serde_json::{json, Value};
 
 static SINK: OnceLock<Option<Mutex<File>>> = OnceLock::new();
+static SRC: OnceLock<String> = OnceLock::new();
 
 fn sink() -> &'static Option<Mutex<File>> {
     SINK.get_or_init(|| {
@@ -57,9 +58,11 @@ fn now_secs() -> f64 {
 
 /// Identifier for the current process in the trace stream. Set via env var
 /// `ARENA_TRACE_SRC` (default `"unknown"`). The orchestrator sets a unique
-/// value per process (`"server"`, `"observer-1"`, …).
-fn src() -> String {
-    std::env::var("ARENA_TRACE_SRC").unwrap_or_else(|_| "unknown".to_string())
+/// value per process (`"server"`, `"observer-1"`, …). Read once and cached in a
+/// `OnceLock` (like [`SINK`]) so the per-event hot path is a pointer read, not an
+/// env-var lookup + allocation.
+fn src() -> &'static str {
+    SRC.get_or_init(|| std::env::var("ARENA_TRACE_SRC").unwrap_or_else(|_| "unknown".to_string()))
 }
 
 /// Emit one trace event. `extra` is merged into the top-level JSON object —

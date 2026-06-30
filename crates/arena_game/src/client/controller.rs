@@ -66,6 +66,17 @@ const EYE_HEIGHT: f32 = crate::net::ARENA_EYE_HEIGHT;
 /// Copied verbatim from `wisp/src/player/controller.rs:212`.
 pub const AIM_PITCH_BONE: &str = "chest_joint";
 
+/// Marker stamped ONCE on the REMOTE `chest_joint` spine bone so the per-frame aim
+/// lean is a direct `With<SpinePitchBone>` query instead of a full-world `Name` scan
+/// + string compare every frame.
+///
+/// [`stamp_spine_pitch_bones`] inserts it on the `Added<Name>` edge for any bone named
+/// [`AIM_PITCH_BONE`] whose `ChildOf` chain crosses an [`ArenaBody`] but does NOT carry
+/// [`LocalPlayerBody`] (the hidden local body is never leaned), so the marked set is
+/// exactly the visible opponent torsos.
+#[derive(Component)]
+pub struct SpinePitchBone;
+
 /// Camera yaw (radians, around +Y) accumulated from mouse-X. The player body is
 /// rotated to this yaw when moving so WASD stays camera-relative.
 #[derive(Resource, Default)]
@@ -97,6 +108,7 @@ pub struct AimPitchLocked(pub bool);
 /// `Update`: `cursor_grab`, then `accumulate_mouse_look` (mouse → `CameraYaw`/`AimPitch` resources,
 /// read by `client::mod::bridge_windowed_input_to_local_input` to drive the server controller), then
 /// `follow_local_net_player` (positions the [`FollowCamera`] behind the local predicted player).
+/// `stamp_spine_pitch_bones` (tags the remote chest bone with [`SpinePitchBone`] once it appears).
 /// `PostUpdate`: `apply_aim_pitch_to_local_spine`, ordered between `AnimationSystems` and
 /// `TransformSystems::Propagate` (the load-bearing order).
 pub struct ArenaControllerPlugin;
@@ -123,7 +135,10 @@ impl Plugin for ArenaControllerPlugin {
             .insert_resource(AimPitchLocked(locked))
             .add_systems(
                 Update,
-                (cursor_grab, accumulate_mouse_look, follow_local_net_player).chain(),
+                (
+                    (cursor_grab, accumulate_mouse_look, follow_local_net_player).chain(),
+                    stamp_spine_pitch_bones,
+                ),
             )
             .add_systems(
                 PostUpdate,
@@ -229,15 +244,45 @@ fn follow_local_net_player(
     cam.rotation = Quat::from_axis_angle(Vec3::Y, yaw.0) * Quat::from_axis_angle(Vec3::X, pitch.0);
 }
 
+/// Stamp the [`SpinePitchBone`] marker on the REMOTE chest spine bone the frame its
+/// `Name` first appears (the glTF scene spawner adds the bone entities with `Name` +
+/// `ChildOf` together, so the [`ArenaBody`]/[`LocalPlayerBody`] ancestry is already
+/// resolvable here). Matches `name == AIM_PITCH_BONE`, confirms an [`ArenaBody`]
+/// ancestor, and SKIPS any bone whose chain carries [`LocalPlayerBody`] — the hidden
+/// local body is never leaned. This moves the whole-world `Name` scan + ancestry walk
+/// off the per-frame path and onto the one-shot spawn edge.
+fn stamp_spine_pitch_bones(
+    mut commands: Commands,
+    new_named: Query<(Entity, &Name), Added<Name>>,
+    parents: Query<&ChildOf>,
+    body_marker: Query<(), With<ArenaBody>>,
+    local_body_marker: Query<(), With<LocalPlayerBody>>,
+) {
+    for (entity, name) in &new_named {
+        if name.as_str() != AIM_PITCH_BONE {
+            continue;
+        }
+        if !ancestor_has_body_marker(entity, &parents, &body_marker) {
+            continue;
+        }
+        // Local body is hidden in first-person; skip so only the remote
+        // (opponent) torso is ever marked + leaned.
+        if ancestor_has_local_body(entity, &parents, &local_body_marker) {
+            continue;
+        }
+        commands.entity(entity).insert(SpinePitchBone);
+    }
+}
+
 /// After animation has set bone Transforms, apply the aim pitch on top of the
-/// `chest_joint` spine bone so the body leans with the aim. Copied VERBATIM from
-/// `wisp/src/player/controller.rs:219-249` (the spine-pitch system), with the
-/// body marker renamed to [`ArenaBody`] and the pitch source switched from
-/// wisp's first-person `Facing.pitch` to the [`AimPitch`] resource.
+/// `chest_joint` spine bone so the body leans with the aim. Behaviorally VERBATIM
+/// from `wisp/src/player/controller.rs:219-249` (the spine-pitch system), but the
+/// per-frame `Name` scan + ancestry walk is replaced by the [`SpinePitchBone`] marker
+/// ([`stamp_spine_pitch_bones`] stamps exactly the REMOTE chest bones), and the pitch
+/// source is the [`AimPitch`] resource (mouse-Y) rather than wisp's `Facing.pitch`.
 ///
-/// Only applied to REMOTE (opponent) bodies — the LOCAL body is tagged
-/// [`LocalPlayerBody`] and hidden in first-person, so leaning it is moot; we
-/// skip it here so the spine cost is only paid for the visible opponent.
+/// Only the REMOTE (opponent) bodies carry [`SpinePitchBone`] — the LOCAL body is
+/// hidden in first-person, so leaning it is moot and it is never marked.
 ///
 /// Runs in `PostUpdate`, ordered between `AnimationSystems` and
 /// `TransformSystems::Propagate`, so the modification is included in the
@@ -245,11 +290,7 @@ fn follow_local_net_player(
 /// lean invisible (Propagate already ran) or jittery (fights the clip).
 pub fn apply_aim_pitch_to_local_spine(
     aim_pitch: Res<AimPitch>,
-    bones: Query<(Entity, &Name)>,
-    parents: Query<&ChildOf>,
-    body_marker: Query<(), With<ArenaBody>>,
-    local_body_marker: Query<(), With<LocalPlayerBody>>,
-    mut transforms: Query<&mut Transform>,
+    mut bones: Query<&mut Transform, With<SpinePitchBone>>,
 ) {
     // Bone-local axes on the gltf-imported Polysplit chest bone: X runs along
     // the spine (its "up"), so rotating around X twists the torso. Z is the
@@ -258,28 +299,15 @@ pub fn apply_aim_pitch_to_local_spine(
     // "lean back" — invert so up-look bends the upper body back, down-look bends
     // it forward.
     let pitch_quat = Quat::from_axis_angle(Vec3::Z, -aim_pitch.0);
-    for (entity, name) in &bones {
-        if name.as_str() != AIM_PITCH_BONE {
-            continue;
-        }
-        if !ancestor_has_body_marker(entity, &parents, &body_marker) {
-            continue;
-        }
-        // Local body is hidden in first-person; skip so only the remote
-        // (opponent) torso leans to aim.
-        if ancestor_has_local_body(entity, &parents, &local_body_marker) {
-            continue;
-        }
-        if let Ok(mut tf) = transforms.get_mut(entity) {
-            // Post-multiply so the animation's bone rotation is preserved and the
-            // aim pitch is added on top in the bone's local frame.
-            tf.rotation *= pitch_quat;
-        }
+    for mut tf in &mut bones {
+        // Post-multiply so the animation's bone rotation is preserved and the
+        // aim pitch is added on top in the bone's local frame.
+        tf.rotation *= pitch_quat;
     }
 }
 
 /// Walk the `ChildOf` parent chain (NOT Transform parents) to confirm a bone
-/// belongs to an [`ArenaBody`] before mutating it. Copied verbatim from
+/// belongs to an [`ArenaBody`] before marking it. Copied verbatim from
 /// `wisp/src/player/controller.rs:251-266`, marker renamed.
 fn ancestor_has_body_marker(
     entity: Entity,
@@ -300,7 +328,7 @@ fn ancestor_has_body_marker(
 
 /// Walk the `ChildOf` parent chain to check if a bone belongs to the LOCAL
 /// player's body (tagged [`LocalPlayerBody`]). Used by
-/// [`apply_aim_pitch_to_local_spine`] to skip leaning the hidden local body.
+/// [`stamp_spine_pitch_bones`] to skip marking the hidden local body.
 fn ancestor_has_local_body(
     entity: Entity,
     parents: &Query<&ChildOf>,

@@ -133,25 +133,6 @@ pub fn build_graph_when_loaded(
     rig.graph = Some(graphs.add(graph));
 }
 
-/// Walk the `ChildOf` parent chain to confirm an entity belongs to an
-/// [`ArenaBody`] rig. Used by [`drive_animation`] via [`rig_root_of`].
-fn ancestor_has_body_marker(
-    entity: Entity,
-    parents: &Query<&ChildOf>,
-    marker: &Query<(), With<ArenaBody>>,
-) -> bool {
-    let mut cur = entity;
-    loop {
-        if marker.contains(cur) {
-            return true;
-        }
-        match parents.get(cur) {
-            Ok(p) => cur = p.0,
-            Err(_) => return false,
-        }
-    }
-}
-
 /// The glTF loader spawns an `AnimationPlayer` entity inside the scene
 /// tree once the `SceneRoot` resolves. Attach our graph + an
 /// `AnimationPlayer` playing the idle clip when that entity appears.
@@ -228,7 +209,9 @@ fn step_casting_blend(current: f32, target: f32) -> f32 {
     current + (target - current) * ALPHA
 }
 
-/// Compute per-clip blend weights from world velocity + the eased casting factor.
+/// Compute per-clip blend weights from world velocity + the eased casting factor,
+/// pushing each `(node, weight)` pair into `sink` instead of allocating a `Vec` per
+/// call. [`drive_animation`] passes a closure that `play`s the clip + sets its weight.
 ///
 /// `casting_blend` (0..1) cross-fades the locomotion side between the plain clips
 /// (idle / walk_*) and the casting variants (casting_idle / casting_walk_*):
@@ -241,11 +224,11 @@ fn locomotion_blend(
     world_velocity: Vec3,
     yaw: f32,
     casting_blend: f32,
-) -> Vec<(AnimationNodeIndex, f32)> {
-    let mut out: Vec<(AnimationNodeIndex, f32)> = Vec::with_capacity(10);
-    let push = |out: &mut Vec<_>, node: Option<AnimationNodeIndex>, w: f32| {
+    sink: &mut impl FnMut(AnimationNodeIndex, f32),
+) {
+    let mut emit = |node: Option<AnimationNodeIndex>, w: f32| {
         if let Some(n) = node {
-            out.push((n, w));
+            sink(n, w);
         }
     };
 
@@ -258,15 +241,15 @@ fn locomotion_blend(
 
     if speed < WALK_MIN_SPEED {
         // Standing: all weight on idle / casting_idle.
-        push(&mut out, rig.idle, plain_factor);
-        push(&mut out, rig.cast_idle, cast_factor);
-        return out;
+        emit(rig.idle, plain_factor);
+        emit(rig.cast_idle, cast_factor);
+        return;
     }
 
     let locomotion = (speed / LOCOMOTION_REF_SPEED).clamp(0.0, 1.0);
     let idle_share = 1.0 - locomotion;
-    push(&mut out, rig.idle, idle_share * plain_factor);
-    push(&mut out, rig.cast_idle, idle_share * cast_factor);
+    emit(rig.idle, idle_share * plain_factor);
+    emit(rig.cast_idle, idle_share * cast_factor);
 
     // World velocity → local frame (character forward = -Z in the body's frame).
     let local = (Quat::from_axis_angle(Vec3::Y, -yaw) * planar) / speed;
@@ -277,15 +260,14 @@ fn locomotion_blend(
     let r_w = locomotion * right.max(0.0);
     let l_w = locomotion * (-right).max(0.0);
 
-    push(&mut out, rig.walk_f, f_w * plain_factor);
-    push(&mut out, rig.walk_b, b_w * plain_factor);
-    push(&mut out, rig.walk_r, r_w * plain_factor);
-    push(&mut out, rig.walk_l, l_w * plain_factor);
-    push(&mut out, rig.cast_walk_f, f_w * cast_factor);
-    push(&mut out, rig.cast_walk_b, b_w * cast_factor);
-    push(&mut out, rig.cast_walk_r, r_w * cast_factor);
-    push(&mut out, rig.cast_walk_l, l_w * cast_factor);
-    out
+    emit(rig.walk_f, f_w * plain_factor);
+    emit(rig.walk_b, b_w * plain_factor);
+    emit(rig.walk_r, r_w * plain_factor);
+    emit(rig.walk_l, l_w * plain_factor);
+    emit(rig.cast_walk_f, f_w * cast_factor);
+    emit(rig.cast_walk_b, b_w * cast_factor);
+    emit(rig.cast_walk_r, r_w * cast_factor);
+    emit(rig.cast_walk_l, l_w * cast_factor);
 }
 
 /// Per-frame animation driver for the player rigs (the `drive_animation` shape from
@@ -366,9 +348,15 @@ pub fn drive_animation(
             let yaw = rotation.map(|r| yaw_of(r.0)).unwrap_or(0.0);
             (vel, yaw)
         };
-        for (node, weight) in locomotion_blend(&rig, rig_velocity, rig_yaw, blend.casting) {
-            player.play(node).repeat().set_weight(weight);
-        }
+        locomotion_blend(
+            &rig,
+            rig_velocity,
+            rig_yaw,
+            blend.casting,
+            &mut |node, weight| {
+                player.play(node).repeat().set_weight(weight);
+            },
+        );
     }
 }
 
@@ -394,15 +382,17 @@ fn rig_root_of(
         Has<LocalNetPlayer>,
     )>,
 ) -> Option<Entity> {
-    // First confirm it belongs to an arena rig at all.
-    if !ancestor_has_body_marker(anim_entity, parents, body_marker) {
-        return None;
-    }
-    // Then walk up to the nearest ancestor carrying a LocalAnimBlend (the player root, parent of the
-    // ArenaBody scene). `roots` contains exactly the player roots.
+    // Single upward pass: return the nearest ancestor carrying a `LocalAnimBlend` (the player root,
+    // parent of the `ArenaBody` scene — `roots` contains exactly the player roots), but only after
+    // crossing the [`ArenaBody`] marker, so an anim player not under an arena rig still yields `None`.
+    // The `ArenaBody` always sits below the root, so `crossed_body` is set before the root is reached.
     let mut cur = anim_entity;
+    let mut crossed_body = false;
     loop {
-        if roots.get(cur).is_ok() {
+        if body_marker.contains(cur) {
+            crossed_body = true;
+        }
+        if crossed_body && roots.get(cur).is_ok() {
             return Some(cur);
         }
         match parents.get(cur) {

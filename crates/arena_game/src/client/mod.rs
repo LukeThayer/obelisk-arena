@@ -25,7 +25,9 @@ use avian3d::prelude::{Position, Rotation};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use controller::{ArenaControllerPlugin, FollowCamera};
-use cosmetics::{age_lifetimes, fly_cosmetic_projectiles, spawn_cue_cosmetics, AimDirs};
+use cosmetics::{
+    age_lifetimes, fly_cosmetic_projectiles, init_cosmetic_assets, spawn_cue_cosmetics, AimDirs,
+};
 use lightyear::prelude::Predicted;
 use lightyear_frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 use obelisk_bevy::prelude::*;
@@ -124,7 +126,15 @@ pub fn run_windowed_client() {
     app.init_resource::<AimDirs>();
 
     // Scene (camera + light + ground) + rig assets + cast timelines. NO co-located combatants.
-    app.add_systems(Startup, (setup_scene, load_rig, load_cast_assets));
+    app.add_systems(
+        Startup,
+        (
+            setup_scene,
+            load_rig,
+            load_cast_assets,
+            init_cosmetic_assets,
+        ),
+    );
 
     app.add_systems(Update, (poll_cast_assets, log_registered_skills_once));
 

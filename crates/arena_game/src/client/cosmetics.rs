@@ -46,6 +46,43 @@ const MUZZLE_HEIGHT_OFFSET: Vec3 = Vec3::new(0.0, 1.2, 0.0);
 #[derive(Resource, Default)]
 pub struct AimDirs(pub HashMap<String, Vec3>);
 
+/// Cached cosmetic mesh + material handles, so each firebolt cast reuses handles instead of growing
+/// `Assets<Mesh>`/`Assets<StandardMaterial>` every cast.
+///
+/// The meshes are UNIT primitives (a 0.25×0.25 particle quad — fixed size — and a radius-1 sphere
+/// scaled to the projectile radius via `Transform`), built once in [`init_cosmetic_assets`] at
+/// startup. The material maps are keyed by quantized color BITS (the cue colors are a tiny fixed
+/// palette) and lane kind, since particle vs projectile materials differ (emissive multiplier +
+/// alpha/blend), so repeated casts of the same spell hit the cache instead of allocating.
+#[derive(Resource)]
+pub struct CosmeticAssets {
+    /// Unit particle billboard quad (`Rectangle::new(0.25, 0.25)`).
+    quad: Handle<Mesh>,
+    /// Unit sphere (radius 1.0); scaled to the projectile radius per-spawn via `Transform`.
+    sphere: Handle<Mesh>,
+    /// Particle (billboard) materials, keyed by quantized color bits.
+    particle_mats: HashMap<[u32; 3], Handle<StandardMaterial>>,
+    /// Projectile (sphere) materials, keyed by quantized color bits.
+    projectile_mats: HashMap<[u32; 3], Handle<StandardMaterial>>,
+}
+
+/// Quantize an `[f32; 3]` color to its raw bit pattern so it can key a `HashMap` (floats aren't
+/// `Eq`/`Hash`). The cue colors come from a fixed `.skillfx.ron` palette, so equal colors share bits.
+fn color_key(c: [f32; 3]) -> [u32; 3] {
+    [c[0].to_bits(), c[1].to_bits(), c[2].to_bits()]
+}
+
+/// Startup: build the unit cosmetic meshes once and insert the [`CosmeticAssets`] cache (with empty
+/// material maps, filled lazily on first cast of each color).
+pub fn init_cosmetic_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+    commands.insert_resource(CosmeticAssets {
+        quad: meshes.add(Rectangle::new(0.25, 0.25)),
+        sphere: meshes.add(Sphere::new(1.0)),
+        particle_mats: HashMap::new(),
+        projectile_mats: HashMap::new(),
+    });
+}
+
 /// A short-lived cosmetic entity (particle billboard or cosmetic projectile). Despawned by
 /// `age_lifetimes` once `elapsed >= duration`.
 #[derive(Component)]
@@ -75,7 +112,7 @@ pub fn spawn_cue_cosmetics(
     mut msgs: MessageReader<LocalCue>,
     registry: Res<SkillFxRegistry>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
+    mut assets: ResMut<CosmeticAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     aim: Res<AimDirs>,
 ) {
@@ -111,18 +148,25 @@ pub fn spawn_cue_cosmetics(
                 }),
             );
 
-            // 1) Particle burst (emissive billboard stand-in).
+            // 1) Particle burst (emissive billboard stand-in). Reuse the cached unit quad + a
+            // color-keyed material so repeated casts don't grow the asset stores.
             if let Some(p) = &lane.particle {
                 let c = LinearRgba::rgb(p.color[0], p.color[1], p.color[2]);
-                let material = materials.add(StandardMaterial {
-                    emissive: c * 2.0,
-                    base_color: Color::from(c),
-                    alpha_mode: AlphaMode::Blend,
-                    unlit: true,
-                    ..default()
-                });
+                let material = assets
+                    .particle_mats
+                    .entry(color_key(p.color))
+                    .or_insert_with(|| {
+                        materials.add(StandardMaterial {
+                            emissive: c * 2.0,
+                            base_color: Color::from(c),
+                            alpha_mode: AlphaMode::Blend,
+                            unlit: true,
+                            ..default()
+                        })
+                    })
+                    .clone();
                 commands.spawn((
-                    Mesh3d(meshes.add(Rectangle::new(0.25, 0.25))),
+                    Mesh3d(assets.quad.clone()),
                     MeshMaterial3d(material),
                     Transform::from_translation(spawn_pos),
                     ParticleLifetime {
@@ -144,15 +188,24 @@ pub fn spawn_cue_cosmetics(
                     aim.0.get(&m.source_id).copied().unwrap_or(Vec3::Z)
                 };
                 let c = LinearRgba::rgb(proj.color[0], proj.color[1], proj.color[2]);
+                // Reuse the cached unit sphere (scaled to `proj.radius` via Transform) + a
+                // color-keyed material so each cast reuses handles instead of growing the stores.
+                let material = assets
+                    .projectile_mats
+                    .entry(color_key(proj.color))
+                    .or_insert_with(|| {
+                        materials.add(StandardMaterial {
+                            emissive: c * 3.0,
+                            base_color: Color::from(c),
+                            unlit: true,
+                            ..default()
+                        })
+                    })
+                    .clone();
                 commands.spawn((
-                    Mesh3d(meshes.add(Sphere::new(proj.radius))),
-                    MeshMaterial3d(materials.add(StandardMaterial {
-                        emissive: c * 3.0,
-                        base_color: Color::from(c),
-                        unlit: true,
-                        ..default()
-                    })),
-                    Transform::from_translation(spawn_pos),
+                    Mesh3d(assets.sphere.clone()),
+                    MeshMaterial3d(material),
+                    Transform::from_translation(spawn_pos).with_scale(Vec3::splat(proj.radius)),
                     CosmeticProjectile {
                         velocity: dir * proj.speed,
                     },
