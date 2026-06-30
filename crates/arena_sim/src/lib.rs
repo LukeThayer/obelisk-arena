@@ -2,6 +2,7 @@
 
 pub mod input;
 pub mod obelisk;
+pub mod preview;
 pub mod shared_controller;
 pub mod spawn;
 pub mod tuning;
