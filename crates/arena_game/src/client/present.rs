@@ -77,7 +77,7 @@ fn attach_rig_to_players(
         //
         // The `character.glb` is FEET-ROOTED — the model's feet sit at its scene origin. The player
         // origin is the CENTER of the body capsule (`Collider::capsule(0.35, 0.48)`, spawned in
-        // `server::spawn_player_on_connect`), which rests with its center at world `GROUND_Y` (0.59)
+        // `server::spawn::spawn_player_on_connect`), which rests with its center at world `GROUND_Y` (0.59)
         // and its bottom on the floor (world 0). So shift the body DOWN by `RIG_FOOT_OFFSET` (-0.62)
         // to line the model's feet up with the bottom of the capsule and rest them on the platform.
         let base_tf = Transform::from_translation(Vec3::Y * RIG_FOOT_OFFSET)

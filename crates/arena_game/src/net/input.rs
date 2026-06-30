@@ -30,7 +30,7 @@ pub struct ArenaInput {
     /// True while the jump button (Space) is held; the controller jumps on any grounded tick.
     pub jump: bool,
     /// True while the local player is holding the cast button to charge (pre-release). Drives the
-    /// opponent-facing windup telegraph in `server::sync_cast_state`.
+    /// opponent-facing windup telegraph in `server::mirrors::sync_cast_state`.
     pub charging: bool,
 }
 

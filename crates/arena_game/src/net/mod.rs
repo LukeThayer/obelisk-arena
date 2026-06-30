@@ -35,7 +35,7 @@ pub use crate::shared_controller::{JUMP_SPEED, MAX_ACCELERATION, MAX_SPEED};
 /// (half-height 0.59) resting on the static arena floor (top at world 0), so its origin settles at
 /// ≈0.59 and its feet at world 0. Used by the shared controller's ground check
 /// (`shared_controller::apply_arena_movement`) — a player meaningfully above this is airborne — and
-/// as the Y of `server::SPAWN_MARKERS`. With a real floor collider this is the EMERGENT rest height,
+/// as the Y of `server::spawn::SPAWN_MARKERS`. With a real floor collider this is the EMERGENT rest height,
 /// not a clamp.
 pub const GROUND_Y: f32 = 0.59;
 
@@ -56,7 +56,7 @@ pub const PLAYER_CAPSULE_LENGTH: f32 = 0.48;
 
 /// Camera eye height above the player root (world units). Shared by BOTH the first-person camera
 /// placement (`client::controller::EYE_HEIGHT`) and the server muzzle offset
-/// (`server::drain_cast_requests`). Because the camera sits at `origin + Y*ARENA_EYE_HEIGHT` and the
+/// (`server::cast_pipeline::drain_cast_requests`). Because the camera sits at `origin + Y*ARENA_EYE_HEIGHT` and the
 /// firebolt now spawns at `origin + Y*ARENA_EYE_HEIGHT`, the bolt originates at the eye and travels
 /// along `aim_dir` (camera forward) — so the crosshair ray IS the bolt path and a shot aimed at the
 /// opponent connects. Defined once here so the two values can never drift apart.
@@ -64,7 +64,7 @@ pub const PLAYER_CAPSULE_LENGTH: f32 = 0.48;
 /// MEASURED geometry (the `character.glb` body AABB, feet-rooted): the model is ~1.18 tall, so with
 /// the player origin at the BODY CENTER (see `GROUND_Y` / `present::RIG_FOOT_OFFSET`) the feet sit at
 /// origin Y−0.59 and the head at origin Y+0.59. `+0.5` puts the eye just below the top of the head =
-/// natural first-person eye level. The HURTBOX capsule (`server::spawn_player_on_connect`) spans origin
+/// natural first-person eye level. The HURTBOX capsule (`server::spawn::spawn_player_on_connect`) spans origin
 /// Y±0.59 = feet→head, so the eye-height muzzle fires from inside the body span and a level shot lands.
 pub const ARENA_EYE_HEIGHT: f32 = 0.5;
 // Mouse sensitivity (default 0.0035, env `ARENA_MOUSE_SENS`) + the pitch clamp live in
