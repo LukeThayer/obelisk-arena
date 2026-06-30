@@ -15,36 +15,34 @@ use std::collections::HashMap;
 
 /// `arena_game`-local bevy `Message` wrapping the engine-neutral serde [`CueMessage`].
 ///
-/// M2.0 made `arena_skills::CueMessage` a plain serde wire type (no bevy `Message` derive), so
-/// `arena_skills` stays lightyear-free. The single-process M1 path still needs a Bevy channel to
-/// carry cues from the egress observer (which resolves `CueEvent.source` → `ObeliskId`) to the
-/// cosmetics consumer (which needs `Res` access). This local wrapper IS that channel. In M2.3 the
-/// networked path replaces this with a `CueWireMessage` lightyear message + a predicted `LocalCue`
-/// stream feeding the same consumer.
+/// `arena_skills::CueMessage` is a plain serde wire type (no bevy `Message` derive) so `arena_skills`
+/// stays lightyear-free. `LocalCue` is the in-process Bevy channel that carries cues into the
+/// cosmetics consumer ([`spawn_cue_cosmetics`], which needs `Res` access). It is fed from two sides:
+/// `skills::consume_replicated_cues` forwards each survivor of the replicated `CueWireMessage` drain,
+/// and `skills::predicted_local_cast` emits the local player's own on-cast cue immediately (so the
+/// caster sees zero-latency cosmetics without waiting for the server round-trip).
 #[derive(Message, Clone, Debug)]
 pub struct LocalCue(pub CueMessage);
 
 /// Chest/wand-height lift applied to the **OnCast** lane only. The OnCast cue's `position` is the
-/// caster's origin (y≈0, at the feet), so the muzzle particle + projectile would spawn inside the
-/// robe and be occluded. Raising them ~1.2m reads the muzzle at hand height and flies the projectile
-/// from chest height. The OnHit/impact lane keeps the target's actual hit position (no lift).
+/// caster's origin (= the body CENTER, world y≈0.59), so the muzzle particle + projectile would spawn
+/// inside the torso. Raising them ~1.2m reads the muzzle at hand height and flies the projectile from
+/// chest height. The OnHit/impact lane keeps the target's actual hit position (no lift).
 ///
-/// This fixed offset is the M1-appropriate stand-in; a real `wand_tip` socket on the rig is later
-/// polish.
+/// This fixed offset is a stand-in; a real `wand_tip` socket on the rig is later polish.
 const MUZZLE_HEIGHT_OFFSET: Vec3 = Vec3::new(0.0, 1.2, 0.0);
 
 /// Per-caster aim direction (normalized), recorded when a cast is issued, keyed by the caster's
 /// stable `ObeliskId` string.
 ///
-/// The `OnCast` `CueEvent` carries only the caster's position (no direction), so the cosmetic
-/// projectile can't know which way to fly from the cue alone. The cast system stashes
-/// `(target_pos - caster_pos).normalize()` here keyed by the caster's `ObeliskId`;
-/// `spawn_cue_cosmetics` looks it up by `msg.source_id` (the caster for an `OnCast` lane). Absent ⇒
-/// default `Vec3::Z`.
+/// This is the FALLBACK aim source: a `CueMessage` now carries its own `aim_dir` (the wire cue is the
+/// single source of truth — see [`spawn_cue_cosmetics`]), but for the local predicted cast,
+/// `skills::predicted_local_cast` also stashes the camera-forward `aim_dir` here keyed by the caster's
+/// `ObeliskId`, so `spawn_cue_cosmetics` has a direction even before the wire cue arrives. Looked up
+/// by `msg.source_id` (the caster for an `OnCast` lane); absent ⇒ default `Vec3::Z`.
 ///
-/// **M2.0 re-key:** M1 keyed this by caster `Entity` — silently wrong the moment two peers exist
-/// (replicated entity ids differ per process). The stable `ObeliskId` is the only key both ends
-/// agree on, matching the serde `CueMessage.source_id`.
+/// Keyed by the stable `ObeliskId` (not `Entity`) because replicated entity ids differ per process;
+/// `ObeliskId` is the only key both ends agree on, matching the serde `CueMessage.source_id`.
 #[derive(Resource, Default)]
 pub struct AimDirs(pub HashMap<String, Vec3>);
 

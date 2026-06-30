@@ -1,18 +1,19 @@
-//! Client-side net-driven player layer (M2.2 Task 10+).
+//! Client-side net-driven player layer.
 //!
 //! Two jobs, shared by the windowed and headless clients:
-//!   1. **Materialize a body** for every replicated `NetworkedPlayer`: the server replicates the
-//!      `NetworkedPlayer` marker + identity components + the `NetworkedPosition` pose stream, but
-//!      NOT a renderable/physical body. This module spawns a local avian body (so the M2.2 Task 11
-//!      smoothing has Transform + avian `Position`/`Rotation` to drive) and tags the LOCAL player
-//!      (the one whose `NetworkOwner` matches our `LocalId`) with [`LocalNetPlayer`].
-//!   2. **Send local input**: pack the local player's WASD/yaw/pitch/jump into a
-//!      [`PlayerInputMessage`] each `Update` on the unreliable `InputChannel`. The server runs its
-//!      authoritative controller against it (server/mod.rs) and ships the pose back.
+//!   1. **Attach a body** to each lightyear-materialized `NetworkedPlayer`. The local player
+//!      arrives as a `Predicted` entity: this module gives it a Dynamic avian body +
+//!      [`InputMarker`]/[`ActionState<ArenaInput>`] (so the predicted controller can run + roll
+//!      back) and tags it [`LocalNetPlayer`]. Remote players arrive as `Interpolated` entities:
+//!      they get no physical body (lightyear drives their avian `Position`/`Rotation`) and are
+//!      tagged once their pose has replicated.
+//!   2. **Stage local input**: copy the local player's WASD/yaw/pitch/jump/charging onto its
+//!      `ActionState<ArenaInput>` in `FixedPreUpdate` (lightyear's `WriteClientInputs`), where
+//!      lightyear samples and ships it. The server runs its authoritative controller against the
+//!      same input (server/mod.rs).
 //!
 //! Input is sourced from a [`LocalInput`] resource so the windowed controller (real keyboard +
-//! mouse-yaw) and the headless `ARENA_AUTOMOVE` hook can both feed the same send path. The send
-//! path mirrors `wisp/src/net/client.rs:116-146` (`Single<&mut MessageSender<…>>`).
+//! mouse-yaw) and the headless `ARENA_AUTOMOVE` hook can both feed the same path.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -408,8 +409,8 @@ fn drain_customize_broadcasts(
     }
 }
 
-/// [H] check support (Bug 1a): edge-triggered trace of a REMOTE player's replicated cast phase, so
-/// the headless harness can confirm the server's stamped `NetworkedPosition.cast_phase` (Bug 1a)
+/// Edge-triggered trace of a REMOTE player's replicated cast phase, so
+/// the headless harness can confirm the server's stamped `NetworkedCastState.cast_phase`
 /// actually propagates server → this observer (which is what drives the remote cast animation).
 /// Fires one `remote_cast_phase` line each time a remote player's `cast_phase` byte changes value
 /// (keyed by `NetworkOwner`), not every frame — a cast walks 0→1→2→3→0 so it emits a handful of

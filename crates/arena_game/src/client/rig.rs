@@ -3,10 +3,9 @@
 //! animation-target entity so the player renders as a rigged character
 //! playing the idle clip (not a T-pose).
 //!
-//! Trimmed adaptation of wisp's `src/player/visuals.rs` (same Bevy 0.18):
-//! kept just the load-graph + attach + play-idle path. Dropped wisp's
-//! costume/recolor/viewmodel/render-layer/locomotion-blend logic — those
-//! arrive with the third-person controller in a later task.
+//! Adaptation of wisp's `src/player/visuals.rs` (same Bevy 0.18): the
+//! load-graph + attach + play-idle path PLUS the per-rig locomotion+casting
+//! blend ([`drive_animation`]). Costume/part selection lives in `client/parts.rs`.
 
 use avian3d::prelude::{LinearVelocity, Rotation};
 use bevy::{gltf::Gltf, prelude::*};
@@ -210,8 +209,8 @@ pub fn attach_animation_graph(
 
 /// Smoothly-eased casting factor for the player rig, persisted across frames so the
 /// cast wind-up/recovery cross-fades between the plain locomotion clips and the
-/// casting variants instead of popping. Inserted on the player combatant root in
-/// `spawn_combatants`; read+written by [`drive_animation`].
+/// casting variants instead of popping. Inserted on the player root by
+/// `present::attach_rig_to_players`; read+written by [`drive_animation`].
 #[derive(Component, Default)]
 pub struct LocalAnimBlend {
     /// 0 = plain locomotion, 1 = full casting layer. Eased toward the
@@ -292,20 +291,20 @@ fn locomotion_blend(
 /// Per-frame animation driver for the player rigs (the `drive_animation` shape from
 /// wisp's `visuals.rs:548+`, adapted for obelisk + the NETWORKED arena client).
 ///
-/// M2.5 Task 21 made this PER-PLAYER (was single-player co-located): the networked client renders
-/// TWO rigs (local + remote), each a descendant of its own `NetworkedPlayer` root carrying a
-/// [`LocalAnimBlend`]. For each `AnimationPlayer` we walk the `ChildOf` chain up to its owning rig
-/// root, read that root's persisted blend + optional `ActiveCast`, and drive that rig — so both
-/// characters animate independently instead of `single_mut()` erroring on the 2-player case.
+/// This is PER-PLAYER: the networked client renders TWO rigs (local + remote), each a descendant of
+/// its own `NetworkedPlayer` root carrying a [`LocalAnimBlend`]. For each `AnimationPlayer` we walk
+/// the `ChildOf` chain up to its owning rig root, read that root's persisted blend + replicated cast
+/// state + pose, and drive that rig — so both characters animate independently instead of
+/// `single_mut()` erroring on the 2-player case.
 ///
 /// Drives two layers:
-///   - **Locomotion** from the camera yaw (the per-player world velocity is not yet threaded for
-///     remote rigs — they idle/face via the interpolated `NetworkedPosition.yaw`; deriving remote
-///     walk velocity from the pose-stream delta is later polish, the rig idles correctly meanwhile).
-///   - **Casting** from the root's `Option<&ActiveCast>`: `Windup`/`Active` → 1.0, `Recovery` → 0.5,
-///     none/`Done` → 0.0, eased by [`step_casting_blend`]. For the LOCAL player only, a charge hold
-///     (C5) also drives the blend to 1.0 so the caster visibly winds up while charging — the actual
-///     `ActiveCast` only starts on release, so this pre-emptively cues the pose during the hold.
+///   - **Locomotion**: the hidden LOCAL rig uses camera yaw + zero velocity; each REMOTE rig faces
+///     and walks from ITS OWN interpolated avian `Rotation` (yaw) + `LinearVelocity`, so a moving
+///     opponent plays the correct directional walk clip facing the right way.
+///   - **Casting** from the root's `NetworkedCastState.cast_phase`: 1/2 → 1.0, 3 → 0.5, 0 → 0.0,
+///     eased by [`step_casting_blend`]. For the LOCAL player only, a charge hold also drives the
+///     blend to 1.0 so the caster visibly winds up while charging — the server-side cast (hence
+///     `cast_phase`) only starts on release, so this pre-emptively cues the pose during the hold.
 #[allow(clippy::type_complexity)]
 pub fn drive_animation(
     rig: Res<RigAssets>,

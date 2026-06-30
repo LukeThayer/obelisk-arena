@@ -1,7 +1,6 @@
 //! Smoke test: `ProtocolPlugin` adds cleanly to a minimal app — no double-registration / missing
 //! channel-direction panic. The component + message + channel registration is the assertion;
-//! building without panic proves the protocol is internally consistent (netcode guide §3, plan
-//! Task 6).
+//! building without panic proves the protocol is internally consistent (netcode guide §3).
 
 #[test]
 fn protocol_plugin_builds() {

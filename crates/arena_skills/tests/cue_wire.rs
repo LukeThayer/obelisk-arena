@@ -1,8 +1,7 @@
-//! Round-trip test for the M2 serde `CueMessage` wire type.
+//! Round-trip test for the serde `CueMessage` wire type.
 //!
-//! M2.0 rewrites `CueMessage` from an embedded-`LaneEvent`, `Entity`-keyed bevy `Message` into a
-//! plain serde wire shape `{ cue_id, source_id, position, kind }`. This proves it survives a
-//! `serde_json` round-trip (the precondition for putting it on the lightyear wire).
+//! `CueMessage` is a plain serde wire shape `{ cue_id, source_id, position, kind }`. This proves it
+//! survives a `serde_json` round-trip (the precondition for putting it on the lightyear wire).
 
 use arena_skills::{CueKind, CueMessage};
 use bevy::math::Vec3;

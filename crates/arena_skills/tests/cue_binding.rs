@@ -1,10 +1,9 @@
 //! Cue-egress integration test: prove that casting firebolt fires obelisk `CueEvent`s that map
-//! cleanly onto the M2 serde [`CueMessage`] wire shape.
+//! cleanly onto the serde [`CueMessage`] wire shape.
 //!
-//! M1 routed cues through a `register_skill_cues` binding that emitted an embedded-`LaneEvent`,
-//! `Entity`-keyed bevy `Message`. M2.0 replaced that with a plain serde `CueMessage`
-//! `{ cue_id, source_id, position, kind }`: the `cue_id` is the obelisk cue VALUE the `.cast.ron`
-//! fires, the `source_id` is the source combatant's stable `ObeliskId` (NOT a local `Entity`).
+//! `CueMessage` is a plain serde shape `{ cue_id, source_id, position, kind }`: the `cue_id` is the
+//! obelisk cue VALUE the `.cast.ron` fires, the `source_id` is the source combatant's stable
+//! `ObeliskId` (NOT a local `Entity`).
 //!
 //! This test casts firebolt through the real obelisk sim, observes every `CueEvent`, builds the
 //! serde `CueMessage` from each via the egress helper [`arena_skills::cue_event_to_message`]

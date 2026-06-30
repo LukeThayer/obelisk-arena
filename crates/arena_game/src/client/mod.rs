@@ -1,15 +1,15 @@
 //! Client-side present + gameplay layer.
 //!
 //! Two entry points (the `arena-client` bin picks via `ARENA_HEADLESS`):
-//!   - [`run_windowed_client`] — the NETWORKED windowed client (M2.5 Task 21): DefaultPlugins +
+//!   - [`run_windowed_client`] — the NETWORKED windowed client: DefaultPlugins +
 //!     the lightyear client stack + the CLIENT obelisk subset (no authoritative ResolveHits/RNG —
-//!     Stage A) + net-driven materialized players (rigged), predicted local movement, third-person
+//!     Stage A) + net-driven materialized players (rigged), predicted local movement, first-person
 //!     camera, replicated/predicted cosmetics, and the HUD (hp bars + round banner). The duel is
-//!     entirely server-authoritative + replicated; there is NO M1 co-located demo path anymore.
+//!     entirely server-authoritative + replicated.
 //!   - [`run_headless_client`] — the headless scriptable cast client (`ARENA_HEADLESS=1`, the
 //!     `arena-observer` bin): MinimalPlugins + the net stack, materializes players, traces the
 //!     replicated combat/cue streams, and (under `ARENA_AUTOCAST`/`ARENA_AUTOMOVE`) scripts casts /
-//!     movement over the wire — the M2 net-regression vehicle (M2.5 Task 20).
+//!     movement over the wire — the net-regression vehicle.
 
 pub mod controller;
 pub mod cosmetics;
@@ -38,8 +38,8 @@ use crate::{add_avian_with_lightyear, add_obelisk_sim_client, arena_root, net::C
 /// `CueMessage`. (`register_client_cue_binding` adds the `LocalCue` channel; this just supplies the
 /// registry resource.)
 ///
-/// M2.5 Task 21 NOTE: the NETWORKED windowed client does NOT install a local obelisk `CueEvent`
-/// egress observer (M1's co-located path) — it spawns no obelisk combatants of its own, so it fires
+/// NOTE: the NETWORKED windowed client does NOT install a local obelisk `CueEvent`
+/// egress observer — it spawns no obelisk combatants of its own, so it fires
 /// no local cues. Its cosmetics come entirely from (a) the server's replicated `CueWireMessage`
 /// (drained by `skills::register_client_cue_binding`) and (b) the predicted own-cast `LocalCue`
 /// (emitted by `skills::register_predicted_sim`). Both feed `spawn_cue_cosmetics` via the `LocalCue`
@@ -60,25 +60,19 @@ fn load_skillfx_registry(app: &mut App, root: &std::path::Path) {
     );
 }
 
-/// Run the windowed NETWORKED client (M2.5 Task 21). `DefaultPlugins` (windowing + rendering) + the
+/// Run the windowed NETWORKED client. `DefaultPlugins` (windowing + rendering) + the
 /// lightyear client stack + the CLIENT obelisk subset (`add_obelisk_sim_client`, NO authoritative
 /// ResolveHits/RNG — Stage A) + the net-driven player/present/HUD layers. It connects to the
 /// dedicated server, materializes the replicated players (rigged via `present`), runs the
-/// third-person camera + predicted movement on the LOCAL player, renders cosmetics from the
+/// first-person camera + predicted movement on the LOCAL player, renders cosmetics from the
 /// replicated/predicted cues, and shows the HUD (hp bars + round banner).
 ///
-/// ## What changed from the broken M1-co-located version (the Task 21 fix)
-///
-/// The old body added BOTH `ObeliskSimPlugin` (whose `ObeliskSpatialPlugin` adds avian
-/// `PhysicsPlugins`) AND `add_avian_with_lightyear` (also avian `PhysicsPlugins`) → a guaranteed
-/// double-add panic (`PhysicsSchedulePlugin ... already added`). It ALSO ran the M1 single-process
-/// co-located demo (a hard-coded "player" + "dummy" combatant, `cast_on_input`/`autocast_system`
-/// directly calling `cast_skill_at`), which has no place on a NETWORKED client (the server is the
-/// sole combat authority). The fix: compose like the SERVER — `add_avian_with_lightyear` is the
-/// SOLE physics registrant, and `add_obelisk_sim_client` supplies the obelisk asset/core infra WITHOUT
-/// `ObeliskSpatialPlugin` (no second physics group) and WITHOUT ResolveHits/`ObeliskCombatPlugin`
-/// (Stage-A: the client never resolves hits / draws RNG). The co-located player/dummy + direct-cast
-/// systems are GONE; the duel is entirely the replicated `NetworkedPlayer`s + the wire cast path.
+/// It composes like the SERVER: `add_avian_with_lightyear` is the SOLE avian `PhysicsPlugins`
+/// registrant (else `PhysicsSchedulePlugin ... already added` panics), and `add_obelisk_sim_client`
+/// supplies the obelisk asset/core infra WITHOUT `ObeliskSpatialPlugin` (no second physics group)
+/// and WITHOUT ResolveHits/`ObeliskCombatPlugin` (Stage-A: the client never resolves hits / draws
+/// RNG). The client spawns no combatants of its own — the duel is entirely the replicated
+/// `NetworkedPlayer`s + the wire cast path.
 pub fn run_windowed_client() {
     let root = arena_root();
 
@@ -166,16 +160,15 @@ pub fn run_windowed_client() {
         app.add_systems(Update, smoke_exit_after_frames);
     }
 
-    // Screenshot harness (ARENA_SHOT / ARENA_SHOT_FRAME): Bevy off-screen-window capture (M1 harness,
-    // carried through the lib/bin split). Captures the primary window after N frames → ARENA_SHOT.
+    // Screenshot harness (ARENA_SHOT / ARENA_SHOT_FRAME): Bevy off-screen-window capture. Captures
+    // the primary window after N frames → ARENA_SHOT.
     if let Some(cfg) = ScreenshotConfig::from_env() {
         app.insert_resource(cfg);
         app.add_systems(Update, screenshot_system);
     }
     // AUTOCAST harness (ARENA_AUTOCAST=1): drive the NETWORKED cast path on a cadence (set
     // `net::CastIntent` → `send_cast_requests` ships a `CastRequestMessage`). This is the same wire
-    // cast the headless AUTOCAST uses — NOT the removed M1 co-located direct-cast. Lets a windowed
-    // client script firebolt for the visual gate.
+    // cast the headless AUTOCAST uses. Lets a windowed client script firebolt for the visual gate.
     if std::env::var("ARENA_AUTOCAST").ok().as_deref() == Some("1") {
         app.add_systems(Update, windowed_autocast);
     }
@@ -190,16 +183,16 @@ pub fn run_windowed_client() {
     app.add_plugins(FrameInterpolationPlugin::<Position>::default());
     app.add_plugins(FrameInterpolationPlugin::<Rotation>::default());
     app.add_observer(add_frame_interpolation_to_predicted);
-    // Trace the replicated NetEvent stream (Task 15) + consume the replicated cues → cosmetics
-    // (Task 16): `register_client_cue_binding` drains CueWireMessage, de-dups the local player's own
+    // Trace the replicated NetEvent stream + consume the replicated cues → cosmetics:
+    // `register_client_cue_binding` drains CueWireMessage, de-dups the local player's own
     // predicted cue, and feeds survivors to `spawn_cue_cosmetics` via the LocalCue channel. So
     // replicated firebolt VFX play on the windowed client for BOTH peers' casts.
     crate::skills::register_client_event_trace(&mut app);
     crate::skills::register_client_cue_binding(&mut app);
-    // Predicted own-cast (Task 17): play the local on_cast + cosmetic projectile INSTANTLY on cast,
+    // Predicted own-cast: play the local on_cast + cosmetic projectile INSTANTLY on cast,
     // with NO ResolveHits / Hitbox / CombatRng (Stage-A invariant). Damage arrives from the server.
     crate::skills::register_predicted_sim(&mut app);
-    // HUD (Task 18 + 19): hp bars driven by replicated NetworkedHealth, floating damage + hit flash
+    // HUD: hp bars driven by replicated NetworkedHealth, floating damage + hit flash
     // from DamageResolved, and the round/score banner from RoundStateMessage. Windowed-only.
     app.add_plugins(hud::ArenaHudPlugin);
     app.add_systems(
@@ -322,7 +315,7 @@ fn release_keys_on_focus_loss(
     }
 }
 
-/// Bridge the windowed third-person controller's input into [`net::LocalInput`] so the local
+/// Bridge the windowed first-person controller's input into [`net::LocalInput`] so the local
 /// player's movement is sent to the server (server-authoritative Stage-A movement). Reads the
 /// camera yaw (mouse-X driven) + WASD keys in the same camera-relative frame the controller uses
 /// (matching the server controller): forward = -Z, strafe = +X, both in the camera-yaw frame.
@@ -372,15 +365,15 @@ fn bridge_windowed_input_to_local_input(
 }
 
 /// Run the headless connectivity/movement client: MinimalPlugins + LogPlugin (no window, no
-/// rendering, no M1 gameplay) + the lightyear client net stack + the avian-lightyear physics + the
+/// rendering, no HUD) + the lightyear client net stack + the avian-lightyear physics + the
 /// net-driven player layer (materialize bodies + send input). Gated by `ARENA_HEADLESS=1` so two
 /// clients can be brought up under the net-test harness to verify connection + replication +
 /// movement without windows.
 ///
 /// It materializes a body for every replicated `NetworkedPlayer` (tracing `materialized_player`
-/// with the owner's client_id + local flag so the late-joiner check still passes), runs the M2.2
-/// Task 11 smoothing, and — under `ARENA_AUTOMOVE=1` — feeds a constant forward input so the
-/// movement-replication check can drive the server controller headlessly.
+/// with the owner's client_id + local flag so the late-joiner check still passes) and — under
+/// `ARENA_AUTOMOVE=1` — feeds a constant forward input so the movement-replication check can drive
+/// the server controller headlessly.
 pub fn run_headless_client() {
     let root = arena_root();
     let mut app = App::new();
@@ -410,9 +403,9 @@ pub fn run_headless_client() {
     });
     add_avian_with_lightyear(&mut app);
 
-    // Net-driven player layer: materialize a body per replicated NetworkedPlayer + send input +
-    // (Task 11) interpolate remote players. Also traces replicated/materialized players for the
-    // late-joiner check.
+    // Net-driven player layer: attach a body to each materialized NetworkedPlayer + stage input
+    // (lightyear drives prediction + remote interpolation). Also traces replicated/materialized
+    // players for the late-joiner check.
     app.add_plugins(net::ClientNetPlayerPlugin);
 
     // Seed CameraYaw + AimPitch from env vars so `send_cast_requests` has an aim direction.
@@ -437,7 +430,7 @@ pub fn run_headless_client() {
     });
     // [H] Trace the replicated combat events (NetEventMessage), and consume the replicated cues
     // (CueWireMessage → trace + de-dup + dispatch). Headless has no cosmetics reader, so the
-    // dispatched LocalCues clear harmlessly; the trace lines are what the [H] checks assert on.
+    // dispatched LocalCues clear harmlessly; the trace lines are what the net-test asserts on.
     crate::skills::register_client_event_trace(&mut app);
     crate::skills::register_client_cue_binding(&mut app);
     app.add_systems(
@@ -469,10 +462,9 @@ pub fn run_headless_client() {
     }
 
     // [H] AUTOCAST hook: once we own a local player AND an opponent is replicated, set the cast
-    // intent once so `net::send_cast_requests` fires a `CastRequestMessage` (Task 14). This is the
-    // headless verification vehicle for M2.3 — a server `CastBegan` (and downstream the egress of
-    // damage + cues) follows. Off unless ARENA_AUTOCAST=1. (Distinct from the windowed/M1 AUTOCAST
-    // which directly `cast_skill_at`s a co-located dummy — the headless one goes over the wire.)
+    // intent once so `net::send_cast_requests` fires a `CastRequestMessage`. This is the
+    // headless verification vehicle — a server `CastBegan` (and downstream the egress of
+    // damage + cues) follows. Off unless ARENA_AUTOCAST=1.
     if std::env::var("ARENA_AUTOCAST").ok().as_deref() == Some("1") {
         app.add_systems(Update, headless_autocast);
     }
@@ -511,7 +503,7 @@ fn headless_customize_once(
 /// [H] AUTOCAST: set [`net::CastIntent`] to firebolt on a CADENCE (default ~0.8s), once both the
 /// local player and an opponent are materialized so `send_cast_requests` has a target hint. Repeating
 /// (not one-shot) so a headless AUTOCAST client drives a FULL best-of-3 match: it keeps casting across
-/// rounds, killing the opponent each round until one side reaches the match-win threshold (Task 19).
+/// rounds, killing the opponent each round until one side reaches the match-win threshold.
 ///
 /// Cadence is `ARENA_AUTOCAST_PERIOD` seconds (default 0.8) — comfortably above firebolt's ~0.6s cast
 /// time so requests don't pile up behind an in-flight cast (the server skips a caster mid-cast). The
@@ -554,9 +546,8 @@ fn headless_autocast(
     }
 }
 
-/// Polling tracer kept from the M2.1 GATE: emit `replicated_player` once per replicated
-/// `NetworkedPlayer` (keyed by `NetworkOwner.client_id`) so the late-joiner check still has its
-/// signal after the temp scaffolding became real body materialization.
+/// Polling tracer: emit `replicated_player` once per replicated
+/// `NetworkedPlayer` (keyed by `NetworkOwner.client_id`) so the late-joiner check has its signal.
 fn trace_replicated_players(
     players: Query<
         (
@@ -584,7 +575,7 @@ fn trace_replicated_players(
 }
 
 /// [H] Trace the replicated `NetworkedHealth` whenever it CHANGES on this client — proves the
-/// server-authoritative hp mirror (Task 18) replicates over the wire and drops on a hit (50 → 30).
+/// server-authoritative hp mirror replicates over the wire and drops on a hit (50 → 30).
 /// `Changed<NetworkedHealth>` fires only on a real delta, so the trace mirrors the server's `hp`
 /// stream from the receiving end. Keyed by the replicated `ObeliskNetId`.
 #[allow(clippy::type_complexity)]
@@ -610,7 +601,7 @@ fn trace_replicated_health(
 }
 
 /// [H] Trace each replicated `RoundStateMessage` the headless client receives, so the round-machine
-/// check (Task 19) can assert the best-of-3 flow replicates over the wire (phase transitions, the
+/// check can assert the best-of-3 flow replicates over the wire (phase transitions, the
 /// score increments, and the terminal `MatchOver`). Dedups consecutive identical (phase, scores,
 /// winner) so the trace carries transitions, not the ~1/sec countdown re-broadcasts.
 #[allow(clippy::type_complexity)]

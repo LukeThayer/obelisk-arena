@@ -22,6 +22,8 @@ use lightyear::prelude::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Plugin: the shared lightyear protocol — native `ArenaInput`, the replicated component set with
+/// prediction/interpolation/rollback registration, and the channels + messages. Added by both peers.
 pub struct ProtocolPlugin;
 
 impl Plugin for ProtocolPlugin {
@@ -58,7 +60,7 @@ impl Plugin for ProtocolPlugin {
         app.register_component::<PlayerCustomization>();
 
         // --- avian physics: lightyear-native prediction (rollback) + interpolation. ---
-        // ENABLED (the M1 `disable: true` dormancy is removed). The server spawns each player a
+        // The server spawns each player a
         // Dynamic avian body with `PredictionTarget::Single(owner)` + `InterpolationTarget::
         // AllExceptSingle(owner)`; lightyear predicts Position/Rotation/Velocity on the owner's
         // client (re-simulating the shared controller during rollback) and interpolates Position/
@@ -156,7 +158,7 @@ pub struct CastRequestMessage {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NetEventMessage(pub obelisk_bevy::net::NetEvent);
 
-/// Cosmetic cue on the wire — wraps `arena_skills::CueMessage` (the serde wire type from M2.0). The
+/// Cosmetic cue on the wire — wraps `arena_skills::CueMessage` (the serde wire type). The
 /// client consumer re-looks-up the `LaneEvent`s via the `SkillFxRegistry` (§4.3).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CueWireMessage(pub arena_skills::CueMessage);
@@ -181,8 +183,8 @@ pub struct CustomizeBroadcast {
     pub parts: PartSelection,
 }
 
-/// Best-of-3 round flow (§7). Filled out by M2.4 Task 19; the wire shape is fixed here so the
-/// protocol checksum agrees on both peers from M2.1.
+/// Best-of-3 round flow (guide §7). The wire shape is fixed here so the protocol checksum agrees on
+/// both peers.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoundStateMessage {
     /// 0 WaitingForPlayers, 1 Countdown, 2 Active, 3 RoundOver, 4 MatchOver.

@@ -2,8 +2,8 @@
 //! rendering) + the asset/mesh/scene plugins avian's collider cache needs + the lightyear server
 //! net stack + the obelisk sim (the combat authority) + the arena server gameplay plugin.
 //!
-//! Boots, binds the UDP socket, and logs "listening" (Task 7). Player spawning + late-joiner
-//! refresh land in `ArenaServerPlugin` (Task 9).
+//! Boots, binds the UDP socket, and logs "listening". Player spawning (the connect-time
+//! `spawn_player_on_connect` observer) + the rest of gameplay live in `ArenaServerPlugin`.
 
 use bevy::log::LogPlugin;
 use bevy::mesh::MeshPlugin;

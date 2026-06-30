@@ -1,8 +1,7 @@
-//! Server cue/event egress + client cue binding (the M1 `register_skill_cues` split, networked).
+//! Server cue/event egress + client cue binding.
 //!
-//! M2.0 split the single-process cue binding into a pure egress helper
-//! (`arena_skills::cue_event_to_message`) and a pure consumer (`arena_skills::resolve_cue`). This
-//! module wires both halves to the lightyear wire:
+//! The cue binding is split into a pure egress helper (`arena_skills::cue_event_to_message`) and a
+//! pure consumer (`arena_skills::resolve_cue`). This module wires both halves to the lightyear wire:
 //!
 //!   - [`register_server_cue_egress`] (server): converts obelisk `CueEvent`s into serde `CueMessage`s
 //!     (resolving `CueEvent.source` Entity → stable `ObeliskId` via obelisk's `ObeliskEntityIndex`)
@@ -10,7 +9,7 @@
 //!     client. It ALSO drives [`egress_net_events`], which broadcasts obelisk's authoritative
 //!     `NetEvent` stream (CastBegan / DamageResolved / …) as [`NetEventMessage`].
 //!   - [`register_client_cue_binding`] (client): consumes the replicated `CueWireMessage`s →
-//!     `resolve_cue` → cosmetics (Task 16, in `client/cosmetics.rs`).
+//!     `resolve_cue` → cosmetics (in `client/cosmetics.rs`).
 //!
 //! The server NEVER spawns cosmetics (it has no presentation); it only converts + broadcasts. The
 //! client NEVER resolves combat (Stage A); it only plays cosmetics from the replicated cues +
@@ -174,13 +173,13 @@ fn trace_received_net_events(mut receivers: Query<&mut MessageReceiver<NetEventM
     }
 }
 
-/// Register the CLIENT cue consumer (Task 16, guide §6.5). The SINGLE drain point for the replicated
+/// Register the CLIENT cue consumer (guide §6.5). The SINGLE drain point for the replicated
 /// `CueWireMessage` stream: it traces each received cue (`client_cue_received`), de-dups against the
 /// local player's own predicted cues, and feeds the surviving cues into the cosmetics consumer via
 /// the existing [`LocalCue`] channel (so `client::cosmetics::spawn_cue_cosmetics` plays them).
 ///
 /// De-dup (guide §6.5): the LOCAL predicting player fires its OWN `on_cast`/projectile cues locally
-/// (Task 17) for zero latency, so a replicated cue whose `source_id == local player's ObeliskId` AND
+/// for zero latency, so a replicated cue whose `source_id == local player's ObeliskId` AND
 /// whose kind is a predicted kind (`OnCast`) is SKIPPED — the predicted copy already played.
 /// Resolution-dependent cues (`OnHit`/impact) always come from the server and are never de-duped.
 ///
@@ -188,8 +187,8 @@ fn trace_received_net_events(mut receivers: Query<&mut MessageReceiver<NetEventM
 /// the single-drain invariant holds); it just has no `spawn_cue_cosmetics` reader, so the emitted
 /// `LocalCue`s harmlessly clear.
 pub fn register_client_cue_binding(app: &mut App) {
-    // Ensure the LocalCue channel exists even on the headless client (the windowed client already
-    // adds it in `register_cue_egress`; `add_message` is idempotent-safe via Bevy's dedup).
+    // Ensure the LocalCue channel exists even on the headless client (`add_message` is
+    // idempotent-safe via Bevy's dedup if another registration already added it).
     app.add_message::<crate::client::cosmetics::LocalCue>();
     app.add_systems(Update, consume_replicated_cues);
 }
@@ -237,7 +236,7 @@ fn consume_replicated_cues(
     }
 }
 
-/// Register the PREDICTED local-cast presentation (Task 17, guide §6.4).
+/// Register the PREDICTED local-cast presentation (guide §6.4).
 ///
 /// Stage-A invariant (guide risk #2): the client predicts the own-cast COSMETICS only — it fires the
 /// local `on_cast` muzzle + cosmetic projectile the instant the cast_request goes out (zero latency),

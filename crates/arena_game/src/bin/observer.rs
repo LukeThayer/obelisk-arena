@@ -4,7 +4,8 @@
 //! receives replication, scripts a firebolt cast over the wire (a real `CastRequestMessage`, the
 //! same send path the windowed client uses), and emits a `trace::event` for every replicated
 //! `NetEventMessage` (`client_net_cast_began` / `client_net_damage_resolved` / …),
-//! `CueWireMessage` (`client_cue_received`), and `NetworkedPosition` (`remote_pose`) it observes.
+//! `CueWireMessage` (`client_cue_received`), and the interpolated avian `Position` (`remote_pose`) it
+//! observes.
 //!
 //! Rather than fabricate a second, parallel headless client, the observer IS the existing
 //! `client::run_headless_client` — the `arena-client` binary's `ARENA_HEADLESS=1` mode. That mode

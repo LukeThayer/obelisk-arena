@@ -1,10 +1,10 @@
-//! Server-side arena gameplay: spawn one networked combatant per connected client + keep the
-//! late-joiner replication targets fresh (netcode guide §5.1, §5.7). Later M2 tasks add the
-//! movement controller, cast pipeline, egress bridge, HUD mirror, and round machine here.
+//! Server-side arena gameplay: the `spawn_player_on_connect` observer spawns one networked combatant
+//! per connected client (`Replicate::to_clients(All)` + `PredictionTarget::Single(owner)` +
+//! `InterpolationTarget::AllExceptSingle(owner)`), then the authoritative movement controller, cast
+//! pipeline, egress bridge, HUD mirror, and best-of-3 round machine all run here.
 //!
-//! `refresh_replicate_on_connect` is copied VERBATIM from `wisp/src/net/server.rs:208-232`.
-//! `sync_networked_players` is adapted from `wisp/src/net/server.rs:284-360` (obelisk combatant in
-//! place of wisp's wizard rig).
+//! Spawning in the connect OBSERVER (not a polled system) guarantees the owner's replication sender
+//! exists before the prediction/interpolation targets resolve.
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,6 +30,8 @@ use crate::shared_controller::{apply_arena_movement, apply_arena_yaw};
 use crate::trace;
 use lightyear::prelude::MessageSender;
 
+/// Plugin: server-authoritative arena gameplay — connect-time player spawn, movement controller,
+/// cast pipeline, HP/cast-state mirrors, appearance round-trip, and the best-of-3 round machine.
 pub struct ArenaServerPlugin;
 
 impl Plugin for ArenaServerPlugin {
@@ -55,28 +57,28 @@ impl Plugin for ArenaServerPlugin {
                     // so the OTHER client can animate this player's cast. Every Update (a caster
                     // stands still while casting, so this is NOT gated on Changed).
                     sync_cast_state,
-                    // HP mirror (Task 18): mirror each player's obelisk life → replicated
+                    // HP mirror: mirror each player's obelisk life → replicated
                     // NetworkedHealth so the client HUD reads server-authoritative hp.
                     sync_networked_health,
-                    // Cast pipeline (Task 14): drain client cast_requests → re-validate
-                    // server-side (re-acquire target) → cast_skill_at → obelisk's validate_casts
-                    // gates the rest. Ordered after `sync_networked_players` so the ClientPlayerMap
-                    // is populated, and after the lib's Update spatial refresh (in
-                    // add_obelisk_sim_headless) so `nearest_enemy` sees a fresh pipeline.
+                    // Cast pipeline: drain client cast_requests → free-aim
+                    // `cast_skill_dir_charged_from` (fires along the client's `aim_dir`, no
+                    // re-acquire) → obelisk's validate_casts gates the rest. The ClientPlayerMap is
+                    // populated by `spawn_player_on_connect`; ordered after the lib's Update spatial
+                    // refresh (in add_obelisk_sim_headless) so spatial reads see a fresh pipeline.
                     drain_cast_requests,
                     // Appearance pipeline (D6): drain client CustomizeMessage → update that
                     // player's PlayerCustomization + broadcast CustomizeBroadcast to all clients
-                    // (reliable), mirroring the cue broadcast. Ordered after sync_networked_players
-                    // so the ClientPlayerMap is populated.
+                    // (reliable), mirroring the cue broadcast. The ClientPlayerMap is populated by
+                    // `spawn_player_on_connect`.
                     drain_customize_requests,
                 ),
             )
-            // Best-of-3 round machine (Task 19, guide §7). `detect_round_end` reads the death stream
+            // Best-of-3 round machine (guide §7). `detect_round_end` reads the death stream
             // and credits the winner; `run_round_machine` drives the FSM (wait → countdown → active →
             // round/match over) + resets/respawns on each new round; `broadcast_round_state` ships
-            // the `RoundStateMessage` to every client on a phase/score/countdown change. Ordered after
-            // `sync_networked_players` so players exist before the machine counts them; `detect_round_end`
-            // before `run_round_machine` so a death this frame is consumed by the FSM the same frame.
+            // the `RoundStateMessage` to every client on a phase/score/countdown change.
+            // `detect_round_end` runs before `run_round_machine` so a death this frame is consumed by
+            // the FSM the same frame.
             .add_systems(
                 Update,
                 (detect_round_end, run_round_machine, broadcast_round_state).chain(),
@@ -103,7 +105,7 @@ fn spawn_floor(mut commands: Commands) {
 }
 
 /// Lookup: connected client id → their `NetworkedPlayer` entity. Populated by
-/// `sync_networked_players`; later tasks read it for cast attribution / input routing.
+/// `spawn_player_on_connect`; read for cast attribution / input routing.
 #[derive(Resource, Default)]
 pub struct ClientPlayerMap(pub HashMap<u64, Entity>);
 
@@ -353,7 +355,7 @@ fn trace_server_pose(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Cast pipeline (Task 14 + Milestone B): client cast_request → server fire along aim_dir.
+// Cast pipeline: client cast_request → server fire along aim_dir.
 //
 // The client sends a `CastRequestMessage` on the reliable `CastChannel` (it NEVER validates or
 // resolves — Stage A). The server maps the sender's `RemoteId` → caster entity via the
@@ -512,7 +514,7 @@ fn sync_cast_state(
 }
 
 // ---------------------------------------------------------------------------------------------
-// HP mirror (Task 18, guide §5.6): mirror obelisk life → replicated `NetworkedHealth`.
+// HP mirror (guide §5.6): mirror obelisk life → replicated `NetworkedHealth`.
 //
 // The obelisk sim owns the authoritative life (`Attributes`/`StatBlock.current_life`); the client
 // HUD must read a REPLICATED snapshot, not compute damage. Each `Update` we copy `life_of` +
@@ -521,7 +523,7 @@ fn sync_cast_state(
 //
 // We write the component every frame the value differs (not unconditionally) so lightyear only
 // ships a delta on a real hp change — and so a throttled trace fires exactly on the hp drop the
-// headless [H] check asserts (50 → 30 after the first firebolt hit).
+// headless net-test asserts (50 → 30 after the first firebolt hit).
 // ---------------------------------------------------------------------------------------------
 
 /// Mirror each networked player's obelisk life into its replicated `NetworkedHealth`. Reads
@@ -551,7 +553,7 @@ fn sync_networked_health(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Cast-timeline asset loading (Task 13): the authoritative sim needs the `.cast.ron` timelines in
+// Cast-timeline asset loading: the authoritative sim needs the `.cast.ron` timelines in
 // `CastTimelineHandles`, else `validate_casts` rejects every cast with `TimelineMissing`. Mirrors
 // the windowed client's `load_cast_assets`/`poll_cast_assets`, headless. One handle per registered
 // obelisk skill, loaded from `assets/skills/<id>.cast.ron`.
@@ -637,7 +639,7 @@ fn trace_server_net_events(mut net: MessageReader<obelisk_bevy::net::NetEvent>) 
 }
 
 // =============================================================================================
-// Best-of-3 round state machine (Task 19, guide §7).
+// Best-of-3 round state machine (guide §7).
 //
 // The server owns the match flow and broadcasts it as a `RoundStateMessage` on the reliable
 // `EventChannel`. Flow:
@@ -900,7 +902,7 @@ fn reset_for_new_round(
     commands: &mut Commands,
     client_map: &ClientPlayerMap,
 ) {
-    // Stable slot assignment: order client ids the same way `sync_networked_players` did (insertion
+    // Stable slot assignment: order client ids the same way `spawn_player_on_connect` did (insertion
     // order isn't stable across a HashMap, so sort by client id for determinism).
     let mut ordered: Vec<(u64, Entity)> = client_map.0.iter().map(|(k, v)| (*k, *v)).collect();
     ordered.sort_by_key(|(cid, _)| *cid);
@@ -979,9 +981,9 @@ mod tests {
     use super::cast_phase_byte;
     use obelisk_bevy::prelude::SkillPhase;
 
-    /// The phase→byte mapping the client decodes (`NetworkedPosition.cast_phase`): no cast → 0,
+    /// The phase→byte mapping the client decodes (`NetworkedCastState.cast_phase`): no cast → 0,
     /// Windup → 1, Active → 2, Recovery → 3; the terminal `Done` (obelisk removes ActiveCast on it)
-    /// collapses to 0. Pins Bug 1a's wire contract.
+    /// collapses to 0. Pins the cast-state wire contract.
     #[test]
     fn cast_phase_byte_maps_each_phase() {
         assert_eq!(cast_phase_byte(None), 0);

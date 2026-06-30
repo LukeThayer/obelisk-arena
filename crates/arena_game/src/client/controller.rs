@@ -1,20 +1,18 @@
 //! First-person camera controller for the arena player.
 //!
-//! Three concerns, all kinematic (no avian rigidbody on the player — obelisk's
-//! spatial model owns the authoritative hitboxes; the player moves by writing
-//! `Transform.translation` directly):
+//! Two concerns (movement is NOT here — that's the predicted avian Dynamic body in
+//! `client/net.rs`, driven by `ActionState<ArenaInput>` + the shared force controller):
 //!
-//!   1. **First-person camera** — the camera sits at the local player's eye height
-//!      (`EYE_HEIGHT` above the player root). Camera yaw is driven by accumulated
-//!      mouse-X each frame; pitch by mouse-Y. Rotation is
+//!   1. **Mouse-look + first-person camera follow** — accumulated mouse-X feeds
+//!      [`CameraYaw`], mouse-Y feeds [`AimPitch`]; `follow_local_net_player` then
+//!      places the [`FollowCamera`] at the local player's eye height (`EYE_HEIGHT`
+//!      above the player root) with rotation
 //!      `Quat::from_axis_angle(Y, yaw) * Quat::from_axis_angle(X, pitch)` so the
-//!      cam looks exactly where the mouse aims. The local player's own body is hidden
-//!      (see `present::LocalPlayerBody`) so the camera is never inside a mesh.
-//!   2. **Camera-relative WASD movement** — moves the player's `Transform`
-//!      directly (`dir * speed * dt`); rotates the body to face the movement
-//!      direction; records `world_velocity` (frame delta) for the Task 12
-//!      locomotion blend.
-//!   3. **Aim spine-pitch** — the `chest_joint` lean, copied verbatim from
+//!      cam looks exactly where the mouse aims. The yaw/pitch resources are also read
+//!      by the input bridge to aim the predicted controller + cast direction. The
+//!      local player's own body is hidden (see `present::LocalPlayerBody`) so the
+//!      camera is never inside a mesh.
+//!   2. **Aim spine-pitch** — the `chest_joint` lean, copied verbatim from
 //!      wisp's `apply_aim_pitch_to_local_spine` (`wisp/src/player/controller.rs`),
 //!      renaming the body marker to [`ArenaBody`] and reading the pitch from the
 //!      [`AimPitch`] resource (mouse-Y). Applied only to REMOTE (opponent) bodies;
@@ -30,8 +28,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use super::present::LocalPlayerBody;
 use super::rig::ArenaBody;
 
-/// Marker on the player combatant root that this controller drives. Spawned in
-/// Marker on the over-the-shoulder follow camera.
+/// Marker on the first-person follow camera.
 #[derive(Component)]
 pub struct FollowCamera;
 
@@ -92,11 +89,10 @@ pub struct AimPitchLocked(pub bool);
 
 /// Plugin: registers the controller resources + the NET-CLIENT-appropriate systems.
 ///
-/// M2.5 Task 21 repurposed this from the M1 co-located controller (which moved a `PlayerController`
-/// Transform directly) to the NETWORKED windowed client. Movement is now server-authoritative +
-/// client-predicted (`client::prediction` integrates the local body's avian `Position` from
-/// `LocalInput`), so this plugin NO LONGER moves a Transform — `move_player` is gone. What it keeps
-/// is the net-agnostic mouse-look + the camera follow + the spine-pitch aim lean:
+/// Movement is server-authoritative + client-predicted: `net::client_apply_movement` (with the
+/// shared force controller) runs on the local `Predicted` entity under lightyear rollback, so this
+/// plugin NO LONGER moves a Transform. What it keeps is the net-agnostic mouse-look + the camera
+/// follow + the spine-pitch aim lean:
 ///
 /// `Update`: `cursor_grab`, then `accumulate_mouse_look` (mouse → `CameraYaw`/`AimPitch` resources,
 /// read by `client::mod::bridge_windowed_input_to_local_input` to drive the server controller), then

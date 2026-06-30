@@ -2,9 +2,10 @@
 //! spawns a netcode server entity bound to `ServerBind`, attaches a `ReplicationSender` to each new
 //! client link, and logs connections.
 //!
-//! `spawn_server` + `on_new_link` are copied from `wisp/src/net/server.rs:154-176`; the imports +
-//! `ServerPlugins { tick_duration }` shape are verified against the installed lightyear 0.26.4
-//! source (`lightyear-0.26.4/src/server.rs`).
+//! `spawn_server` + `on_new_link` are adapted from `wisp/src/net/server.rs:154-176` (diverges:
+//! triggers `Start` not `LinkStart`, and attaches an explicit
+//! `ReplicationSender::new(100ms, SinceLastAck, false)`); the imports + `ServerPlugins { tick_duration }`
+//! shape are verified against the installed lightyear 0.26.4 source (`lightyear-0.26.4/src/server.rs`).
 
 use core::time::Duration;
 use std::net::SocketAddr;
@@ -21,6 +22,8 @@ use serde_json::json;
 use crate::net::{default_server_addr, ProtocolPlugin, NETCODE_KEY, PROTOCOL_ID, TICK_HZ};
 use crate::trace;
 
+/// Plugin: server-side lightyear net stack — `ServerPlugins` + `ProtocolPlugin` + trace, spawns the
+/// netcode server entity bound to `ServerBind`, and attaches a `ReplicationSender` per client link.
 pub struct ServerNetPlugin;
 
 impl Plugin for ServerNetPlugin {
@@ -85,7 +88,7 @@ fn on_new_link(trigger: On<Add, LinkOf>, mut commands: Commands) {
     ));
 }
 
-/// Log + trace each handshake completion. Copied from `wisp/src/net/server.rs:178-193`.
+/// Log + trace each handshake completion. Adapted from `wisp/src/net/server.rs:178-193`.
 fn on_client_connected(trigger: On<Add, Connected>, clients: Query<&RemoteId, With<ClientOf>>) {
     let Ok(RemoteId(peer_id)) = clients.get(trigger.entity) else {
         return;

@@ -1,11 +1,11 @@
-//! Windowed client HUD (Task 18 + Task 19, guide §5.6, §6.6, §7).
+//! Windowed client HUD (guide §5.6, §6.6, §7).
 //!
 //! Pure presentation — every value shown is REPLICATED from the server, never computed client-side
 //! (Stage-A invariant). Three surfaces:
 //!   1. **HP bars** (`NetworkedHealth`-driven `bevy_ui` `Node`s) for the local player + the opponent.
 //!   2. **Floating damage numbers + hit flash** spawned from the replicated `DamageResolved`
 //!      (`NetEventMessage`), the target looked up by its replicated `ObeliskNetId`.
-//!   3. **Round/score label + countdown** driven by the replicated `RoundStateMessage` (Task 19).
+//!   3. **Round/score label + countdown** driven by the replicated `RoundStateMessage`.
 //!
 //! This module is added ONLY by the windowed client (`run_windowed_client`); the headless client has
 //! no `bevy_ui`/cameras. The HP-drop + round transitions are still observable headlessly via the
@@ -434,7 +434,7 @@ fn age_hit_flashes(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Round/score HUD (Task 19) — driven by the replicated RoundStateMessage.
+// Round/score HUD — driven by the replicated RoundStateMessage.
 // ---------------------------------------------------------------------------------------------
 
 /// Latest round state received from the server, rendered by `update_round_label`.

@@ -2,9 +2,10 @@
 //! materialized networked player so BOTH the local + remote players render as the real M1 rig
 //! (`rig.rs`) rather than the bare capsule. Windowed-only — the headless client has no rendering.
 //!
-//! The server replicates each player as a `NetworkedPlayer` + identity + pose stream;
-//! `client::net::materialize_replicated_players` gives each a local avian render-proxy body + a
-//! `Transform`. This module hangs the `character.glb` `ArenaBody` scene under that body (as a child,
+//! The server replicates each player as a `NetworkedPlayer` + identity + avian `Position`/`Rotation`;
+//! `client::net::materialize_predicted_players` (local Dynamic body) /
+//! `materialize_interpolated_players` (remotes, lightyear-driven pose) tag each with
+//! `MaterializedBody`. This module hangs the `character.glb` `ArenaBody` scene under that body (as a child,
 //! with the same π gltf-yaw offset M1 used) + the `LocalAnimBlend` the rig animation driver reads, so
 //! the player appears as a costumed character. Idempotent via [`RigAttached`] (polls for new
 //! replicas + the late joiner).
@@ -71,15 +72,14 @@ fn attach_rig_to_players(
     for (player, is_local) in &new_players {
         let scene: Handle<Scene> =
             assets.load(GltfAssetLabel::Scene(0).from_asset("character.glb"));
-        // The π yaw offset is the gltf import convention M1 relied on (the character's mesh
-        // faces +Z after this) so `NetworkedPosition.yaw` (body facing) reads correctly.
+        // The π yaw offset is the gltf import convention (the character's mesh
+        // faces +Z after this) so the replicated avian `Rotation` (body facing) reads correctly.
         //
-        // The `character.glb` is FEET-ROOTED — the model's feet sit at its scene origin. Attached at
-        // the player origin with no Y offset, the feet float at the origin (world 1.0). But the player
-        // origin is the CENTER of the hurtbox capsule (`server::sync_networked_players`,
-        // `capsule(0.45,1.1)`, extent ±1.0 → bottom at origin−1.0) and the green platform sits at
-        // origin−1.0 (world 0). So shift the body DOWN by 1.0 to line the feet up with the bottom of
-        // the hitbox and rest them on the platform. (Matches wisp's `body_offset` for this glb.)
+        // The `character.glb` is FEET-ROOTED — the model's feet sit at its scene origin. The player
+        // origin is the CENTER of the body capsule (`Collider::capsule(0.35, 0.48)`, spawned in
+        // `server::spawn_player_on_connect`), which rests with its center at world `GROUND_Y` (0.59)
+        // and its bottom on the floor (world 0). So shift the body DOWN by `RIG_FOOT_OFFSET` (-0.62)
+        // to line the model's feet up with the bottom of the capsule and rest them on the platform.
         let base_tf = Transform::from_translation(Vec3::Y * RIG_FOOT_OFFSET)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::PI));
         let body = if is_local {

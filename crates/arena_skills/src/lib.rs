@@ -73,7 +73,7 @@ pub struct LaneEvent {
     pub lane_id: String,
     /// Which timeline moment this lane reacts to.
     pub kind: CueKind,
-    /// Particle burst params (M1 uses this for muzzle + impact).
+    /// Particle burst params (used for muzzle + impact).
     #[serde(default)]
     pub particle: Option<ParticleSpec>,
     /// Cosmetic (non-authoritative) projectile to spawn for OnCast/OnWindow lanes.

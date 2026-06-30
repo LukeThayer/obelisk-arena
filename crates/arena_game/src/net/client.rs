@@ -19,6 +19,8 @@ use serde_json::json;
 use crate::net::{default_server_addr, ProtocolPlugin, NETCODE_KEY, PROTOCOL_ID, TICK_HZ};
 use crate::trace;
 
+/// Plugin: client-side lightyear net stack — `ClientPlugins` + `ProtocolPlugin` + trace, and spawns
+/// the netcode client entity with its `ConnectTo` target.
 pub struct ClientNetPlugin;
 
 impl Plugin for ClientNetPlugin {

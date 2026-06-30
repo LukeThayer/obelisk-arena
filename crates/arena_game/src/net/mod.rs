@@ -32,7 +32,7 @@ pub const TICK_HZ: u32 = 60;
 /// MEASURED geometry (the `character.glb` body AABB, feet-rooted): the model is ~1.18 tall, so with
 /// the player origin at the BODY CENTER (see `GROUND_Y` / `present::RIG_FOOT_OFFSET`) the feet sit at
 /// origin Y−0.59 and the head at origin Y+0.59. `+0.5` puts the eye just below the top of the head =
-/// natural first-person eye level. The HURTBOX capsule (`server::sync_networked_players`) spans origin
+/// natural first-person eye level. The HURTBOX capsule (`server::spawn_player_on_connect`) spans origin
 /// Y±0.59 = feet→head, so the eye-height muzzle fires from inside the body span and a level shot lands.
 pub const ARENA_EYE_HEIGHT: f32 = 0.5;
 
