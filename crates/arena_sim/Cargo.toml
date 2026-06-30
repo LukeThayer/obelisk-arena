@@ -1,0 +1,15 @@
+[package]
+name = "arena_sim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = { workspace = true }
+avian3d = { workspace = true }
+obelisk-bevy = { workspace = true }
+stat_core = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+obelisk-bevy = { workspace = true, features = ["test-support"] }
+stat_core = { workspace = true }

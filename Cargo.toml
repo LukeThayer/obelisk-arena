@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/arena_skills", "crates/arena_game"]
+members = ["crates/arena_skills", "crates/arena_game", "crates/arena_sim"]
 
 [workspace.package]
 edition = "2021"
@@ -34,3 +34,4 @@ stat_core = { path = "../obelisk/stat_core" }
 # bevy_vfx (../bevy_modal_editor/crates/bevy_vfx) deferred to the particle-upgrade milestone;
 # M1 uses a pure-Bevy emissive-billboard particle stand-in.
 arena_skills = { path = "crates/arena_skills" }
+arena_sim = { path = "crates/arena_sim" }
