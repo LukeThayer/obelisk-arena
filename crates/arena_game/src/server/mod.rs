@@ -95,7 +95,11 @@ impl Plugin for ArenaServerPlugin {
             )
             // Spawn each player when its client connects (canonical observer-driven spawn, so the
             // owner's replication sender is ready before Replicate/PredictionTarget resolve).
-            .add_observer(spawn_player_on_connect);
+            .add_observer(spawn_player_on_connect)
+            // Clean up the disconnected client's lookup + score entry (and drop the FSM below 2 if
+            // it lost a player), so a stale ghost id can't linger in the HUD/score or perturb the
+            // reset slot ordering.
+            .add_observer(cleanup_player_on_disconnect);
     }
 }
 
@@ -140,6 +144,20 @@ fn peer_to_u64(peer: &PeerId) -> Option<u64> {
             Some(*id)
         }
         _ => None,
+    }
+}
+
+/// Map a sorted-client-id slot to its `Faction`: slot 0 → `Player`, every other slot → `Enemy`.
+/// Extracted as a pure helper so the slot→faction mapping is unit-testable AND so the connect-time
+/// spawn and the per-round reset assign factions IDENTICALLY (by the same sorted-id slot). Because
+/// the slot comes from the sorted id list, the two duelists land on slots 0 and 1 regardless of
+/// connect order, so they can NEVER share a faction — which would make firebolt's `Enemies`
+/// hit-filter resolve zero hits and hang the match unwinnable (see invariant §11).
+fn faction_for_slot(slot: usize) -> Faction {
+    if slot == 0 {
+        Faction::Player
+    } else {
+        Faction::Enemy
     }
 }
 
@@ -200,12 +218,10 @@ fn spawn_player_on_connect(
     // can resolve a hit player→player, and `nearest_enemy` acquires the opponent. With obelisk's
     // 3-faction model (Player/Enemy/Neutral), a 2-player duel puts slot 0 on Player and slot 1
     // on Enemy — they are mutual enemies. (If both shared `Faction::Player`, every cast would
-    // pass validation but resolve ZERO hits — the filter rejects same-faction targets.)
-    let faction = if slot == 0 {
-        Faction::Player
-    } else {
-        Faction::Enemy
-    };
+    // pass validation but resolve ZERO hits — the filter rejects same-faction targets.) The same
+    // sorted-id slot drives `reset_for_new_round`, which RE-asserts this each round (so a
+    // connect-order race can't leave them sharing a faction once the round goes Active).
+    let faction = faction_for_slot(slot);
     let net_id = id_alloc.allocate();
     // Stable obelisk id per client. `make_combatant` enforces ObeliskId == StatBlock.id.
     let obelisk_id = format!("player_{client_id}");
@@ -293,6 +309,50 @@ fn spawn_player_on_connect(
     });
 
     client_map.0.insert(client_id, player);
+}
+
+/// Tear down per-client server state when a client's `Connected` is removed (disconnect). Removes
+/// the client from `ClientPlayerMap` and drops its score entry from `RoundState` so a stale ghost
+/// id can't linger in the HUD/score or perturb the sorted-slot ordering the reset depends on. If
+/// this drops the match below 2 players, fall any in-progress phase back to `WaitingForPlayers` so
+/// the survivor isn't hung in 'FIGHT!'/countdown forever. (lightyear despawns the disconnected
+/// player's replicated entity via its `ControlledBy` lifetime; this only owns the server-side
+/// resources keyed off the client.)
+fn cleanup_player_on_disconnect(
+    trigger: On<Remove, Connected>,
+    connections: Query<&RemoteId, With<ClientOf>>,
+    mut client_map: ResMut<ClientPlayerMap>,
+    mut round: ResMut<RoundState>,
+) {
+    let conn_entity = trigger.entity;
+    let Ok(RemoteId(peer_id)) = connections.get(conn_entity) else {
+        return;
+    };
+    let Some(client_id) = peer_to_u64(peer_id) else {
+        return;
+    };
+    if client_map.0.remove(&client_id).is_none() {
+        return; // not a spawned duelist (idempotent guard)
+    }
+    // Score is keyed by obelisk_id (`make_combatant` enforces it == "player_{client_id}").
+    let obelisk_id = format!("player_{client_id}");
+    round.scores.remove(&obelisk_id);
+
+    // Below 2 players: bail any in-progress (non-terminal) phase back to waiting so the survivor
+    // isn't stuck. MatchOver is terminal (hold the banner); WaitingForPlayers is already there.
+    if client_map.0.len() < 2 {
+        match round.phase {
+            RoundPhase::Countdown(_) | RoundPhase::Active | RoundPhase::RoundOver { .. } => {
+                round.phase = RoundPhase::WaitingForPlayers;
+                round.dirty = true;
+            }
+            RoundPhase::WaitingForPlayers | RoundPhase::MatchOver { .. } => {}
+        }
+    }
+    trace::event(
+        "player_disconnected",
+        json!({ "client_id": client_id, "obelisk_id": obelisk_id }),
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -739,10 +799,43 @@ impl RoundState {
     }
 }
 
-/// Detect a round ending: while `Active`, read obelisk's `EntityDied` stream. The SURVIVOR (the
-/// living player other than the one who died) wins the round; their score increments. Transition to
-/// `RoundOver` (or `MatchOver` if they reached the win threshold). Reads obelisk's `NetEvent` (stable
-/// string ids) via an independent cursor from the egress/trace readers.
+/// The outcome of the death(s) seen during an `Active` tick. Pure result of `round_outcome` so the
+/// winner-selection (and the double-KO draw) is unit-testable without booting an app.
+#[derive(Debug, PartialEq)]
+enum RoundOutcome {
+    /// No CURRENT player died this tick (a stray/non-player death) — the round continues.
+    Continue,
+    /// BOTH current players died the same tick — a draw: credit no one, replay the round.
+    Draw,
+    /// Exactly one current player survived — they win the round.
+    Winner(String),
+}
+
+/// Decide the round outcome from the current players (`all_ids`) and the obelisk ids that died THIS
+/// tick (`died_this_tick`). A double-KO (both current players in `died_this_tick`) is a `Draw`
+/// rather than arbitrarily crediting whichever corpse the death stream happened to yield first. A
+/// death of something that isn't a current player leaves the round running (`Continue`). Pure.
+fn round_outcome(all_ids: &[String], died_this_tick: &[String]) -> RoundOutcome {
+    let any_current_died = all_ids.iter().any(|id| died_this_tick.contains(id));
+    if !any_current_died {
+        return RoundOutcome::Continue;
+    }
+    let mut survivors = all_ids.iter().filter(|id| !died_this_tick.contains(id));
+    match (survivors.next(), survivors.next()) {
+        // Exactly one survivor among the current players → they win.
+        (Some(winner), None) => RoundOutcome::Winner(winner.clone()),
+        // Zero survivors (both died) → draw. (More than one survivor is impossible here: a current
+        // player died, so a 1v1 leaves at most one survivor.)
+        _ => RoundOutcome::Draw,
+    }
+}
+
+/// Detect a round ending: while `Active`, read obelisk's `EntityDied` stream. Collect ALL deaths
+/// this tick (don't break on the first) so a simultaneous double-KO is a DRAW (replay, credit no
+/// one) instead of arbitrarily crediting whichever corpse arrived first and maybe handing the
+/// match. Otherwise the SURVIVOR wins the round; their score increments and the phase transitions
+/// to `RoundOver` (or `MatchOver` at the win threshold). Reads obelisk's `NetEvent` (stable string
+/// ids) via an independent cursor from the egress/trace readers.
 fn detect_round_end(
     mut net: MessageReader<obelisk_bevy::net::NetEvent>,
     mut round: ResMut<RoundState>,
@@ -755,38 +848,55 @@ fn detect_round_end(
         for _ in net.read() {}
         return;
     }
+    // Collect every death this tick (not just the first) so a double-KO can be told apart.
+    let died_this_tick: Vec<String> = net
+        .read()
+        .filter_map(|ev| match ev {
+            NetEvent::EntityDied { target, .. } => Some(target.clone()),
+            _ => None,
+        })
+        .collect();
+    if died_this_tick.is_empty() {
+        return;
+    }
+    // Build the current-player id list only now that a relevant death occurred (not every Active
+    // frame).
     let all_ids: Vec<String> = players.iter().map(|o| o.0.clone()).collect();
-    for ev in net.read() {
-        let NetEvent::EntityDied { target, .. } = ev else {
-            continue;
-        };
-        // The winner is the OTHER player (the survivor). Robust against whether `killer` is set
-        // (a burn-DoT death may have no killer attribution).
-        let Some(winner) = all_ids.iter().find(|id| *id != target).cloned() else {
-            continue;
-        };
-        let wins = {
-            let w = round.scores.entry(winner.clone()).or_insert(0);
-            *w += 1;
-            *w
-        };
-        trace::event(
-            "round_won",
-            json!({ "winner": winner, "loser": target, "wins": wins }),
-        );
-        if wins >= ROUND_WINS_TO_MATCH {
-            round.phase = RoundPhase::MatchOver {
-                winner: winner.clone(),
-            };
-            trace::event("match_over", json!({ "winner": winner, "wins": wins }));
-        } else {
+    match round_outcome(&all_ids, &died_this_tick) {
+        RoundOutcome::Continue => {}
+        RoundOutcome::Draw => {
+            // Replay the round (same pause, no score change). RoundOver with an empty winner.
+            trace::event("round_draw", json!({ "died": died_this_tick }));
             round.phase = RoundPhase::RoundOver {
-                winner,
+                winner: String::new(),
                 remaining: ROUND_OVER_SECS,
             };
+            round.dirty = true;
         }
-        round.dirty = true;
-        break; // one death ends the round; ignore any same-frame extras
+        RoundOutcome::Winner(winner) => {
+            let loser = died_this_tick.first().cloned().unwrap_or_default();
+            let wins = {
+                let w = round.scores.entry(winner.clone()).or_insert(0);
+                *w += 1;
+                *w
+            };
+            trace::event(
+                "round_won",
+                json!({ "winner": winner, "loser": loser, "wins": wins }),
+            );
+            if wins >= ROUND_WINS_TO_MATCH {
+                round.phase = RoundPhase::MatchOver {
+                    winner: winner.clone(),
+                };
+                trace::event("match_over", json!({ "winner": winner, "wins": wins }));
+            } else {
+                round.phase = RoundPhase::RoundOver {
+                    winner,
+                    remaining: ROUND_OVER_SECS,
+                };
+            }
+            round.dirty = true;
+        }
     }
 }
 
@@ -805,6 +915,7 @@ fn run_round_machine(
             &mut Position,
             &mut LinearVelocity,
             &NetworkOwner,
+            &mut Faction,
         ),
         With<NetworkedPlayer>,
     >,
@@ -854,6 +965,13 @@ fn run_round_machine(
             }
         }
         RoundPhase::Active => {
+            // If a player vanished mid-duel, fall back to waiting (mirrors the Countdown arm) so a
+            // disconnect can't hang the survivor in 'FIGHT!' forever.
+            if player_count < 2 {
+                round.phase = RoundPhase::WaitingForPlayers;
+                round.dirty = true;
+                return;
+            }
             // On the rising edge into Active, reset + respawn both players for the new round.
             if round.needs_round_reset {
                 round.needs_round_reset = false;
@@ -882,8 +1000,10 @@ fn run_round_machine(
 }
 
 /// Per-round reset (runs on the Countdown→Active edge): heal every player to full, clear effects
-/// (drops a leftover burn DoT), interrupt any in-flight cast, and teleport both back to their fixed
-/// spawn markers (avian `Position`, zeroing `LinearVelocity` so a falling/jumping body lands clean).
+/// (drops a leftover burn DoT), interrupt any in-flight cast, RE-assert each player's `Faction` by
+/// sorted-id slot (so a connect-order race can never leave the two duelists sharing a faction —
+/// which would make every firebolt resolve zero hits), and teleport both back to their fixed spawn
+/// markers (avian `Position`, zeroing `LinearVelocity` so a falling/jumping body lands clean).
 /// lightyear replicates the Position reset; the predicted owner rolls back to it. Slot is by the
 /// player's connection order in `ClientPlayerMap` so the two land at the two markers consistently.
 #[allow(clippy::type_complexity)]
@@ -896,6 +1016,7 @@ fn reset_for_new_round(
             &mut Position,
             &mut LinearVelocity,
             &NetworkOwner,
+            &mut Faction,
         ),
         With<NetworkedPlayer>,
     >,
@@ -912,7 +1033,9 @@ fn reset_for_new_round(
         .map(|(i, (_, e))| (*e, i))
         .collect();
 
-    for (entity, net_id, mut attrs, mut position, mut lin_vel, _owner) in players.iter_mut() {
+    for (entity, net_id, mut attrs, mut position, mut lin_vel, _owner, mut faction) in
+        players.iter_mut()
+    {
         // Heal to full + restore mana + clear effects (drop any lingering DoT/buff).
         let max_life = attrs.0.computed_max_life();
         let max_mana = attrs.0.computed_max_mana();
@@ -924,7 +1047,9 @@ fn reset_for_new_round(
         commands.entity(entity).interrupt_cast();
 
         // Respawn at the fixed marker for this player's slot; zero velocity so the Dynamic body
-        // doesn't carry momentum (or a fall) into the new round.
+        // doesn't carry momentum (or a fall) into the new round. Re-assert the slot's faction too
+        // (same sorted-id slot), so the two are guaranteed OPPOSING factions before the round goes
+        // Active regardless of connect order — firebolt's `Enemies` filter can resolve hits.
         let slot = slot_of
             .get(&entity)
             .copied()
@@ -933,6 +1058,7 @@ fn reset_for_new_round(
         let spawn = SPAWN_MARKERS[slot];
         position.0 = spawn;
         lin_vel.0 = Vec3::ZERO;
+        *faction = faction_for_slot(slot);
 
         trace::event(
             "player_respawn",
@@ -978,8 +1104,8 @@ fn broadcast_round_state(
 
 #[cfg(test)]
 mod tests {
-    use super::cast_phase_byte;
-    use obelisk_bevy::prelude::SkillPhase;
+    use super::{cast_phase_byte, faction_for_slot, round_outcome, RoundOutcome};
+    use obelisk_bevy::prelude::{Faction, SkillPhase};
 
     /// The phase→byte mapping the client decodes (`NetworkedCastState.cast_phase`): no cast → 0,
     /// Windup → 1, Active → 2, Recovery → 3; the terminal `Done` (obelisk removes ActiveCast on it)
@@ -991,5 +1117,69 @@ mod tests {
         assert_eq!(cast_phase_byte(Some(SkillPhase::Active)), 2);
         assert_eq!(cast_phase_byte(Some(SkillPhase::Recovery)), 3);
         assert_eq!(cast_phase_byte(Some(SkillPhase::Done)), 0);
+    }
+
+    /// Slot 0 → Player, slot 1 → Enemy, and the two are always OPPOSING — so the two duelists can
+    /// never share a faction (which would make firebolt's `Enemies` filter resolve zero hits and
+    /// hang the match). The net-test uses ascending ids so it never exercises this; pin it here.
+    #[test]
+    fn faction_for_slot_assigns_opposing_factions() {
+        assert_eq!(faction_for_slot(0), Faction::Player);
+        assert_eq!(faction_for_slot(1), Faction::Enemy);
+        assert_ne!(faction_for_slot(0), faction_for_slot(1));
+    }
+
+    /// The slot→faction mapping is CONNECT-ORDER-INDEPENDENT: whichever client connected first,
+    /// each client keeps the SAME faction (derived from its position in the sorted id list), and
+    /// the two are always opposing. This is the property the faction-order fix guarantees.
+    #[test]
+    fn faction_slotting_is_connect_order_independent() {
+        // Map a pair of (client_id) given in CONNECT order → each client's faction (by sorted slot).
+        let factions_for = |connect_order: [u64; 2]| -> [Faction; 2] {
+            let mut sorted = connect_order.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            connect_order.map(|id| {
+                let slot = sorted.iter().position(|&s| s == id).unwrap();
+                faction_for_slot(slot)
+            })
+        };
+        let ab = factions_for([7, 42]); // client 7 connected first
+        let ba = factions_for([42, 7]); // client 42 connected first
+                                        // Client 7 keeps its faction regardless of who connected first; likewise client 42.
+        assert_eq!(ab[0], ba[1]); // client 7
+        assert_eq!(ab[1], ba[0]); // client 42
+                                  // ...and the two are always opposing.
+        assert_ne!(ab[0], ab[1]);
+        assert_ne!(ba[0], ba[1]);
+    }
+
+    /// A simultaneous double-KO (BOTH current players in the same tick's death set) is a `Draw`
+    /// (credit no one, replay) — NOT an arbitrary winner taken from whichever corpse arrived first.
+    #[test]
+    fn round_outcome_double_ko_is_draw() {
+        let players = vec!["player_1".to_string(), "player_2".to_string()];
+        // Both orderings of the death set must still be a draw (order-independence is the point).
+        for died in [
+            vec!["player_1".to_string(), "player_2".to_string()],
+            vec!["player_2".to_string(), "player_1".to_string()],
+        ] {
+            assert_eq!(round_outcome(&players, &died), RoundOutcome::Draw);
+        }
+    }
+
+    /// One death credits the SURVIVOR; a death of something that isn't a current player leaves the
+    /// round running (`Continue`).
+    #[test]
+    fn round_outcome_single_death_and_stray() {
+        let players = vec!["player_1".to_string(), "player_2".to_string()];
+        assert_eq!(
+            round_outcome(&players, &["player_1".to_string()]),
+            RoundOutcome::Winner("player_2".to_string())
+        );
+        assert_eq!(
+            round_outcome(&players, &["minion_99".to_string()]),
+            RoundOutcome::Continue
+        );
     }
 }
