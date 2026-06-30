@@ -322,7 +322,6 @@ fn release_keys_on_focus_loss(
 fn bridge_windowed_input_to_local_input(
     keys: Res<ButtonInput<KeyCode>>,
     yaw: Res<controller::CameraYaw>,
-    pitch: Res<controller::AimPitch>,
     mut local_input: ResMut<net::LocalInput>,
     customization: Option<Res<customization::CustomizationOpen>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
@@ -358,7 +357,6 @@ fn bridge_windowed_input_to_local_input(
     }
     local_input.movement = movement;
     local_input.yaw = yaw.0;
-    local_input.pitch = pitch.0;
     // SPACE jumps: the server controller (and the local prediction) apply manual gravity + a ground
     // clamp, so a grounded player holding Space launches up (JUMP_SPEED) and falls back to GROUND_Y.
     local_input.jump = keys.pressed(KeyCode::Space);
@@ -636,7 +634,6 @@ fn trace_replicated_round_state(
 fn automove_input(mut input: ResMut<net::LocalInput>, yaw: Res<controller::CameraYaw>) {
     input.movement = Vec2::new(0.0, 1.0);
     input.yaw = yaw.0;
-    input.pitch = 0.0;
     input.jump = false;
 }
 

@@ -39,7 +39,6 @@ use crate::shared_controller::{apply_arena_movement, apply_arena_yaw};
 pub struct LocalInput {
     pub movement: Vec2,
     pub yaw: f32,
-    pub pitch: f32,
     pub jump: bool,
 }
 
