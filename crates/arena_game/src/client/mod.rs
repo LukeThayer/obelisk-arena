@@ -205,9 +205,12 @@ pub fn run_windowed_client() {
     app.add_systems(
         Update,
         (
+            // Runs before the input bridge so a focus-loss frame clears stuck keys first.
+            release_keys_on_focus_loss,
             bridge_windowed_input_to_local_input,
             bridge_windowed_cast_hold,
-        ),
+        )
+            .chain(),
     );
 
     app.run();
@@ -301,6 +304,24 @@ fn bridge_windowed_cast_hold(
     }
 }
 
+/// Release all held keys/mouse buttons the instant the window loses focus. winit can DROP the
+/// key-RELEASE event across a focus change (alt-tab, clicking another window), which otherwise
+/// leaves `ButtonInput::pressed(..)` stuck "true" after refocus — the player then walks forever.
+/// `release_all` marks every held key as just-released so the next real key event re-establishes the
+/// true state. Pairs with the focus gate in `bridge_windowed_input_to_local_input`.
+fn release_keys_on_focus_loss(
+    mut focus: MessageReader<bevy::window::WindowFocused>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+) {
+    for ev in focus.read() {
+        if !ev.focused {
+            keys.release_all();
+            mouse.release_all();
+        }
+    }
+}
+
 /// Bridge the windowed third-person controller's input into [`net::LocalInput`] so the local
 /// player's movement is sent to the server (server-authoritative Stage-A movement). Reads the
 /// camera yaw (mouse-X driven) + WASD keys in the same camera-relative frame the controller uses
@@ -311,9 +332,20 @@ fn bridge_windowed_input_to_local_input(
     pitch: Res<controller::AimPitch>,
     mut local_input: ResMut<net::LocalInput>,
     customization: Option<Res<customization::CustomizationOpen>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
     // While the customizer is open, A/D orbit the preview camera — don't drive movement.
     if customization.map(|c| c.open).unwrap_or(false) {
+        local_input.movement = Vec2::ZERO;
+        local_input.jump = false;
+        return;
+    }
+    // Window not focused (alt-tab / clicked to another window): winit can DROP the key-RELEASE
+    // event, leaving `keys.pressed(..)` stuck "true" — so the player keeps walking in one direction
+    // and never stops. Treat an unfocused window as zero input. (Defends the common "starts walking
+    // and won't stop" symptom; on refocus the live key state resumes.)
+    let focused = windows.iter().next().map(|w| w.focused).unwrap_or(true);
+    if !focused {
         local_input.movement = Vec2::ZERO;
         local_input.jump = false;
         return;
