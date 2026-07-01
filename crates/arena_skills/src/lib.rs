@@ -188,6 +188,35 @@ pub enum VfxBindSource {
     },
 }
 
+/// Map `raw` into a clamped `0..1` fraction between `lo`/`hi`. Returns `0.0` for a degenerate
+/// range (`hi <= lo`). Pure math (no `bevy_vfx`), so `arena_skills` stays render-free.
+pub fn normalize(raw: f32, lo: f32, hi: f32) -> f32 {
+    if hi <= lo {
+        0.0
+    } else {
+        ((raw - lo) / (hi - lo)).clamp(0.0, 1.0)
+    }
+}
+
+/// Linearly interpolate `out_min`..`out_max` by the clamped fraction `t` (`0..1`).
+pub fn modulate(out_min: f32, out_max: f32, t: f32) -> f32 {
+    out_min + (out_max - out_min) * t.clamp(0.0, 1.0)
+}
+
+/// Resolve a [`VfxParamBinding`] against a raw `source_value` to a modulated output.
+///
+/// `Charge` treats the value as an already-`0..1` charge fraction (clamped); `Stat` normalizes the
+/// value between its `stat_min`/`stat_max`. The resulting `t` drives [`modulate`] over `min`..`max`.
+pub fn resolve_binding(b: &VfxParamBinding, source_value: f32) -> f32 {
+    let t = match &b.source {
+        VfxBindSource::Charge => source_value.clamp(0.0, 1.0),
+        VfxBindSource::Stat {
+            stat_min, stat_max, ..
+        } => normalize(source_value, *stat_min, *stat_max),
+    };
+    modulate(b.min, b.max, t)
+}
+
 /// The serde **wire shape** for a fired cue (M2).
 ///
 /// This is the engine-neutral payload that crosses the network: the obelisk `cue_id` VALUE (the
@@ -307,5 +336,54 @@ impl From<ObeliskCueKind> for CueKind {
             ObeliskCueKind::OnWindow => CueKind::OnWindow,
             ObeliskCueKind::OnHit => CueKind::OnHit,
         }
+    }
+}
+
+#[cfg(test)]
+mod vfxparam_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_clamps_and_maps_range() {
+        assert!((normalize(50.0, 0.0, 100.0) - 0.5).abs() < 1e-6);
+        assert_eq!(normalize(-10.0, 0.0, 100.0), 0.0);
+        assert_eq!(normalize(999.0, 0.0, 100.0), 1.0);
+        // Degenerate range (hi <= lo) yields 0.
+        assert_eq!(normalize(5.0, 3.0, 3.0), 0.0);
+    }
+
+    #[test]
+    fn modulate_interpolates_and_clamps_t() {
+        assert!((modulate(1.0, 3.0, 0.5) - 2.0).abs() < 1e-6);
+        assert_eq!(modulate(1.0, 3.0, -1.0), 1.0);
+        assert_eq!(modulate(1.0, 3.0, 2.0), 3.0);
+    }
+
+    #[test]
+    fn resolve_binding_charge_clamps_value_as_t() {
+        let b = VfxParamBinding {
+            param: "scale".into(),
+            source: VfxBindSource::Charge,
+            min: 0.2,
+            max: 1.0,
+        };
+        assert!((resolve_binding(&b, 0.5) - 0.6).abs() < 1e-6);
+        assert!((resolve_binding(&b, 0.0) - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_binding_stat_normalizes_value() {
+        let b = VfxParamBinding {
+            param: "scale".into(),
+            source: VfxBindSource::Stat {
+                stat: "power".into(),
+                stat_min: 0.0,
+                stat_max: 100.0,
+            },
+            min: 0.0,
+            max: 10.0,
+        };
+        assert!((resolve_binding(&b, 50.0) - 5.0).abs() < 1e-6);
+        assert!((resolve_binding(&b, 200.0) - 10.0).abs() < 1e-6);
     }
 }
