@@ -273,6 +273,7 @@ dependencies = [
  "bevy_editor_game",
  "bevy_modal_editor",
  "obelisk-bevy",
+ "ron 0.8.1",
 ]
 
 [[package]]

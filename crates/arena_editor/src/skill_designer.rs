@@ -39,12 +39,12 @@ pub struct SkillDesignerPlugin;
 impl Plugin for SkillDesignerPlugin {
     fn build(&self, app: &mut App) {
         register_skill_mode(app);
-        // Seed the designer with a blank firebolt timeline pointed at its canonical `.cast.ron`.
-        // Task 16 swaps this for load-or-blank.
-        app.insert_resource(EditedSkill::from_timeline(
-            blank_cast_timeline("firebolt"),
-            crate::io::editor_root().join("assets/skills/firebolt.cast.ron"),
-        ));
+        // Seed the designer with firebolt's real `.cast.ron` if it parses, else a blank timeline
+        // pointed at that canonical path (load-or-blank).
+        let path = crate::io::default_cast_path("firebolt");
+        let timeline = crate::io::load_cast_timeline(&path)
+            .unwrap_or_else(|_| blank_cast_timeline("firebolt"));
+        app.insert_resource(EditedSkill::from_timeline(timeline, path));
     }
 }
 

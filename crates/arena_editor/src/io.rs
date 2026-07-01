@@ -4,7 +4,8 @@
 //! `arena_game::arena_root()`: under `cargo`, `CARGO_MANIFEST_DIR` is `crates/arena_editor`, so the
 //! root is two levels up; otherwise fall back to the current working directory.
 
-use std::path::PathBuf;
+use obelisk_bevy::assets::CastTimeline;
+use std::path::{Path, PathBuf};
 
 /// The arena workspace root (two levels up from `crates/arena_editor`).
 pub fn editor_root() -> PathBuf {
@@ -16,4 +17,26 @@ pub fn editor_root() -> PathBuf {
             .unwrap_or_else(|| PathBuf::from(".")),
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     }
+}
+
+/// The canonical `.cast.ron` path for a skill id, under the workspace `assets/skills/` directory.
+pub fn default_cast_path(skill_id: &str) -> PathBuf {
+    editor_root().join(format!("assets/skills/{skill_id}.cast.ron"))
+}
+
+/// Serialize a `CastTimeline` to `path` as pretty RON, creating parent directories as needed.
+pub fn save_cast_timeline(tl: &CastTimeline, path: &Path) -> std::io::Result<()> {
+    let s = ron::ser::to_string_pretty(tl, ron::ser::PrettyConfig::new())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, s)
+}
+
+/// Parse a `CastTimeline` from a `.cast.ron` file, returning a human-readable error string on
+/// read/parse failure (so callers can fall back to a blank timeline).
+pub fn load_cast_timeline(path: &Path) -> Result<CastTimeline, String> {
+    let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    ron::de::from_str::<CastTimeline>(&s).map_err(|e| e.to_string())
 }
