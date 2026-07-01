@@ -7,9 +7,13 @@
 //! upgrade with no change to the `LaneEvent` contract. The authoritative hit stays in obelisk's
 //! `Hitbox`/`Projectile`; these cosmetics only react to the cues it fires.
 
+use crate::client::vfx_bind::bake_bindings;
 use crate::trace;
-use arena_skills::{resolve_cue, CueKind, CueMessage, SkillFxRegistry};
+use arena_skills::{
+    resolve_cue, CueKind, CueMessage, SkillFxRegistry, VfxBindSource, VfxParamBinding,
+};
 use bevy::prelude::*;
+use bevy_vfx::VfxLibrary;
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -83,6 +87,85 @@ pub fn init_cosmetic_assets(mut commands: Commands, mut meshes: ResMut<Assets<Me
     });
 }
 
+/// PreStartup (windowed client only): seed the `bevy_vfx` [`VfxLibrary`] with the built-in presets
+/// (`fire`/`explosion`/`sparks`/… — the same set the skill designer offers) + any authored overrides
+/// in `assets/vfx/` or `assets/skills/*.vfx.ron`. A `.skillfx.ron` particle/projectile lane whose
+/// `effect` names one of these renders the real GPU effect in-game; lanes with no `effect` keep the
+/// emissive-billboard stand-in. Mirrors the editor's `init_vfx_library` so authored → in-game is 1:1.
+pub fn init_vfx_library(mut library: ResMut<VfxLibrary>) {
+    for (name, system) in bevy_vfx::presets::default_presets() {
+        library.effects.entry(name.to_string()).or_insert(system);
+    }
+    for dir in ["assets/vfx", "assets/skills"] {
+        load_vfx_presets_from_dir(&mut library, dir);
+    }
+}
+
+/// Load every `<name>.vfx.ron` in `dir` (a `bevy_vfx::VfxSystem`) into the library keyed by `<name>`,
+/// overriding built-ins. Missing dir / unparseable file = skip with a warn (never crash on content).
+fn load_vfx_presets_from_dir(library: &mut VfxLibrary, dir: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(name) = fname.strip_suffix(".vfx.ron").filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        match std::fs::read_to_string(&path).map(|s| ron::from_str::<bevy_vfx::VfxSystem>(&s)) {
+            Ok(Ok(system)) => {
+                library.effects.insert(name.to_string(), system);
+            }
+            other => warn!("skipping vfx preset {path:?}: {other:?}"),
+        }
+    }
+}
+
+/// Try to spawn an authored `bevy_vfx` effect for a cosmetic lane. Returns `true` if it spawned the
+/// real GPU effect (caller then skips the billboard stand-in), `false` to fall back. Clones the named
+/// `VfxLibrary` preset, CPU-bakes its `VfxParamBinding`s from the live `charge` (stat sources → 0.0,
+/// the math is proven in `arena_skills`), and spawns it at `pos` + a `ParticleLifetime` so it despawns.
+/// `extra` lets the caller attach a `CosmeticProjectile` so a projectile effect flies.
+#[allow(clippy::too_many_arguments)]
+fn spawn_lane_vfx(
+    commands: &mut Commands,
+    library: Option<&VfxLibrary>,
+    effect: Option<&str>,
+    pos: Vec3,
+    offset: Vec3,
+    bindings: &[VfxParamBinding],
+    charge: f32,
+    duration: f32,
+    extra: Option<CosmeticProjectile>,
+) -> bool {
+    let Some(mut system) = effect
+        .zip(library)
+        .and_then(|(name, lib)| lib.effects.get(name).cloned())
+    else {
+        return false;
+    };
+    bake_bindings(&mut system, bindings, |b| match &b.source {
+        VfxBindSource::Charge => charge,
+        VfxBindSource::Stat { .. } => 0.0,
+    });
+    let mut e = commands.spawn((
+        system,
+        Transform::from_translation(pos + offset),
+        Visibility::default(),
+        ParticleLifetime {
+            elapsed: 0.0,
+            duration: duration.max(0.5),
+        },
+    ));
+    if let Some(proj) = extra {
+        e.insert(proj);
+    }
+    true
+}
+
 /// A short-lived cosmetic entity (particle billboard or cosmetic projectile). Despawned by
 /// `age_lifetimes` once `elapsed >= duration`.
 #[derive(Component)]
@@ -108,6 +191,7 @@ pub struct CosmeticProjectile {
 ///
 /// Emits one `lane_event` trace line per resolved lane (guide §6) so the cue dispatch is observable
 /// headlessly — the M1 regression gate greps the trace for these.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_cue_cosmetics(
     mut msgs: MessageReader<LocalCue>,
     registry: Res<SkillFxRegistry>,
@@ -115,7 +199,16 @@ pub fn spawn_cue_cosmetics(
     mut assets: ResMut<CosmeticAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     aim: Res<AimDirs>,
+    // Present only in the windowed client (the headless path never adds `bevy_vfx::VfxPlugin`, so
+    // this is `None` there and every lane falls back to the billboard — keeping the headless net-test
+    // path free of any GPU-particle dependency).
+    vfx_library: Option<Res<VfxLibrary>>,
 ) {
+    // Charge fraction used to bake `VfxBindSource::Charge` params. The `LocalCue` doesn't carry the
+    // cast's charge, so bake at full strength for now (stat-driven params fall back to 0.0). Threading
+    // the real per-cast charge is a later refinement.
+    let charge = 1.0;
+    let library = vfx_library.as_deref();
     for LocalCue(m) in msgs.read() {
         // Re-look-up the lanes bound to this cue id (an unbound cue resolves to an empty slice and
         // no-ops — spec §12: never crash on missing content).
@@ -148,32 +241,46 @@ pub fn spawn_cue_cosmetics(
                 }),
             );
 
-            // 1) Particle burst (emissive billboard stand-in). Reuse the cached unit quad + a
-            // color-keyed material so repeated casts don't grow the asset stores.
+            // 1) Particle burst. Prefer the authored `bevy_vfx` effect (real GPU particles, as in the
+            // designer preview); fall back to the emissive-billboard stand-in when the lane names no
+            // effect / it's missing from the library / the headless path has no VfxLibrary.
             if let Some(p) = &lane.particle {
-                let c = LinearRgba::rgb(p.color[0], p.color[1], p.color[2]);
-                let material = assets
-                    .particle_mats
-                    .entry(color_key(p.color))
-                    .or_insert_with(|| {
-                        materials.add(StandardMaterial {
-                            emissive: c * 2.0,
-                            base_color: Color::from(c),
-                            alpha_mode: AlphaMode::Blend,
-                            unlit: true,
-                            ..default()
+                let spawned_vfx = spawn_lane_vfx(
+                    &mut commands,
+                    library,
+                    p.effect.as_deref(),
+                    spawn_pos,
+                    p.offset,
+                    &p.param_bindings,
+                    charge,
+                    p.lifetime,
+                    None,
+                );
+                if !spawned_vfx {
+                    let c = LinearRgba::rgb(p.color[0], p.color[1], p.color[2]);
+                    let material = assets
+                        .particle_mats
+                        .entry(color_key(p.color))
+                        .or_insert_with(|| {
+                            materials.add(StandardMaterial {
+                                emissive: c * 2.0,
+                                base_color: Color::from(c),
+                                alpha_mode: AlphaMode::Blend,
+                                unlit: true,
+                                ..default()
+                            })
                         })
-                    })
-                    .clone();
-                commands.spawn((
-                    Mesh3d(assets.quad.clone()),
-                    MeshMaterial3d(material),
-                    Transform::from_translation(spawn_pos),
-                    ParticleLifetime {
-                        elapsed: 0.0,
-                        duration: p.lifetime,
-                    },
-                ));
+                        .clone();
+                    commands.spawn((
+                        Mesh3d(assets.quad.clone()),
+                        MeshMaterial3d(material),
+                        Transform::from_translation(spawn_pos),
+                        ParticleLifetime {
+                            elapsed: 0.0,
+                            duration: p.lifetime,
+                        },
+                    ));
+                }
             }
 
             // 2) Cosmetic flying projectile (OnCast lane only, for firebolt).
@@ -187,33 +294,47 @@ pub fn spawn_cue_cosmetics(
                 } else {
                     aim.0.get(&m.source_id).copied().unwrap_or(Vec3::Z)
                 };
-                let c = LinearRgba::rgb(proj.color[0], proj.color[1], proj.color[2]);
-                // Reuse the cached unit sphere (scaled to `proj.radius` via Transform) + a
-                // color-keyed material so each cast reuses handles instead of growing the stores.
-                let material = assets
-                    .projectile_mats
-                    .entry(color_key(proj.color))
-                    .or_insert_with(|| {
-                        materials.add(StandardMaterial {
-                            emissive: c * 3.0,
-                            base_color: Color::from(c),
-                            unlit: true,
-                            ..default()
+                let velocity = dir * proj.speed;
+                // Prefer an authored `bevy_vfx` trail effect flown along `velocity`; else the emissive
+                // sphere stand-in. Both carry `CosmeticProjectile` so they track the obelisk hitbox.
+                let spawned_vfx = spawn_lane_vfx(
+                    &mut commands,
+                    library,
+                    proj.effect.as_deref(),
+                    spawn_pos,
+                    Vec3::ZERO,
+                    &[],
+                    charge,
+                    2.0,
+                    Some(CosmeticProjectile { velocity }),
+                );
+                if !spawned_vfx {
+                    let c = LinearRgba::rgb(proj.color[0], proj.color[1], proj.color[2]);
+                    // Reuse the cached unit sphere (scaled to `proj.radius` via Transform) + a
+                    // color-keyed material so each cast reuses handles instead of growing the stores.
+                    let material = assets
+                        .projectile_mats
+                        .entry(color_key(proj.color))
+                        .or_insert_with(|| {
+                            materials.add(StandardMaterial {
+                                emissive: c * 3.0,
+                                base_color: Color::from(c),
+                                unlit: true,
+                                ..default()
+                            })
                         })
-                    })
-                    .clone();
-                commands.spawn((
-                    Mesh3d(assets.sphere.clone()),
-                    MeshMaterial3d(material),
-                    Transform::from_translation(spawn_pos).with_scale(Vec3::splat(proj.radius)),
-                    CosmeticProjectile {
-                        velocity: dir * proj.speed,
-                    },
-                    ParticleLifetime {
-                        elapsed: 0.0,
-                        duration: 2.0, // matches the .cast.ron window active_duration
-                    },
-                ));
+                        .clone();
+                    commands.spawn((
+                        Mesh3d(assets.sphere.clone()),
+                        MeshMaterial3d(material),
+                        Transform::from_translation(spawn_pos).with_scale(Vec3::splat(proj.radius)),
+                        CosmeticProjectile { velocity },
+                        ParticleLifetime {
+                            elapsed: 0.0,
+                            duration: 2.0, // matches the .cast.ron window active_duration
+                        },
+                    ));
+                }
             }
         }
     }
