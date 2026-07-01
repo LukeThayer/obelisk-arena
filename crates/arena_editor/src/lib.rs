@@ -11,6 +11,7 @@
 use bevy::prelude::*;
 use bevy_modal_editor::{EditorPlugin, EditorPluginConfig, GamePlugin};
 
+pub mod edits;
 pub mod io;
 pub mod model;
 pub mod sim_config;
