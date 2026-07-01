@@ -34,6 +34,9 @@ impl Plugin for SkillDesignerPlugin {
         app.add_plugins(crate::preview_controller::PreviewControllerPlugin);
         // Draw the selected hit-window's shape as a viewport gizmo while in Skill mode.
         app.add_systems(Update, crate::gizmo::draw_window_gizmo);
+        // Index named rig sockets under the preview caster so cosmetic lanes can bind to bones.
+        app.init_resource::<crate::socket::RigSockets>()
+            .add_systems(Update, crate::socket::index_rig_sockets);
         // Seed the designer with firebolt's real `.cast.ron` if it parses, else a blank timeline
         // pointed at that canonical path (load-or-blank).
         let path = crate::io::default_cast_path("firebolt");
