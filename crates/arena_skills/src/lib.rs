@@ -14,7 +14,7 @@ use std::path::Path;
 
 /// Authored cosmetic layer for one skill, loaded from `<skill>.skillfx.ron`.
 /// Mirrors obelisk's `CastTimeline`: a serde-deserialized RON asset keyed by `skill_id`.
-#[derive(Asset, TypePath, Debug, Clone, Deserialize)]
+#[derive(Asset, TypePath, Debug, Clone, Serialize, Deserialize)]
 pub struct SkillFx {
     pub skill_id: String,
     /// Maps an obelisk cue slot key — the cue_id VALUE obelisk fires (e.g. `"firebolt_cast"` /
@@ -104,6 +104,19 @@ pub struct ParticleSpec {
     pub color: [f32; 3],
     #[serde(default = "default_speed")]
     pub speed: f32,
+    /// Named `bevy_vfx` effect to spawn (authoring-only; the editor bakes/spawns it). `None` =
+    /// fall back to the legacy emissive-billboard stand-in.
+    #[serde(default)]
+    pub effect: Option<String>,
+    /// Rig socket to attach the burst to (e.g. `"wand_tip"`). `None` = spawn at the cue position.
+    #[serde(default)]
+    pub socket: Option<String>,
+    /// Local-space offset from the socket / cue position.
+    #[serde(default)]
+    pub offset: Vec3,
+    /// Bindings that modulate `bevy_vfx` params from live sources (charge / stats).
+    #[serde(default)]
+    pub param_bindings: Vec<VfxParamBinding>,
 }
 fn default_lifetime() -> f32 {
     0.5
@@ -121,6 +134,12 @@ pub struct ProjectileCosmetic {
     pub color: [f32; 3],
     #[serde(default = "default_proj_radius")]
     pub radius: f32,
+    /// Named `bevy_vfx` trail/effect to attach to the cosmetic projectile. `None` = plain mesh.
+    #[serde(default)]
+    pub effect: Option<String>,
+    /// Rig socket the projectile launches from (e.g. `"wand_tip"`). `None` = spawn at cue position.
+    #[serde(default)]
+    pub socket: Option<String>,
 }
 fn default_proj_radius() -> f32 {
     0.2
@@ -129,7 +148,44 @@ fn default_proj_radius() -> f32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnimLayer {
     /// Logical anim state name, mapped to a clip node in arena_game's AnimationGraph.
+    #[serde(default)]
     pub state: String,
+    /// Explicit clip name to play on `layer` (authoring-side; overrides `state` when set).
+    #[serde(default)]
+    pub clip: Option<String>,
+    /// Animation-graph layer index this lane drives.
+    #[serde(default)]
+    pub layer: u32,
+    /// Blend weight for the layer (0..1).
+    #[serde(default = "default_weight")]
+    pub weight: f32,
+}
+fn default_weight() -> f32 {
+    1.0
+}
+
+/// A binding that modulates a named `bevy_vfx` param from a live gameplay source at spawn time.
+/// Pure DATA — the modulation math (`normalize`/`modulate`/`resolve_binding`) lives in a later task
+/// and returns plain `f32`/`Color`, so `arena_skills` stays `bevy_vfx`-free.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VfxParamBinding {
+    pub param: String,
+    pub source: VfxBindSource,
+    pub min: f32,
+    pub max: f32,
+}
+
+/// Where a [`VfxParamBinding`] reads its 0..1 driver from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum VfxBindSource {
+    /// The caster's charge fraction (0..1) at cue time.
+    Charge,
+    /// A caster stat normalized between `stat_min`/`stat_max`.
+    Stat {
+        stat: String,
+        stat_min: f32,
+        stat_max: f32,
+    },
 }
 
 /// The serde **wire shape** for a fired cue (M2).
