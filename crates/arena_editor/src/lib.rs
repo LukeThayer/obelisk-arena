@@ -15,14 +15,14 @@ pub mod edits;
 pub mod enum_ui;
 pub mod io;
 pub mod model;
+pub mod preview_controller;
 pub mod sim_config;
 pub mod skill_designer;
 pub mod timeline_geom;
 pub use model::{blank_cast_timeline, derive_vfx_cues, EditedSkill};
+pub use preview_controller::PreviewControllerPlugin;
 pub use sim_config::PreviewSimConfigPlugin;
-pub use skill_designer::{
-    register_skill_mode, spawn_preview_on_startup, SkillDesignerPlugin, SKILL_MODE_ID,
-};
+pub use skill_designer::{register_skill_mode, SkillDesignerPlugin, SKILL_MODE_ID};
 
 /// Build a HEADLESS editor `App` for tests. The editor's render-dependent sub-plugins (outliner
 /// JFA, grid material, gaussian splatting, wireframe, …) require the `RenderApp` sub-app even to

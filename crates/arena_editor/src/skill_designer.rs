@@ -26,19 +26,15 @@ pub fn register_skill_mode(app: &mut App) {
     });
 }
 
-/// Spawn the idle preview mini-world (a caster + a target dummy on the floor) at editor startup.
-/// In `Editing` it just sits there; the Play/Reset lifecycle (M2) drives the actual cast. Delegates
-/// to `arena_sim` so the preview is byte-identical to the live game's combatant recipe.
-pub fn spawn_preview_on_startup(mut commands: Commands) {
-    arena_sim::preview::spawn_preview_world(&mut commands);
-}
-
 /// Plugin that registers the Skill mode. Added by the windowed binary + the headless editor app.
 pub struct SkillDesignerPlugin;
 
 impl Plugin for SkillDesignerPlugin {
     fn build(&self, app: &mut App) {
         register_skill_mode(app);
+        // The preview lifecycle: a persistent floor at Startup + the Play→duel handler (retires the
+        // old idle-startup combatant spawn — combatants now spawn on `GameStartedEvent`).
+        app.add_plugins(crate::preview_controller::PreviewControllerPlugin);
         // Seed the designer with firebolt's real `.cast.ron` if it parses, else a blank timeline
         // pointed at that canonical path (load-or-blank).
         let path = crate::io::default_cast_path("firebolt");

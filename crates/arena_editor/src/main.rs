@@ -19,8 +19,8 @@ fn main() {
         // deterministic sim (same content as the game).
         .add_plugins(arena_editor::sim_config::PreviewSimConfigPlugin)
         // The preview mini-world runs the real obelisk sim (ArenaSimPreviewPlugin owns plain-Avian
-        // physics + Gravity + obelisk); spawn the idle caster+dummy at startup.
+        // physics + Gravity + obelisk). The persistent floor is spawned at Startup and the
+        // caster+dummy duel on Play, both by the `PreviewControllerPlugin` in `SkillDesignerPlugin`.
         .add_plugins(arena_sim::preview::ArenaSimPreviewPlugin)
-        .add_systems(Startup, arena_editor::spawn_preview_on_startup)
         .run();
 }
