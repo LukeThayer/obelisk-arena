@@ -15,6 +15,9 @@ fn main() {
         }))
         .add_plugins(GamePlugin)
         .add_plugins(arena_editor::SkillDesignerPlugin)
+        // Load obelisk constants/effects/skills + seed the combat RNG so the preview runs the real
+        // deterministic sim (same content as the game).
+        .add_plugins(arena_editor::sim_config::PreviewSimConfigPlugin)
         // The preview mini-world runs the real obelisk sim (ArenaSimPreviewPlugin owns plain-Avian
         // physics + Gravity + obelisk); spawn the idle caster+dummy at startup.
         .add_plugins(arena_sim::preview::ArenaSimPreviewPlugin)
