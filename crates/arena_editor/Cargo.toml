@@ -24,6 +24,7 @@ arena_sim = { path = "../arena_sim" }
 arena_skills = { path = "../arena_skills" }
 bevy_modal_editor = { path = "../../../bevy_modal_editor" }
 bevy_editor_game = { path = "../../../bevy_modal_editor/crates/bevy_editor_game" }
+bevy_vfx = { path = "../../../bevy_modal_editor/crates/bevy_vfx" }
 bevy_egui = { git = "https://github.com/vladbat00/bevy_egui", branch = "main" }
 ron = "0.8"
 
