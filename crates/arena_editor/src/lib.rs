@@ -12,8 +12,10 @@ use bevy::prelude::*;
 use bevy_modal_editor::{EditorPlugin, EditorPluginConfig, GamePlugin};
 
 pub mod io;
+pub mod model;
 pub mod sim_config;
 pub mod skill_designer;
+pub use model::{blank_cast_timeline, derive_vfx_cues, EditedSkill};
 pub use sim_config::PreviewSimConfigPlugin;
 pub use skill_designer::{
     register_skill_mode, spawn_preview_on_startup, SkillDesignerPlugin, SKILL_MODE_ID,

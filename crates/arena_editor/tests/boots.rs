@@ -17,3 +17,13 @@ fn editor_app_registers_the_editor_mode_state() {
     let app = arena_editor::build_editor_app();
     assert!(app.world().contains_resource::<State<EditorMode>>());
 }
+
+#[test]
+fn skill_designer_inits_an_edited_skill_resource() {
+    use arena_editor::model::EditedSkill;
+    let mut app = arena_editor::build_editor_app();
+    app.add_plugins(arena_editor::SkillDesignerPlugin);
+    let edited = app.world().resource::<EditedSkill>();
+    assert!(!edited.timeline.skill_id.is_empty());
+    assert!(edited.timeline.phase_durations.windup > 0.0);
+}
