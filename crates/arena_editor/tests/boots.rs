@@ -27,3 +27,22 @@ fn skill_designer_inits_an_edited_skill_resource() {
     assert!(!edited.timeline.skill_id.is_empty());
     assert!(edited.timeline.phase_durations.windup > 0.0);
 }
+
+#[test]
+fn skill_mode_panel_and_playhead_wired() {
+    use bevy_modal_editor::{CustomModeId, CustomModeRegistry};
+    let mut app = arena_editor::build_editor_app();
+    app.add_plugins(arena_editor::SkillDesignerPlugin);
+    let reg = app.world().resource::<CustomModeRegistry>();
+    assert!(reg
+        .lookup(CustomModeId(arena_editor::SKILL_MODE_ID))
+        .is_some());
+    assert!(app
+        .world()
+        .get_resource::<arena_editor::model::EditedSkill>()
+        .is_some());
+    assert!(app
+        .world()
+        .get_resource::<arena_editor::preview_controller::Playhead>()
+        .is_some());
+}

@@ -1,0 +1,266 @@
+//! The bottom-dock phase-timeline egui panel — the skill designer's main authoring surface.
+//!
+//! `draw_skill_panel` is dispatched by the editor's `dispatch_custom_panel` while in Skill mode. It
+//! is an egui shell over the pure helpers (`timeline_geom` / `edits` / `enum_ui` / `model` / `io`):
+//!   - a header row: skill id + targeting/delivery ComboBoxes + Save;
+//!   - windup/active/recovery `DragValue`s;
+//!   - a painted strip: phase bands (top half) + collision-window bars (bottom half) + a live
+//!     playhead line driven by `Playhead`;
+//!   - a hit-windows list (id/shape/motion/filter/mode/phase/offset/duration + select) + Add-Window.
+//! All edits flip `dirty`; Save derives the locked vfx cues and writes the `.cast.ron`.
+//!
+//! Runs only windowed (needs a real egui context); `cargo build` is the compile gate and the boot
+//! test asserts the resource/registration wiring. The pure helpers it calls are unit-tested in their
+//! own modules.
+
+use bevy::prelude::*;
+use bevy_egui::{egui, EguiContexts};
+use obelisk_bevy::assets::{HitFilter, HitMode, WindowPhase};
+
+use crate::edits::add_collision_window;
+use crate::enum_ui::{
+    delivery_index, delivery_variant, motion_index, motion_variant, shape_index, shape_variant,
+    targeting_index, targeting_variant, DELIVERY_LABELS, MOTION_LABELS, SHAPE_LABELS,
+    TARGETING_LABELS,
+};
+use crate::io::save_cast_timeline;
+use crate::model::{derive_vfx_cues, EditedSkill};
+use crate::preview_controller::Playhead;
+use crate::timeline_geom::{phase_spans, time_to_x, total_duration, window_span};
+
+const STRIP_H: f32 = 40.0;
+const PHASE_COLORS: [egui::Color32; 3] = [
+    egui::Color32::from_rgb(60, 80, 130),
+    egui::Color32::from_rgb(130, 70, 60),
+    egui::Color32::from_rgb(60, 110, 80),
+];
+
+/// Draw the bottom-dock timeline panel and apply its edits to `EditedSkill`.
+pub fn draw_skill_panel(
+    mut contexts: EguiContexts,
+    mut edited: ResMut<EditedSkill>,
+    playhead: Res<Playhead>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    let mut changed = false;
+    let mut save_clicked = false;
+    egui::TopBottomPanel::bottom("skill_timeline")
+        .resizable(true)
+        .min_height(180.0)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&edited.timeline.skill_id).strong());
+                let mut ti = targeting_index(&edited.timeline.targeting);
+                egui::ComboBox::from_id_salt("targeting")
+                    .selected_text(TARGETING_LABELS[ti])
+                    .show_ui(ui, |ui| {
+                        for (i, l) in TARGETING_LABELS.iter().enumerate() {
+                            if ui.selectable_value(&mut ti, i, *l).clicked() {
+                                edited.timeline.targeting = targeting_variant(i);
+                                changed = true;
+                            }
+                        }
+                    });
+                let mut di = delivery_index(&edited.timeline.delivery);
+                egui::ComboBox::from_id_salt("delivery")
+                    .selected_text(DELIVERY_LABELS[di])
+                    .show_ui(ui, |ui| {
+                        for (i, l) in DELIVERY_LABELS.iter().enumerate() {
+                            if ui.selectable_value(&mut di, i, *l).clicked() {
+                                edited.timeline.delivery = delivery_variant(i);
+                                changed = true;
+                            }
+                        }
+                    });
+                if ui.button("Save").clicked() {
+                    save_clicked = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                let d = &mut edited.timeline.phase_durations;
+                for (lab, val) in [
+                    ("windup", &mut d.windup),
+                    ("active", &mut d.active),
+                    ("recovery", &mut d.recovery),
+                ] {
+                    ui.label(lab);
+                    if ui
+                        .add(
+                            egui::DragValue::new(val)
+                                .speed(0.01)
+                                .range(0.0..=10.0)
+                                .suffix(" s"),
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                }
+            });
+            let span = total_duration(&edited.timeline.phase_durations).max(0.0001);
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), STRIP_H),
+                egui::Sense::hover(),
+            );
+            let p = ui.painter_at(rect);
+            p.rect_filled(rect, 0.0, egui::Color32::from_rgb(24, 24, 28));
+            for (i, (s, e)) in phase_spans(&edited.timeline.phase_durations)
+                .iter()
+                .enumerate()
+            {
+                let x0 = time_to_x(*s, span, rect.left(), rect.width());
+                let x1 = time_to_x(*e, span, rect.left(), rect.width());
+                p.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(x0, rect.top()),
+                        egui::pos2(x1, rect.center().y),
+                    ),
+                    0.0,
+                    PHASE_COLORS[i],
+                );
+            }
+            for w in &edited.timeline.collision_windows {
+                let (ws, we) = window_span(w, &edited.timeline.phase_durations);
+                let x0 = time_to_x(ws, span, rect.left(), rect.width());
+                let x1 = time_to_x(we, span, rect.left(), rect.width());
+                p.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(x0, rect.center().y + 2.0),
+                        egui::pos2(x1.max(x0 + 2.0), rect.bottom()),
+                    ),
+                    2.0,
+                    egui::Color32::from_rgb(220, 180, 60),
+                );
+            }
+            if playhead.active && playhead.total > 0.0 {
+                let x = time_to_x(playhead.elapsed, span, rect.left(), rect.width());
+                p.line_segment(
+                    [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(230, 70, 70)),
+                );
+            }
+            ui.horizontal(|ui| {
+                ui.label("Hit Windows");
+                if ui.button("+ Add").clicked() {
+                    add_collision_window(&mut edited.timeline);
+                    changed = true;
+                }
+            });
+            let len = edited.timeline.collision_windows.len();
+            for idx in 0..len {
+                let selected = edited.selected_window == Some(idx);
+                ui.push_id(idx, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(selected, &edited.timeline.collision_windows[idx].id)
+                            .clicked()
+                        {
+                            edited.selected_window = Some(idx);
+                        }
+                        let mut si = shape_index(&edited.timeline.collision_windows[idx].shape);
+                        egui::ComboBox::from_id_salt("shape")
+                            .selected_text(SHAPE_LABELS[si])
+                            .show_ui(ui, |ui| {
+                                for (i, l) in SHAPE_LABELS.iter().enumerate() {
+                                    if ui.selectable_value(&mut si, i, *l).clicked() {
+                                        edited.timeline.collision_windows[idx].shape =
+                                            shape_variant(i);
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        let mut mi = motion_index(&edited.timeline.collision_windows[idx].motion);
+                        egui::ComboBox::from_id_salt("motion")
+                            .selected_text(MOTION_LABELS[mi])
+                            .show_ui(ui, |ui| {
+                                for (i, l) in MOTION_LABELS.iter().enumerate() {
+                                    if ui.selectable_value(&mut mi, i, *l).clicked() {
+                                        edited.timeline.collision_windows[idx].motion =
+                                            motion_variant(i);
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        let f = &mut edited.timeline.collision_windows[idx].hit_filter;
+                        egui::ComboBox::from_id_salt("filter")
+                            .selected_text(format!("{f:?}"))
+                            .show_ui(ui, |ui| {
+                                for o in [
+                                    HitFilter::Caster,
+                                    HitFilter::Allies,
+                                    HitFilter::Enemies,
+                                    HitFilter::All,
+                                ] {
+                                    if ui.selectable_value(f, o, format!("{o:?}")).clicked() {
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        let m = &mut edited.timeline.collision_windows[idx].hit_mode;
+                        egui::ComboBox::from_id_salt("mode")
+                            .selected_text(format!("{m:?}"))
+                            .show_ui(ui, |ui| {
+                                for o in [
+                                    HitMode::OncePerTarget,
+                                    HitMode::FirstOnly,
+                                    HitMode::EveryTick,
+                                ] {
+                                    if ui.selectable_value(m, o, format!("{o:?}")).clicked() {
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        let ph = &mut edited.timeline.collision_windows[idx].spawn_phase;
+                        egui::ComboBox::from_id_salt("phase")
+                            .selected_text(format!("{ph:?}"))
+                            .show_ui(ui, |ui| {
+                                for o in [
+                                    WindowPhase::Windup,
+                                    WindowPhase::Active,
+                                    WindowPhase::Recovery,
+                                ] {
+                                    if ui.selectable_value(ph, o, format!("{o:?}")).clicked() {
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        let w = &mut edited.timeline.collision_windows[idx];
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut w.spawn_offset)
+                                    .speed(0.01)
+                                    .range(0.0..=10.0)
+                                    .prefix("off "),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut w.active_duration)
+                                    .speed(0.01)
+                                    .range(0.0..=10.0)
+                                    .prefix("dur "),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    });
+                });
+            }
+        });
+    if changed {
+        edited.dirty = true;
+    }
+    if save_clicked {
+        edited.timeline.vfx_cues = derive_vfx_cues(&edited.timeline);
+        let path = edited.path.clone();
+        if save_cast_timeline(&edited.timeline, &path).is_ok() {
+            edited.dirty = false;
+        }
+    }
+}

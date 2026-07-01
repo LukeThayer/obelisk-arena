@@ -9,14 +9,11 @@ use bevy_modal_editor::{CustomModeDef, PanelSide, RegisterEditorModeExt};
 /// The interned id of the Skill mode (matches `EditorMode::Custom(CustomModeId(SKILL_MODE_ID))`).
 pub const SKILL_MODE_ID: &str = "skill";
 
-/// The Skill-mode panel. Stub for now (M2 grows it into the bottom-dock timeline).
-fn draw_skill_panel() {}
-
 /// Register the Skill mode with the editor's `CustomModeRegistry`: key `K`, a right-side panel, and
 /// the `draw_skill_panel` system. Idempotently callable on any `App` that has a `CustomModeRegistry`
 /// (the editor's `EditorStatePlugin` inits it).
 pub fn register_skill_mode(app: &mut App) {
-    let panel = app.register_system(draw_skill_panel);
+    let panel = app.register_system(crate::panel::draw_skill_panel);
     app.register_editor_mode(CustomModeDef {
         id: SKILL_MODE_ID,
         name: "SKILL",

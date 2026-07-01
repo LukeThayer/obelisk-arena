@@ -16,6 +16,7 @@ pub mod enum_ui;
 pub mod gizmo;
 pub mod io;
 pub mod model;
+pub mod panel;
 pub mod preview_controller;
 pub mod sim_config;
 pub mod skill_designer;
