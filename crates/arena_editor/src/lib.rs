@@ -19,6 +19,7 @@ pub mod io;
 pub mod model;
 pub mod panel;
 pub mod preview_controller;
+pub mod preview_cosmetics;
 pub mod preview_rig;
 pub mod sim_config;
 pub mod skill_designer;
@@ -27,6 +28,7 @@ pub mod timeline_geom;
 pub mod vfx_bind;
 pub use model::{blank_cast_timeline, blank_skillfx, derive_vfx_cues, EditedSkill, EditedSkillFx};
 pub use preview_controller::PreviewControllerPlugin;
+pub use preview_cosmetics::{PreviewCharge, PreviewCosmetic};
 pub use sim_config::PreviewSimConfigPlugin;
 pub use skill_designer::{register_skill_mode, SkillDesignerPlugin, SKILL_MODE_ID};
 
