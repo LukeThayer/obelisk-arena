@@ -13,6 +13,7 @@ use bevy_modal_editor::{EditorPlugin, EditorPluginConfig, GamePlugin};
 
 pub mod edits;
 pub mod enum_ui;
+pub mod gizmo;
 pub mod io;
 pub mod model;
 pub mod preview_controller;

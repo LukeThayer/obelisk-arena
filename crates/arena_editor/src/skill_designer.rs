@@ -35,6 +35,8 @@ impl Plugin for SkillDesignerPlugin {
         // The preview lifecycle: a persistent floor at Startup + the Play→duel handler (retires the
         // old idle-startup combatant spawn — combatants now spawn on `GameStartedEvent`).
         app.add_plugins(crate::preview_controller::PreviewControllerPlugin);
+        // Draw the selected hit-window's shape as a viewport gizmo while in Skill mode.
+        app.add_systems(Update, crate::gizmo::draw_window_gizmo);
         // Seed the designer with firebolt's real `.cast.ron` if it parses, else a blank timeline
         // pointed at that canonical path (load-or-blank).
         let path = crate::io::default_cast_path("firebolt");
