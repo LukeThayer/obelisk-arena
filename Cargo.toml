@@ -35,7 +35,11 @@ obelisk-bevy = { path = "../obelisk-bevy" }
 # The pure-Rust stat library obelisk-bevy wraps; arena_game names `StatBlock` directly when
 # building combatants (obelisk-bevy doesn't re-export it). Same path the plugin uses.
 stat_core = { path = "../obelisk/stat_core" }
-# bevy_vfx (../bevy_modal_editor/crates/bevy_vfx) deferred to the particle-upgrade milestone;
-# M1 uses a pure-Bevy emissive-billboard particle stand-in.
+# bevy_vfx (the editor's GPU particle engine) — the live-game particle upgrade: replaces the M1
+# emissive-billboard stand-in so authored `.skillfx.ron` effects render in-game as they do in the
+# skill-designer preview. Windowed-client-only at runtime (VfxPlugin is added only in the windowed
+# build); the headless server/observer compile it but never add the plugin. Same crate the editor +
+# arena_editor use (Bevy 0.18).
+bevy_vfx = { path = "../bevy_modal_editor/crates/bevy_vfx" }
 arena_skills = { path = "crates/arena_skills" }
 arena_sim = { path = "crates/arena_sim" }
