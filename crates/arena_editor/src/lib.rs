@@ -15,6 +15,7 @@ pub mod io;
 pub mod model;
 pub mod sim_config;
 pub mod skill_designer;
+pub mod timeline_geom;
 pub use model::{blank_cast_timeline, derive_vfx_cues, EditedSkill};
 pub use sim_config::PreviewSimConfigPlugin;
 pub use skill_designer::{
