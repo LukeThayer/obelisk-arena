@@ -15,9 +15,10 @@ use crate::model::{derive_vfx_cues, EditedSkill};
 use arena_sim::preview::{PreviewCaster, PreviewDummy};
 use arena_sim::spawn::{make_arena_combatant, spawn_arena_floor, SPAWN_MARKERS};
 use bevy::prelude::*;
-use bevy_editor_game::{GameEntity, GameStartedEvent};
+use bevy_editor_game::{GameEntity, GameResetEvent, GameStartedEvent};
 use obelisk_bevy::prelude::{
-    CastSkillExt, CastTimeline, CastTimelineHandles, Faction, ObeliskCommandsExt,
+    ActiveCast, CastSkillExt, CastTimeline, CastTimelineHandles, Faction, ObeliskCommandsExt,
+    SkillPhase,
 };
 
 /// Registers the preview lifecycle: a persistent floor at Startup + the Play→duel handler.
@@ -25,8 +26,12 @@ pub struct PreviewControllerPlugin;
 
 impl Plugin for PreviewControllerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_preview_floor)
-            .add_systems(Update, start_preview);
+        app.init_resource::<Playhead>()
+            .add_systems(Startup, spawn_preview_floor)
+            .add_systems(
+                Update,
+                (start_preview, sync_playhead, clear_playhead_on_reset),
+            );
     }
 }
 
@@ -77,4 +82,35 @@ pub fn start_preview(
     // direction casts (see arena_sim `preview_smoke`), so the preview matches what the game plays.
     let dir = Dir3::new(SPAWN_MARKERS[1] - SPAWN_MARKERS[0]).unwrap_or(Dir3::X);
     commands.entity(caster).cast_skill_dir(skill_id, dir);
+}
+
+/// The timeline scrubber the panel reads to draw where playback is: mirrors the `PreviewCaster`'s
+/// live `ActiveCast` (phase / elapsed / total effective duration), or an idle default when no cast
+/// is in flight. Cleared on Reset so the panel shows a fresh, non-playing timeline.
+#[derive(Resource, Default)]
+pub struct Playhead {
+    pub active: bool,
+    pub phase: Option<SkillPhase>,
+    pub elapsed: f32,
+    pub total: f32,
+}
+
+/// Mirror the `PreviewCaster`'s `ActiveCast` into `Playhead` each frame; go idle when there is none.
+pub fn sync_playhead(mut ph: ResMut<Playhead>, q: Query<&ActiveCast, With<PreviewCaster>>) {
+    if let Ok(ac) = q.single() {
+        ph.active = true;
+        ph.phase = Some(ac.phase);
+        ph.elapsed = ac.elapsed;
+        ph.total = ac.total_duration();
+    } else {
+        ph.active = false;
+        ph.phase = None;
+    }
+}
+
+/// On a `GameResetEvent`, reset the playhead to its idle default.
+pub fn clear_playhead_on_reset(mut ph: ResMut<Playhead>, mut ev: MessageReader<GameResetEvent>) {
+    if ev.read().next().is_some() {
+        *ph = Playhead::default();
+    }
 }

@@ -83,6 +83,44 @@ fn play_spawns_game_entity_tagged_caster() {
 }
 
 #[test]
+fn playhead_tracks_active_cast_and_clears_on_reset() {
+    use arena_editor::preview_controller::Playhead;
+    use bevy_editor_game::GameResetEvent;
+    use obelisk_bevy::prelude::SkillPhase;
+
+    // Early in the cast the playhead reflects the caster's ActiveCast (windup phase).
+    let mut app = run(7, 12);
+    {
+        let ph = app.world().resource::<Playhead>();
+        assert!(ph.active, "playhead should be active mid-cast");
+        assert_eq!(ph.phase, Some(SkillPhase::Windup));
+        assert!(ph.total > 0.0, "playhead total duration should be > 0");
+    }
+
+    // Reset: despawn the GameEntity duel + fire GameResetEvent -> playhead clears, no PreviewCaster.
+    let game_entities: Vec<Entity> = app
+        .world_mut()
+        .query_filtered::<Entity, With<GameEntity>>()
+        .iter(app.world())
+        .collect();
+    for e in game_entities {
+        app.world_mut().entity_mut(e).despawn();
+    }
+    app.world_mut().write_message(GameResetEvent);
+    app.update();
+
+    let ph = app.world().resource::<Playhead>();
+    assert!(!ph.active, "playhead should clear on reset");
+    assert_eq!(ph.phase, None);
+    let casters = app
+        .world_mut()
+        .query_filtered::<Entity, With<PreviewCaster>>()
+        .iter(app.world())
+        .count();
+    assert_eq!(casters, 0, "no PreviewCaster should remain after reset");
+}
+
+#[test]
 fn preview_is_deterministic() {
     let total = |s: u64| {
         run(s, 90)
