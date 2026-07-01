@@ -17,11 +17,17 @@ use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 use obelisk_bevy::assets::{HitFilter, HitMode, WindowPhase};
 
+use arena_skills::{CueKind, VfxBindSource, VfxParamBinding};
+
 use crate::edits::add_collision_window;
 use crate::enum_ui::{
     delivery_index, delivery_variant, motion_index, motion_variant, shape_index, shape_variant,
     targeting_index, targeting_variant, DELIVERY_LABELS, MOTION_LABELS, SHAPE_LABELS,
     TARGETING_LABELS,
+};
+use crate::fx_edits::{
+    add_param_binding, cue_keys_for, ensure_lane, set_anim_clip, set_particle_effect,
+    set_particle_socket,
 };
 use crate::io::{save_cast_timeline, save_skillfx};
 use crate::model::{derive_vfx_cues, EditedSkill, EditedSkillFx};
@@ -35,6 +41,18 @@ const PHASE_COLORS: [egui::Color32; 3] = [
     egui::Color32::from_rgb(60, 110, 80),
 ];
 
+/// Map a locked cue-id VALUE to the `CueKind` its lane reacts to, by suffix (`_cast` → OnCast,
+/// `_impact` → OnHit, otherwise a window cue → OnWindow).
+fn kind_for(cue: &str) -> CueKind {
+    if cue.ends_with("_cast") {
+        CueKind::OnCast
+    } else if cue.ends_with("_impact") {
+        CueKind::OnHit
+    } else {
+        CueKind::OnWindow
+    }
+}
+
 /// Draw the bottom-dock timeline panel and apply its edits to `EditedSkill`.
 pub fn draw_skill_panel(
     mut contexts: EguiContexts,
@@ -46,6 +64,7 @@ pub fn draw_skill_panel(
         return;
     };
     let mut changed = false;
+    let mut fx_changed = false;
     let mut save_clicked = false;
     egui::TopBottomPanel::bottom("skill_timeline")
         .resizable(true)
@@ -253,9 +272,94 @@ pub fn draw_skill_panel(
                     });
                 });
             }
+
+            ui.separator();
+            ui.label("Cosmetic Lanes");
+            for cue in cue_keys_for(&edited.timeline) {
+                let kind = kind_for(&cue);
+                ui.push_id(&cue, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(&cue);
+                        let lane = ensure_lane(&mut edited_fx.fx, &cue, kind);
+
+                        // Anim clip text field (Task 29 upgrades this to a clip ComboBox).
+                        let mut clip = lane
+                            .anim
+                            .as_ref()
+                            .and_then(|a| a.clip.clone())
+                            .unwrap_or_default();
+                        if ui
+                            .add(egui::TextEdit::singleline(&mut clip).hint_text("anim clip"))
+                            .changed()
+                        {
+                            let next = if clip.is_empty() { None } else { Some(clip) };
+                            set_anim_clip(lane, next, 0, 1.0);
+                            fx_changed = true;
+                        }
+
+                        // Particle effect name text field.
+                        let mut effect = lane
+                            .particle
+                            .as_ref()
+                            .and_then(|p| p.effect.clone())
+                            .unwrap_or_default();
+                        if ui
+                            .add(egui::TextEdit::singleline(&mut effect).hint_text("vfx effect"))
+                            .changed()
+                        {
+                            set_particle_effect(
+                                lane,
+                                if effect.is_empty() {
+                                    None
+                                } else {
+                                    Some(effect)
+                                },
+                            );
+                            fx_changed = true;
+                        }
+
+                        // Socket text field (Task 28 upgrades this to a RigSockets ComboBox).
+                        let mut socket = lane
+                            .particle
+                            .as_ref()
+                            .and_then(|p| p.socket.clone())
+                            .unwrap_or_default();
+                        if ui
+                            .add(egui::TextEdit::singleline(&mut socket).hint_text("(root)"))
+                            .changed()
+                        {
+                            set_particle_socket(
+                                lane,
+                                if socket.is_empty() {
+                                    None
+                                } else {
+                                    Some(socket)
+                                },
+                            );
+                            fx_changed = true;
+                        }
+
+                        if ui.button("+ charge→scale").clicked() {
+                            add_param_binding(
+                                lane,
+                                VfxParamBinding {
+                                    param: "scale".into(),
+                                    source: VfxBindSource::Charge,
+                                    min: 0.5,
+                                    max: 2.0,
+                                },
+                            );
+                            fx_changed = true;
+                        }
+                    });
+                });
+            }
         });
     if changed {
         edited.dirty = true;
+    }
+    if fx_changed {
+        edited_fx.dirty = true;
     }
     if save_clicked {
         edited.timeline.vfx_cues = derive_vfx_cues(&edited.timeline);
