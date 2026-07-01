@@ -14,5 +14,6 @@ fn main() {
             ..default()
         }))
         .add_plugins(GamePlugin)
+        .add_plugins(arena_editor::SkillDesignerPlugin)
         .run();
 }

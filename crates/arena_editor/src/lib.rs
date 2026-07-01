@@ -11,6 +11,9 @@
 use bevy::prelude::*;
 use bevy_modal_editor::{EditorPlugin, EditorPluginConfig, GamePlugin};
 
+pub mod skill_designer;
+pub use skill_designer::{register_skill_mode, SkillDesignerPlugin, SKILL_MODE_ID};
+
 /// Build a HEADLESS editor `App` for tests. The editor's render-dependent sub-plugins (outliner
 /// JFA, grid material, gaussian splatting, wireframe, …) require the `RenderApp` sub-app even to
 /// build, so a real GPU render app is needed (`MinimalPlugins` / a null wgpu backend both fail:
