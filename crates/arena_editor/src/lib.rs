@@ -21,7 +21,7 @@ pub mod preview_controller;
 pub mod sim_config;
 pub mod skill_designer;
 pub mod timeline_geom;
-pub use model::{blank_cast_timeline, derive_vfx_cues, EditedSkill};
+pub use model::{blank_cast_timeline, blank_skillfx, derive_vfx_cues, EditedSkill, EditedSkillFx};
 pub use preview_controller::PreviewControllerPlugin;
 pub use sim_config::PreviewSimConfigPlugin;
 pub use skill_designer::{register_skill_mode, SkillDesignerPlugin, SKILL_MODE_ID};

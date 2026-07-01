@@ -3,6 +3,7 @@
 //! timeline for a fresh skill, and `derive_vfx_cues` computes the LOCKED cue-key → cue-id map the
 //! designer offers as VFX-bind targets (M3 binds cosmetic lanes to these VALUES).
 
+use arena_skills::SkillFx;
 use bevy::prelude::*;
 use obelisk_bevy::assets::{
     CastDelivery, CastTargeting, CastTimeline, CollisionWindow, PhaseDurations,
@@ -46,6 +47,36 @@ pub fn blank_cast_timeline(skill_id: impl Into<String>) -> CastTimeline {
         targeting: CastTargeting::SingleEntity { range: 15.0 },
         delivery: CastDelivery::Instant,
         vfx_cues: HashMap::new(),
+    }
+}
+
+/// The cosmetic layer currently open in the designer: its `SkillFx` (the `.skillfx.ron` lanes bound
+/// to this skill's cues), the path it saves to, and whether it has unsaved edits. Edited alongside
+/// [`EditedSkill`]; Save writes BOTH files.
+#[derive(Resource)]
+pub struct EditedSkillFx {
+    pub fx: SkillFx,
+    pub path: PathBuf,
+    pub dirty: bool,
+}
+
+impl EditedSkillFx {
+    /// Open `fx` for editing, saving to `path`, with no unsaved edits.
+    pub fn from_fx(fx: SkillFx, path: PathBuf) -> Self {
+        Self {
+            fx,
+            path,
+            dirty: false,
+        }
+    }
+}
+
+/// A fresh cosmetic layer for `skill_id` with no lanes yet (the designer adds lanes per cue as the
+/// author binds them). The load-or-blank fallback when a skill has no `.skillfx.ron` on disk.
+pub fn blank_skillfx(skill_id: impl Into<String>) -> SkillFx {
+    SkillFx {
+        skill_id: skill_id.into(),
+        lanes: HashMap::new(),
     }
 }
 

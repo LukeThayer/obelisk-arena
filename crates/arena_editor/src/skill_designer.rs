@@ -2,7 +2,7 @@
 //! generic `register_editor_mode` seam, and (later milestones) drives the bottom-dock timeline that
 //! authors obelisk skills + the "Play the real skill" preview.
 
-use crate::model::{blank_cast_timeline, EditedSkill};
+use crate::model::{blank_cast_timeline, blank_skillfx, EditedSkill, EditedSkillFx};
 use bevy::prelude::*;
 use bevy_modal_editor::{CustomModeDef, PanelSide, RegisterEditorModeExt};
 
@@ -40,6 +40,11 @@ impl Plugin for SkillDesignerPlugin {
         let timeline = crate::io::load_cast_timeline(&path)
             .unwrap_or_else(|_| blank_cast_timeline("firebolt"));
         app.insert_resource(EditedSkill::from_timeline(timeline, path));
+        // Load firebolt's `.skillfx.ron` cosmetic layer if it parses, else a blank one pointed at
+        // the canonical path (load-or-blank). Save writes this alongside the `.cast.ron`.
+        let fx_path = crate::io::default_skillfx_path("firebolt");
+        let fx = crate::io::load_skillfx(&fx_path).unwrap_or_else(|_| blank_skillfx("firebolt"));
+        app.insert_resource(EditedSkillFx::from_fx(fx, fx_path));
     }
 }
 

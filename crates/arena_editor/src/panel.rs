@@ -23,8 +23,8 @@ use crate::enum_ui::{
     targeting_index, targeting_variant, DELIVERY_LABELS, MOTION_LABELS, SHAPE_LABELS,
     TARGETING_LABELS,
 };
-use crate::io::save_cast_timeline;
-use crate::model::{derive_vfx_cues, EditedSkill};
+use crate::io::{save_cast_timeline, save_skillfx};
+use crate::model::{derive_vfx_cues, EditedSkill, EditedSkillFx};
 use crate::preview_controller::Playhead;
 use crate::timeline_geom::{phase_spans, time_to_x, total_duration, window_span};
 
@@ -39,6 +39,7 @@ const PHASE_COLORS: [egui::Color32; 3] = [
 pub fn draw_skill_panel(
     mut contexts: EguiContexts,
     mut edited: ResMut<EditedSkill>,
+    mut edited_fx: ResMut<EditedSkillFx>,
     playhead: Res<Playhead>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -261,6 +262,10 @@ pub fn draw_skill_panel(
         let path = edited.path.clone();
         if save_cast_timeline(&edited.timeline, &path).is_ok() {
             edited.dirty = false;
+        }
+        // Save writes BOTH files: the `.cast.ron` above + the `.skillfx.ron` cosmetic layer here.
+        if save_skillfx(&edited_fx.fx, &edited_fx.path).is_ok() {
+            edited_fx.dirty = false;
         }
     }
 }

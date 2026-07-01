@@ -4,6 +4,7 @@
 //! `arena_game::arena_root()`: under `cargo`, `CARGO_MANIFEST_DIR` is `crates/arena_editor`, so the
 //! root is two levels up; otherwise fall back to the current working directory.
 
+use arena_skills::SkillFx;
 use obelisk_bevy::assets::CastTimeline;
 use std::path::{Path, PathBuf};
 
@@ -39,4 +40,27 @@ pub fn save_cast_timeline(tl: &CastTimeline, path: &Path) -> std::io::Result<()>
 pub fn load_cast_timeline(path: &Path) -> Result<CastTimeline, String> {
     let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     ron::de::from_str::<CastTimeline>(&s).map_err(|e| e.to_string())
+}
+
+/// The canonical `.skillfx.ron` path for a skill id, under the workspace `assets/skills/` directory
+/// (alongside its `.cast.ron`). The two-file authoring pair the designer reads/writes together.
+pub fn default_skillfx_path(skill_id: &str) -> PathBuf {
+    editor_root().join(format!("assets/skills/{skill_id}.skillfx.ron"))
+}
+
+/// Serialize a `SkillFx` to `path` as pretty RON, creating parent directories as needed.
+pub fn save_skillfx(fx: &SkillFx, path: &Path) -> std::io::Result<()> {
+    let s = ron::ser::to_string_pretty(fx, ron::ser::PrettyConfig::new())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, s)
+}
+
+/// Parse a `SkillFx` from a `.skillfx.ron` file, returning a human-readable error string on
+/// read/parse failure (so callers can fall back to a blank cosmetic layer).
+pub fn load_skillfx(path: &Path) -> Result<SkillFx, String> {
+    let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    ron::de::from_str::<SkillFx>(&s).map_err(|e| e.to_string())
 }
