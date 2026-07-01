@@ -3,6 +3,7 @@
 //! (`GamePlugin`). The Skill mode + preview are layered in by later milestones (`SkillDesignerPlugin`).
 
 use bevy::prelude::*;
+use bevy_editor_game::RegisterGltfLibraryExt;
 use bevy_modal_editor::{recommended_image_plugin, EditorPlugin, EditorPluginConfig, GamePlugin};
 
 fn main() {
@@ -14,6 +15,9 @@ fn main() {
             ..default()
         }))
         .add_plugins(GamePlugin)
+        // Index `character.glb`'s clips/meshes/scenes into the editor's asset libraries so the preview
+        // rig (`preview_rig.rs`) can build its `AnimationGraph` from the named animation clips.
+        .register_gltf_library("character.glb")
         .add_plugins(arena_editor::SkillDesignerPlugin)
         // Load obelisk constants/effects/skills + seed the combat RNG so the preview runs the real
         // deterministic sim (same content as the game).

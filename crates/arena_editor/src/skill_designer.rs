@@ -37,6 +37,8 @@ impl Plugin for SkillDesignerPlugin {
         // Index named rig sockets under the preview caster so cosmetic lanes can bind to bones.
         app.init_resource::<crate::socket::RigSockets>()
             .add_systems(Update, crate::socket::index_rig_sockets);
+        // Spawn the `character.glb` rig under the preview caster on Play + build/attach its anim graph.
+        app.add_plugins(crate::preview_rig::PreviewRigPlugin);
         // Seed the designer with firebolt's real `.cast.ron` if it parses, else a blank timeline
         // pointed at that canonical path (load-or-blank).
         let path = crate::io::default_cast_path("firebolt");

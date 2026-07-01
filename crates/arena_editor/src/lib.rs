@@ -19,6 +19,7 @@ pub mod io;
 pub mod model;
 pub mod panel;
 pub mod preview_controller;
+pub mod preview_rig;
 pub mod sim_config;
 pub mod skill_designer;
 pub mod socket;
