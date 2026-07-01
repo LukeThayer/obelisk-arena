@@ -15,5 +15,9 @@ fn main() {
         }))
         .add_plugins(GamePlugin)
         .add_plugins(arena_editor::SkillDesignerPlugin)
+        // The preview mini-world runs the real obelisk sim (ArenaSimPreviewPlugin owns plain-Avian
+        // physics + Gravity + obelisk); spawn the idle caster+dummy at startup.
+        .add_plugins(arena_sim::preview::ArenaSimPreviewPlugin)
+        .add_systems(Startup, arena_editor::spawn_preview_on_startup)
         .run();
 }
