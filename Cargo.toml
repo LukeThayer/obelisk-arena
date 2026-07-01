@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["crates/arena_skills", "crates/arena_game", "crates/arena_sim"]
+# arena_editor is its OWN standalone workspace (see crates/arena_editor/Cargo.toml) — kept out of
+# this workspace so the editor's heavy bevy features (dynamic_linking, ...) can't feature-unify onto
+# arena_game / the net-test. Build it from crates/arena_editor directly.
+exclude = ["crates/arena_editor"]
 
 [workspace.package]
 edition = "2021"

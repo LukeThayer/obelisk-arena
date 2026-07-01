@@ -1,0 +1,37 @@
+# arena_editor is a STANDALONE workspace (note the empty [workspace] table below), deliberately
+# NOT a member of the obelisk-arena workspace. Rationale: bevy_modal_editor enables heavy/rogue
+# bevy features (dynamic_linking, file_watcher, bevy_remote, ...) + a bevy_egui git patch; pulling
+# it into obelisk-arena's workspace would feature-unify those onto arena_game/arena-server and break
+# the net-test. Isolation gives arena_editor its own lockfile + feature resolution and leaves the
+# game untouched. It path-depends on the game's shared crates (arena_sim/arena_skills) + obelisk-bevy
+# + the editor. Build/test it from THIS directory (cargo build/test here), not `-p arena_editor` from
+# the obelisk-arena root.
+[package]
+name = "arena_editor"
+version = "0.1.0"
+edition = "2021"
+default-run = "arena-editor"
+
+[[bin]]
+name = "arena-editor"
+path = "src/main.rs"
+
+[dependencies]
+bevy = "0.18"
+avian3d = { version = "0.5", features = ["default", "serialize"] }
+obelisk-bevy = { path = "../../../obelisk-bevy" }
+arena_sim = { path = "../arena_sim" }
+arena_skills = { path = "../arena_skills" }
+bevy_modal_editor = { path = "../../../bevy_modal_editor" }
+bevy_editor_game = { path = "../../../bevy_modal_editor/crates/bevy_editor_game" }
+
+[dev-dependencies]
+obelisk-bevy = { path = "../../../obelisk-bevy", features = ["test-support"] }
+
+# bevy_egui is only published intermittently; the editor uses the git branch for Bevy 0.18. As the
+# workspace root, arena_editor must carry the same patch so any crates.io bevy_egui resolves to git.
+[patch.crates-io]
+bevy_egui = { git = "https://github.com/vladbat00/bevy_egui", branch = "main" }
+
+# Empty [workspace] table => this crate is its own workspace root, isolated from obelisk-arena.
+[workspace]
