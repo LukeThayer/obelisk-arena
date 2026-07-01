@@ -26,5 +26,10 @@ fn main() {
         // physics + Gravity + obelisk). The persistent floor is spawned at Startup and the
         // caster+dummy duel on Play, both by the `PreviewControllerPlugin` in `SkillDesignerPlugin`.
         .add_plugins(arena_sim::preview::ArenaSimPreviewPlugin)
+        // With `add_physics:false` the editor skips Avian's `PhysicsDebugPlugin`, which is what
+        // normally registers the `PhysicsGizmos` gizmo-config group — but the editor's gizmo systems
+        // still read that config, panicking on a missing `GizmoConfigStore` entry. Register the group
+        // here so the windowed editor boots. (Headless tests don't hit this — no gizmos/render.)
+        .init_gizmo_group::<avian3d::prelude::PhysicsGizmos>()
         .run();
 }
