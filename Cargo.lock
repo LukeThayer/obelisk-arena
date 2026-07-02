@@ -5533,7 +5533,7 @@ dependencies = [
 [[package]]
 name = "obelisk-bevy"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy-obelisk?branch=main#264b4c39a65fe6e29cfd85fb651500fa04583052"
+source = "git+https://github.com/LukeThayer/bevy-obelisk?branch=main#6afa6bad5e20c2c82e1c9fa9c5b060155fafd59d"
 dependencies = [
  "avian3d",
  "bevy",
@@ -6268,7 +6268,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6305,9 +6305,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
