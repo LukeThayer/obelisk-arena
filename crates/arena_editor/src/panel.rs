@@ -96,6 +96,7 @@ pub fn draw_skill_panel(
     mut tab: ResMut<PanelTab>,
     mut status: ResMut<RulesStatus>,
     playhead: Res<Playhead>,
+    mut new_id: Local<String>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -103,6 +104,7 @@ pub fn draw_skill_panel(
     let mut changed = false;
     let mut fx_changed = false;
     let mut save_clicked = false;
+    let mut switch_to: Option<(EditedSkill, EditedSkillFx, EditedRules)> = None;
     egui::TopBottomPanel::bottom("skill_timeline")
         .resizable(true)
         .min_height(180.0)
@@ -114,6 +116,41 @@ pub fn draw_skill_panel(
                 ui.selectable_value(&mut *tab, PanelTab::Effects, "Effects");
                 if ui.button("Save").clicked() {
                     save_clicked = true;
+                }
+                egui::ComboBox::from_id_salt("skill_picker")
+                    .selected_text("open…")
+                    .show_ui(ui, |ui| {
+                        for id in crate::io::list_skill_ids() {
+                            if ui.selectable_label(edited.timeline.skill_id == id, &id).clicked() {
+                                switch_to = Some(crate::rules_model::open_skill(&id));
+                            }
+                        }
+                    });
+                ui.add(
+                    egui::TextEdit::singleline(&mut *new_id)
+                        .hint_text("new id")
+                        .desired_width(80.0),
+                );
+                for (lab, seed) in [
+                    (
+                        "+Attack",
+                        crate::rules_model::blank_attack_skill as fn(&str, &str) -> stat_core::Skill,
+                    ),
+                    (
+                        "+Spell",
+                        crate::rules_model::blank_spell_skill as fn(&str, &str) -> stat_core::Skill,
+                    ),
+                ] {
+                    if ui.button(lab).clicked() && !new_id.is_empty() {
+                        let id = new_id.clone();
+                        let (mut c, mut f, mut r) = crate::rules_model::open_skill(&id);
+                        r.skill = seed(&id, &id);
+                        c.dirty = true;
+                        f.dirty = true;
+                        r.dirty = true;
+                        switch_to = Some((c, f, r));
+                        new_id.clear();
+                    }
                 }
                 if !status.0.is_empty() {
                     ui.label(egui::RichText::new(&status.0).small().weak());
@@ -136,6 +173,12 @@ pub fn draw_skill_panel(
                 }
             }
         });
+    if let Some((c, f, r)) = switch_to {
+        *edited = c;
+        *edited_fx = f;
+        *rules = r;
+        status.0 = format!("opened {}", edited.timeline.skill_id);
+    }
     if changed {
         edited.dirty = true;
     }
