@@ -27,6 +27,7 @@ pub mod preview_rig;
 pub mod sim_config;
 pub mod skill_designer;
 pub mod socket;
+pub mod stat_ui;
 pub mod timeline_geom;
 pub mod trigger_ui;
 pub mod vfx_bind;
