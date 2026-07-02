@@ -164,7 +164,8 @@ pub fn draw_skill_panel(
                 }
                 PanelTab::Rules => {
                     let ids = effect_id_list();
-                    if crate::rules_panel::draw_rules_tab(ui, &mut rules.skill, &ids) {
+                    let known = crate::io::list_skill_ids();
+                    if crate::rules_panel::draw_rules_tab(ui, &mut rules.skill, &ids, &known) {
                         rules.dirty = true;
                     }
                 }
@@ -197,19 +198,30 @@ pub fn draw_skill_panel(
         }
         // ...plus the obelisk rules TOML, then hot-reload the live SkillRegistry so the "Play the
         // real skill" preview casts with the just-saved rules.
-        match crate::io::save_skill_rules(&rules.skill, &rules.path) {
-            Ok(()) => {
-                rules.dirty = false;
-                if let Some(mut reg) = registry {
-                    match crate::io::reload_skill_registry(&mut reg) {
-                        Ok(n) => status.0 = format!("saved; {n} skills reloaded"),
-                        Err(e) => status.0 = format!("saved, but skill reload failed: {e}"),
+        //
+        // Referential-integrity gate: the obelisk loader ERRORS on unknown trigger_skill refs
+        // (config/skills.rs:77), so Save must refuse to write the rules file when any exist —
+        // the `.cast.ron`/`.skillfx.ron` writes above are independent surfaces and still happen.
+        let known: std::collections::HashSet<String> =
+            crate::io::list_skill_ids().into_iter().collect();
+        let bad = crate::trigger_ui::invalid_trigger_refs(&rules.skill, &known);
+        if !bad.is_empty() {
+            status.0 = format!("rules save blocked: unknown trigger_skill {bad:?}");
+        } else {
+            match crate::io::save_skill_rules(&rules.skill, &rules.path) {
+                Ok(()) => {
+                    rules.dirty = false;
+                    if let Some(mut reg) = registry {
+                        match crate::io::reload_skill_registry(&mut reg) {
+                            Ok(n) => status.0 = format!("saved; {n} skills reloaded"),
+                            Err(e) => status.0 = format!("saved, but skill reload failed: {e}"),
+                        }
+                    } else {
+                        status.0 = "saved (no SkillRegistry to reload)".into();
                     }
-                } else {
-                    status.0 = "saved (no SkillRegistry to reload)".into();
                 }
+                Err(e) => status.0 = format!("rules save failed: {e}"),
             }
-            Err(e) => status.0 = format!("rules save failed: {e}"),
         }
     }
 }

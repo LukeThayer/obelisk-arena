@@ -6,17 +6,98 @@ use bevy_egui::egui;
 use loot_core::types::{EnumVariants, SkillTag};
 use loot_core::DamageType;
 use stat_core::skill::{ApplicationScaling, ApplicationTarget, ApplyChance};
-use stat_core::{Delivery, Skill, Targeting};
+use stat_core::{Delivery, Skill, SkillCondition, Targeting, TriggerCondition};
 use std::collections::HashMap;
 
 use crate::rules_edits::{
     add_base_damage, add_effect_application, remove_base_damage, remove_effect_application,
     set_opt_text, toggle_tag,
 };
+use crate::trigger_ui::{trigger_index, trigger_prototypes};
+
+/// One ComboBox over all 34 TriggerCondition variants, grouped by pipeline phase.
+/// Selecting a variant resets its payload to the prototype default. Returns true on change.
+fn trigger_variant_combo(ui: &mut egui::Ui, salt: &str, cond: &mut TriggerCondition) -> bool {
+    let mut changed = false;
+    let protos = trigger_prototypes();
+    let mut idx = trigger_index(cond);
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(cond.to_string())
+        .show_ui(ui, |ui| {
+            let mut last_group = "";
+            for (i, (group, proto)) in protos.iter().enumerate() {
+                if *group != last_group {
+                    ui.label(egui::RichText::new(*group).small().weak());
+                    last_group = group;
+                }
+                if ui.selectable_value(&mut idx, i, proto.to_string()).clicked() {
+                    *cond = protos[i].1.clone();
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+/// Payload editors for the 5 payload shapes (threshold / id / id+stacks / n / damage type).
+fn trigger_params(ui: &mut egui::Ui, cond: &mut TriggerCondition) -> bool {
+    use TriggerCondition::*;
+    let mut changed = false;
+    match cond {
+        PlayerLowLife { threshold }
+        | TargetLowLife { threshold }
+        | PlayerLowMana { threshold }
+        | DamageOverThreshold { threshold }
+        | OnOverkill { threshold }
+        | OnLowLifeReached { threshold } => {
+            ui.label("threshold");
+            changed |= ui
+                .add(egui::DragValue::new(threshold).speed(0.01).range(0.0..=10_000.0))
+                .changed();
+        }
+        TargetHasEffect { id }
+        | SelfHasEffect { id }
+        | TargetNoEffect { id }
+        | OnEffectConsumed { id }
+        | OnEffectChargeUsed { id } => {
+            ui.label("effect");
+            changed |= ui.add(egui::TextEdit::singleline(id).desired_width(80.0)).changed();
+        }
+        TargetEffectStacks { id, min_stacks } | SelfEffectStacks { id, min_stacks } => {
+            ui.label("effect");
+            changed |= ui.add(egui::TextEdit::singleline(id).desired_width(80.0)).changed();
+            ui.label("stacks ≥");
+            changed |= ui.add(egui::DragValue::new(min_stacks).range(1..=100)).changed();
+        }
+        EveryNthHit { n } => {
+            ui.label("every n");
+            changed |= ui.add(egui::DragValue::new(n).range(1..=100)).changed();
+        }
+        DamageTypeDealt { damage_type } | OnDamageTakenOfType { damage_type } => {
+            egui::ComboBox::from_id_salt("tp_dt")
+                .selected_text(format!("{damage_type:?}"))
+                .show_ui(ui, |ui| {
+                    for v in DamageType::all_variants() {
+                        if ui.selectable_value(damage_type, *v, format!("{v:?}")).clicked() {
+                            changed = true;
+                        }
+                    }
+                });
+        }
+        _ => {}
+    }
+    changed
+}
 
 /// Draw the Rules form. `effect_ids` populates the effect-application picker (from the live
-/// obelisk effect registry). Returns true if any field changed.
-pub fn draw_rules_tab(ui: &mut egui::Ui, skill: &mut Skill, effect_ids: &[String]) -> bool {
+/// obelisk effect registry). `known_skill_ids` populates the trigger-cascade skill picker.
+/// Returns true if any field changed.
+pub fn draw_rules_tab(
+    ui: &mut egui::Ui,
+    skill: &mut Skill,
+    effect_ids: &[String],
+    known_skill_ids: &[String],
+) -> bool {
     let mut changed = false;
     egui::ScrollArea::vertical().show(ui, |ui| {
         // === Identity ===
@@ -238,6 +319,79 @@ pub fn draw_rules_tab(ui: &mut egui::Ui, skill: &mut Skill, effect_ids: &[String
         }
         if let Some(i) = remove_ea {
             remove_effect_application(skill, i);
+            changed = true;
+        }
+
+        ui.separator();
+
+        // === Trigger cascade (SkillCondition) ===
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Triggers (cascade)").strong());
+            if ui.button("+ add").clicked() {
+                skill.conditions.push(SkillCondition::default());
+                changed = true;
+            }
+        });
+        let mut remove_sc: Option<usize> = None;
+        for (i, sc) in skill.conditions.iter_mut().enumerate() {
+            ui.push_id(("sc", i), |ui| {
+                ui.horizontal(|ui| {
+                    changed |= trigger_variant_combo(ui, "sc_cond", &mut sc.condition);
+                    changed |= trigger_params(ui, &mut sc.condition);
+                    ui.label("→ cast");
+                    egui::ComboBox::from_id_salt("sc_skill")
+                        .selected_text(if sc.trigger_skill.is_empty() {
+                            "(pick skill)".to_string()
+                        } else {
+                            sc.trigger_skill.clone()
+                        })
+                        .show_ui(ui, |ui| {
+                            for id in known_skill_ids {
+                                if ui
+                                    .selectable_value(&mut sc.trigger_skill, id.clone(), id)
+                                    .clicked()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        });
+                    changed |= ui
+                        .checkbox(&mut sc.additional, "additional")
+                        .on_hover_text("checked: fires in ADDITION to the primary; unchecked: REPLACES it")
+                        .changed();
+                    if ui.button("✕").clicked() {
+                        remove_sc = Some(i);
+                    }
+                });
+            });
+        }
+        if let Some(i) = remove_sc {
+            skill.conditions.remove(i);
+            changed = true;
+        }
+
+        // === Use conditions (usability gate) ===
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Use conditions").strong());
+            if ui.button("+ add").clicked() {
+                skill.use_conditions.push(TriggerCondition::default());
+                changed = true;
+            }
+        });
+        let mut remove_uc: Option<usize> = None;
+        for (i, uc) in skill.use_conditions.iter_mut().enumerate() {
+            ui.push_id(("uc", i), |ui| {
+                ui.horizontal(|ui| {
+                    changed |= trigger_variant_combo(ui, "uc_cond", uc);
+                    changed |= trigger_params(ui, uc);
+                    if ui.button("✕").clicked() {
+                        remove_uc = Some(i);
+                    }
+                });
+            });
+        }
+        if let Some(i) = remove_uc {
+            skill.use_conditions.remove(i);
             changed = true;
         }
     });
