@@ -45,7 +45,7 @@ use crate::io::{save_cast_timeline, save_skillfx};
 use crate::model::{derive_vfx_cues, EditedSkill, EditedSkillFx};
 use crate::preview_controller::Playhead;
 use crate::rules_model::EditedRules;
-use crate::timeline_geom::{phase_spans, time_to_x, total_duration, window_span};
+use crate::timeline_geom::{phase_spans, strip_span, time_to_x, window_span};
 use obelisk_bevy::prelude::SkillRegistry;
 
 const STRIP_H: f32 = 40.0;
@@ -109,6 +109,7 @@ pub fn draw_skill_panel(
     mut tab: ResMut<PanelTab>,
     mut status: ResMut<RulesStatus>,
     playhead: Res<Playhead>,
+    mut scrub: ResMut<crate::scrub::ScrubState>,
     mut new_id: Local<String>,
     mut stat_query: Local<String>,
     mut new_effect_id: Local<String>,
@@ -176,7 +177,8 @@ pub fn draw_skill_panel(
             });
             match *tab {
                 PanelTab::Timeline => {
-                    let (c, fc) = draw_timeline_tab(ui, &mut edited, &mut edited_fx, &playhead);
+                    let (c, fc) =
+                        draw_timeline_tab(ui, &mut edited, &mut edited_fx, &playhead, &mut scrub);
                     changed |= c;
                     fx_changed |= fc;
                 }
@@ -290,6 +292,7 @@ fn draw_timeline_tab(
     edited: &mut EditedSkill,
     edited_fx: &mut EditedSkillFx,
     playhead: &Playhead,
+    scrub: &mut crate::scrub::ScrubState,
 ) -> (bool, bool) {
     let mut changed = false;
     let mut fx_changed = false;
@@ -338,11 +341,27 @@ fn draw_timeline_tab(
             }
         }
     });
-    let span = total_duration(&edited.timeline.phase_durations).max(0.0001);
-    let (rect, _) = ui.allocate_exact_size(
+    // The strip spans the phases EXTENDED to the latest window close (a projectile window
+    // routinely outlives the phases — firebolt's bolt flies 2 s past a 0.6 s cast), so the window
+    // bar fits and the scrub head can reach the impact moment at the window close.
+    let span = strip_span(&edited.timeline).max(0.0001);
+    // click_and_drag: the strip doubles as the scrubber — dragging across it fires the authored
+    // cue VFX in the viewport (see `crate::scrub`), no Play needed.
+    let (rect, strip_resp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), STRIP_H),
-        egui::Sense::hover(),
+        egui::Sense::click_and_drag(),
     );
+    if strip_resp.clicked() || strip_resp.dragged() {
+        if strip_resp.clicked() {
+            // A plain click re-arms the grab window so clicking directly ON a cue moment plays
+            // it (otherwise a click left of the last scrub position reads as a silent rewind).
+            scrub.fired_up_to = None;
+        }
+        if let Some(pos) = strip_resp.interact_pointer_pos() {
+            let t = ((pos.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0) * span;
+            scrub.time = Some(t);
+        }
+    }
     let p = ui.painter_at(rect);
     p.rect_filled(rect, 0.0, egui::Color32::from_rgb(24, 24, 28));
     for (i, (s, e)) in phase_spans(&edited.timeline.phase_durations)
@@ -375,6 +394,13 @@ fn draw_timeline_tab(
         p.line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
             egui::Stroke::new(2.0, egui::Color32::from_rgb(230, 70, 70)),
+        );
+    } else if let Some(t) = scrub.time {
+        // The scrub head (idle only — the live playhead wins while a cast plays).
+        let x = time_to_x(t, span, rect.left(), rect.width());
+        p.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(240, 160, 50)),
         );
     }
     ui.horizontal(|ui| {

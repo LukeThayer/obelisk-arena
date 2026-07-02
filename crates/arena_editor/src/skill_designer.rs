@@ -43,8 +43,14 @@ impl Plugin for SkillDesignerPlugin {
         app.add_plugins(crate::preview_rig::PreviewRigPlugin);
         // Cosmetics: on each fired obelisk `CueEvent`, play the bound `EditedSkillFx` lanes —
         // drive the caster's anim clip + spawn `bevy_vfx` at the resolved socket with baked params.
+        // Every spawned cosmetic carries a `CosmeticLifetime` (presets loop forever otherwise).
         app.init_resource::<crate::preview_cosmetics::PreviewCharge>()
-            .add_observer(crate::preview_cosmetics::on_preview_cue);
+            .add_observer(crate::preview_cosmetics::on_preview_cue)
+            .add_systems(Update, crate::preview_cosmetics::age_preview_cosmetics);
+        // Timeline scrubbing: dragging the panel's phase strip fires the authored cue VFX in the
+        // viewport without a Play (synthetic `CueEvent`s through the same observer).
+        app.init_resource::<crate::scrub::ScrubState>()
+            .add_systems(Update, crate::scrub::fire_scrub_cues);
         // Seed the designer with firebolt's real `.cast.ron` if it parses, else a blank timeline
         // pointed at that canonical path (load-or-blank).
         let path = crate::io::default_cast_path("firebolt");

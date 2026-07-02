@@ -2,10 +2,12 @@
 //! authored cosmetic reactions. For each `LaneEvent` the `EditedSkillFx` binds to the cue's id it
 //!   - drives the bound anim clip's weight on the caster rig's `AnimationPlayer`,
 //!   - spawns the `bevy_vfx` particle effect (a clone of the named `VfxLibrary` preset, or a
-//!     tagged placeholder) at the resolved rig socket + offset, CPU-baking its `VfxParamBinding`s
-//!     from the live `PreviewCharge` (stat sources fall back to `0.0` here — the math is proven in
-//!     `arena_skills`), and
-//!   - spawns the cosmetic projectile the same way.
+//!     tagged placeholder), CPU-baking its `VfxParamBinding`s from the live `PreviewCharge`
+//!     (stat sources fall back to `0.0` here — the math is proven in `arena_skills`). `OnCast`/
+//!     `OnWindow` cues anchor to the resolved rig socket + offset; `OnHit` cues spawn UNPARENTED
+//!     at the cue's authoritative world position (the hit point — the caster socket would render
+//!     the impact on the caster, matching the game's world-positioned cue cosmetics), and
+//!   - spawns the cosmetic projectile the same way (socket-anchored — a launch-point cue).
 //!
 //! Every spawned cosmetic is `GameEntity`-tagged so the editor despawns it on Reset, and marked
 //! `PreviewCosmetic` for tracing/tests. This is the presentation half of "Play the real skill":
@@ -20,7 +22,7 @@ use arena_skills::{VfxBindSource, VfxParamBinding};
 use bevy::prelude::*;
 use bevy_editor_game::GameEntity;
 use bevy_vfx::data::VfxLibrary;
-use obelisk_bevy::events::CueEvent;
+use obelisk_bevy::events::{CueEvent, CueKind as ObeliskCueKind};
 
 /// The caster's charge fraction (0..1) used to bake `VfxBindSource::Charge` bindings in the
 /// preview. Defaults to fully charged (`1.0`) so muzzle/impact bursts render at full strength.
@@ -37,6 +39,43 @@ impl Default for PreviewCharge {
 /// despawns it; queried by tests to prove a cue rendered its lanes.
 #[derive(Component)]
 pub struct PreviewCosmetic;
+
+/// Bounds a spawned cosmetic's life: `bevy_vfx` presets default to looping-forever, so without
+/// this each fired cue would leave a permanently-burning effect behind (the game bounds its lane
+/// vfx the same way with `ParticleLifetime`). Ticked by [`age_preview_cosmetics`].
+#[derive(Component)]
+pub struct CosmeticLifetime {
+    pub elapsed: f32,
+    pub duration: f32,
+    /// Post-expiry countdown (frames). The effect is STOPPED (VfxSystem removed) at expiry but
+    /// the entity survives two grace frames: `bevy_vfx`'s `cpu_mesh_particle_cleanup` reacts to
+    /// the `VfxSystem` removal with a queued component-remove, which would warn against an
+    /// already-despawned entity.
+    pub grace: u8,
+}
+
+/// Tick every [`CosmeticLifetime`]; on expiry stop the effect (remove its `VfxSystem`), then
+/// despawn the entity after the grace frames (see [`CosmeticLifetime::grace`]).
+pub fn age_preview_cosmetics(
+    time: Res<Time>,
+    mut q: Query<(Entity, &mut CosmeticLifetime)>,
+    mut commands: Commands,
+) {
+    for (e, mut life) in &mut q {
+        life.elapsed += time.delta_secs();
+        if life.elapsed < life.duration {
+            continue;
+        }
+        match life.grace {
+            0 => {
+                commands.entity(e).remove::<bevy_vfx::VfxSystem>();
+                life.grace = 1;
+            }
+            1 => life.grace = 2,
+            _ => commands.entity(e).try_despawn(),
+        }
+    }
+}
 
 /// Observer: on a fired `CueEvent`, play every `EditedSkillFx` lane bound to its `cue_id`.
 #[allow(clippy::too_many_arguments)]
@@ -56,9 +95,11 @@ pub fn on_preview_cue(
     let Some(lanes) = edited.fx.lanes.get(&ev.cue_id).map(std::slice::from_ref) else {
         return;
     };
-    let caster = caster_q.single().unwrap_or(ev.source);
+    // No caster is a legal state: the timeline scrubber fires synthetic cues in EDIT mode, before
+    // any duel exists. Socket-anchored lanes then fall back to world-space at the cue position.
+    let caster = caster_q.single().ok();
     for lane in lanes {
-        if let Some(anim) = &lane.anim {
+        if let (Some(anim), Some(caster)) = (&lane.anim, caster) {
             if let Some(clip) = &anim.clip {
                 if let Some(node) = graph.nodes.get(clip) {
                     if let Some(pe) = find_anim_player(caster, &children, &players) {
@@ -70,27 +111,36 @@ pub fn on_preview_cue(
             }
         }
         if let Some(p) = &lane.particle {
-            let socket = resolve_socket(&sockets, p.socket.as_deref(), caster);
+            // OnHit cues carry the authoritative hit position — spawn the impact THERE, in world
+            // space (a socket anchor would render the explosion on the caster). Cast/window cues
+            // stay socket-anchored (the muzzle burst tracks the rig) when a caster exists.
+            let anchor = if ev.kind == ObeliskCueKind::OnHit {
+                None
+            } else {
+                caster.map(|c| resolve_socket(&sockets, p.socket.as_deref(), c))
+            };
             spawn_effect(
                 &mut commands,
                 &library,
                 p.effect.as_deref(),
-                socket,
-                p.offset,
+                if anchor.is_some() { p.offset } else { ev.position + p.offset },
                 &p.param_bindings,
                 charge.0,
+                anchor,
+                p.lifetime.max(0.5),
             );
         }
         if let Some(pr) = &lane.projectile {
-            let socket = resolve_socket(&sockets, pr.socket.as_deref(), caster);
+            let anchor = caster.map(|c| resolve_socket(&sockets, pr.socket.as_deref(), c));
             spawn_effect(
                 &mut commands,
                 &library,
                 pr.effect.as_deref(),
-                socket,
-                Vec3::ZERO,
+                if anchor.is_some() { Vec3::ZERO } else { ev.position },
                 &[],
                 charge.0,
+                anchor,
+                1.0,
             );
         }
     }
@@ -115,41 +165,43 @@ fn find_anim_player(
     None
 }
 
-/// Spawn one cosmetic under `socket`: clone the named `VfxLibrary` effect (CPU-baking its bindings
-/// from the live `charge`) when present, else a tagged placeholder. Always `PreviewCosmetic` +
-/// `GameEntity` tagged and parented to the socket.
+/// Spawn one cosmetic: clone the named `VfxLibrary` effect (CPU-baking its bindings from the live
+/// `charge`) when present, else a tagged placeholder. Always `PreviewCosmetic` + `GameEntity`
+/// tagged, with a [`CosmeticLifetime`] so looping presets don't burn forever. `anchor:
+/// Some(socket)` parents it to the socket with `translation` as the LOCAL offset; `anchor: None`
+/// (impact cues, or no live caster) leaves it a world-space root with `translation` as the WORLD
+/// position.
 #[allow(clippy::too_many_arguments)]
 fn spawn_effect(
     commands: &mut Commands,
     library: &VfxLibrary,
     effect: Option<&str>,
-    socket: Entity,
-    offset: Vec3,
+    translation: Vec3,
     bindings: &[VfxParamBinding],
     charge: f32,
+    anchor: Option<Entity>,
+    lifetime: f32,
 ) {
-    let child = if let Some(mut system) = effect.and_then(|n| library.effects.get(n).cloned()) {
+    let mut base = commands.spawn((
+        Transform::from_translation(translation),
+        Visibility::default(),
+        PreviewCosmetic,
+        GameEntity,
+        CosmeticLifetime {
+            elapsed: 0.0,
+            duration: lifetime,
+            grace: 0,
+        },
+    ));
+    if let Some(mut system) = effect.and_then(|n| library.effects.get(n).cloned()) {
         bake_bindings(&mut system, bindings, |b| match &b.source {
             VfxBindSource::Charge => charge,
             VfxBindSource::Stat { .. } => 0.0,
         });
-        commands
-            .spawn((
-                system,
-                Transform::from_translation(offset),
-                PreviewCosmetic,
-                GameEntity,
-            ))
-            .id()
-    } else {
-        commands
-            .spawn((
-                Transform::from_translation(offset),
-                Visibility::default(),
-                PreviewCosmetic,
-                GameEntity,
-            ))
-            .id()
-    };
-    commands.entity(child).insert(ChildOf(socket));
+        base.insert(system);
+    }
+    let child = base.id();
+    if let Some(socket) = anchor {
+        commands.entity(child).insert(ChildOf(socket));
+    }
 }

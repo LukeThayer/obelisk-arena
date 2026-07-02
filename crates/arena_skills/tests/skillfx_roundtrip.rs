@@ -79,9 +79,10 @@ fn existing_firebolt_asset_still_parses_with_defaults() {
         .as_ref()
         .unwrap();
     assert_eq!(p.count, 12);
-    // The live-cosmetics milestone authored `effect: "fire"` on this lane; the fields the
-    // asset does NOT set must still parse as defaults.
-    assert_eq!(p.effect.as_deref(), Some("fire"));
+    // The lane's `effect` names a `bevy_vfx` `VfxLibrary` preset — the keys are capitalized
+    // (`default_presets()`: "Fire"/"Explosion"), and lookups are case-sensitive on both the
+    // editor and game consumers. The fields the asset does NOT set must still parse as defaults.
+    assert_eq!(p.effect.as_deref(), Some("Fire"));
     assert!(p.param_bindings.is_empty());
     assert_eq!(p.offset, Vec3::ZERO);
 }

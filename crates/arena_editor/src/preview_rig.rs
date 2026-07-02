@@ -11,7 +11,7 @@
 
 use arena_sim::preview::PreviewCaster;
 use bevy::prelude::*;
-use bevy_editor_game::{AnimationLibrary, GameStartedEvent};
+use bevy_editor_game::AnimationLibrary;
 use std::collections::HashMap;
 
 /// The clips the preview graph pulls from `character.glb`: the locomotion set + their casting
@@ -109,26 +109,33 @@ pub fn drive_anim_clip(player: &mut AnimationPlayer, node: AnimationNodeIndex, w
     player.play(node).repeat().set_weight(weight);
 }
 
-/// On the `GameStartedEvent` (Play), hang the `character.glb` scene under the preview caster so the
-/// duel renders as the real rigged character. The scene loader will spawn the `AnimationPlayer` that
-/// `attach_preview_anim_graph` binds the graph to.
+/// The rig's local transform under the caster, matching the game's rig attach
+/// (`arena_game::client::present`): the combatant origin is the capsule CENTER, so shift the model
+/// down to rest its feet at the capsule bottom, and π-yaw the gltf to face the body's forward.
+const RIG_FOOT_OFFSET: f32 = -0.62;
+
+/// Whenever a `PreviewCaster` appears (spawned by `start_preview` on Play), hang the `character.glb`
+/// scene under it so the duel renders as the real rigged character. The scene loader will spawn the
+/// `AnimationPlayer` that `attach_preview_anim_graph` binds the graph to.
+///
+/// Query-driven on `Added<PreviewCaster>` rather than gated on `GameStartedEvent`: the event fires
+/// the same frame `start_preview` merely QUEUES the caster spawn (commands apply at end of schedule),
+/// so an event-gated system would consume its one read of the event while the caster query is still
+/// empty and never attach the rig.
 pub fn spawn_preview_rig(
-    mut started: MessageReader<GameStartedEvent>,
-    caster: Query<Entity, With<PreviewCaster>>,
+    casters: Query<Entity, Added<PreviewCaster>>,
     asset_server: Res<AssetServer>,
     mut commands: Commands,
 ) {
-    if started.read().next().is_none() {
-        return;
+    for caster in &casters {
+        let scene: Handle<Scene> =
+            asset_server.load(GltfAssetLabel::Scene(0).from_asset("character.glb"));
+        let tf = Transform::from_translation(Vec3::Y * RIG_FOOT_OFFSET)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::PI));
+        commands.entity(caster).with_children(|c| {
+            c.spawn((Name::new("PreviewRig"), SceneRoot(scene), tf));
+        });
     }
-    let Ok(caster) = caster.single() else {
-        return;
-    };
-    let scene: Handle<Scene> =
-        asset_server.load(GltfAssetLabel::Scene(0).from_asset("character.glb"));
-    commands.entity(caster).with_children(|c| {
-        c.spawn((SceneRoot(scene), Transform::default()));
-    });
 }
 
 /// Wires the preview rig: the anim-graph state resource + the build/attach/spawn systems.

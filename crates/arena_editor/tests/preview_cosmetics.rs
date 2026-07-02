@@ -41,8 +41,25 @@ fn firebolt_cast_fx() -> SkillFx {
             weight: 1.0,
         }),
     };
+    let impact = LaneEvent {
+        lane_id: "firebolt_impact".into(),
+        kind: CueKind::OnHit,
+        particle: Some(ParticleSpec {
+            count: 20,
+            lifetime: 0.5,
+            color: [1.0, 0.3, 0.05],
+            speed: 5.0,
+            effect: None,
+            socket: None,
+            offset: Vec3::new(0.0, 0.25, 0.0),
+            param_bindings: Vec::new(),
+        }),
+        projectile: None,
+        anim: None,
+    };
     let mut lanes = HashMap::new();
     lanes.insert("firebolt_cast".to_string(), lane);
+    lanes.insert("firebolt_impact".to_string(), impact);
     SkillFx {
         skill_id: "firebolt".into(),
         lanes,
@@ -92,6 +109,39 @@ fn cue_spawns_one_preview_cosmetic_child_for_the_bound_lane() {
         .get::<ChildOf>(cosmetics[0])
         .expect("cosmetic parented to its socket");
     assert_eq!(parent.0, caster);
+}
+
+/// An `OnHit` cue carries the authoritative hit position — the impact cosmetic must spawn as a
+/// world-space root at `cue.position + lane offset`, NOT parented to a caster socket (which would
+/// render the explosion on the caster).
+#[test]
+fn on_hit_cue_spawns_the_impact_at_the_cue_world_position_unparented() {
+    let mut app = setup_app();
+    let caster = app.world_mut().spawn(PreviewCaster).id();
+    let hit_pos = Vec3::new(4.0, 0.8, 0.0);
+    app.world_mut().trigger(CueEvent {
+        cue_id: "firebolt_impact".into(),
+        source: caster,
+        position: hit_pos,
+        kind: ObeliskCueKind::OnHit,
+    });
+    app.world_mut().flush();
+
+    let cosmetics: Vec<Entity> = app
+        .world_mut()
+        .query_filtered::<Entity, With<PreviewCosmetic>>()
+        .iter(app.world())
+        .collect();
+    assert_eq!(cosmetics.len(), 1);
+    assert!(
+        app.world().get::<ChildOf>(cosmetics[0]).is_none(),
+        "impact cosmetic must be a world-space root, not socket-parented"
+    );
+    let tf = app
+        .world()
+        .get::<Transform>(cosmetics[0])
+        .expect("impact cosmetic has a Transform");
+    assert_eq!(tf.translation, hit_pos + Vec3::new(0.0, 0.25, 0.0));
 }
 
 #[test]

@@ -23,6 +23,7 @@ pub mod rules_edits;
 pub mod rules_model;
 pub mod rules_panel;
 pub mod panel;
+pub mod scrub;
 pub mod preview_controller;
 pub mod preview_cosmetics;
 pub mod preview_rig;
@@ -58,6 +59,15 @@ pub fn build_editor_app() -> App {
                 primary_window: None,
                 exit_condition: bevy::window::ExitCondition::DontExit,
                 close_when_requested: false,
+                ..default()
+            })
+            // Same workspace-assets root as the windowed binary (`main.rs`) — the default root is
+            // CARGO_MANIFEST_DIR (= crates/arena_editor), which has no `character.glb`.
+            .set(AssetPlugin {
+                file_path: io::editor_root()
+                    .join("assets")
+                    .to_string_lossy()
+                    .into_owned(),
                 ..default()
             })
             .disable::<bevy::winit::WinitPlugin>(),

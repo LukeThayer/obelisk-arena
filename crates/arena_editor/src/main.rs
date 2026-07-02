@@ -8,7 +8,20 @@ use bevy_modal_editor::{recommended_image_plugin, EditorPlugin, EditorPluginConf
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(recommended_image_plugin()))
+        .add_plugins(
+            DefaultPlugins.set(recommended_image_plugin()).set(AssetPlugin {
+                // Point the asset server at the WORKSPACE assets/ (character.glb + skill RONs).
+                // Bevy's default root is CARGO_MANIFEST_DIR = crates/arena_editor, whose assets/
+                // holds only the editor's fs-loaded preset libraries (vfx/materials/prefabs) —
+                // `character.glb` would 404 and the preview rig would never render. Mirrors
+                // arena_game's app compositions (`AssetPlugin.file_path = <root>/assets`).
+                file_path: arena_editor::io::editor_root()
+                    .join("assets")
+                    .to_string_lossy()
+                    .into_owned(),
+                ..default()
+            }),
+        )
         .add_plugins(EditorPlugin::new(EditorPluginConfig {
             add_physics: false,
             add_egui: true,

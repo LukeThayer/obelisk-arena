@@ -15,7 +15,7 @@ use crate::model::{derive_vfx_cues, EditedSkill};
 use arena_sim::preview::{PreviewCaster, PreviewDummy};
 use arena_sim::spawn::{make_arena_combatant, spawn_arena_floor, SPAWN_MARKERS};
 use bevy::prelude::*;
-use bevy_editor_game::{GameEntity, GameResetEvent, GameStartedEvent};
+use bevy_editor_game::{GameCamera, GameEntity, GameResetEvent, GameStartedEvent, GameState};
 use obelisk_bevy::prelude::{
     ActiveCast, CastSkillExt, CastTimeline, CastTimelineHandles, Faction, ObeliskCommandsExt,
     SkillPhase,
@@ -30,14 +30,37 @@ impl Plugin for PreviewControllerPlugin {
             .add_systems(Startup, spawn_preview_floor)
             .add_systems(
                 Update,
-                (start_preview, sync_playhead, clear_playhead_on_reset),
+                (
+                    start_preview,
+                    sync_playhead,
+                    clear_playhead_on_reset,
+                    keep_editor_camera_during_play,
+                ),
             );
     }
 }
 
-/// Spawn the persistent arena floor (not a `GameEntity` — survives Reset).
-pub fn spawn_preview_floor(mut commands: Commands) {
+/// Spawn the persistent arena floor (not a `GameEntity` — survives Reset). Windowed, it also gets a
+/// visible slab matching the collider (the editor hides its grid during Play, so a mesh-less floor
+/// renders the duel in a void); headless test apps have no `StandardMaterial` assets and skip it.
+pub fn spawn_preview_floor(
+    mut commands: Commands,
+    meshes: Option<ResMut<Assets<Mesh>>>,
+    materials: Option<ResMut<Assets<StandardMaterial>>>,
+) {
     spawn_arena_floor(&mut commands);
+    if let (Some(mut meshes), Some(mut materials)) = (meshes, materials) {
+        commands.spawn((
+            Name::new("PreviewFloorVisual"),
+            Mesh3d(meshes.add(Cuboid::new(40.0, 1.0, 40.0))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.25, 0.25, 0.28),
+                ..default()
+            })),
+            // Top face 1 mm below world 0 so it doesn't z-fight the editor grid while editing.
+            Transform::from_xyz(0.0, -0.501, 0.0),
+        ));
+    }
 }
 
 /// On a `GameStartedEvent`: register the edited timeline (with derived cues) into
@@ -47,6 +70,8 @@ pub fn start_preview(
     edited: Res<EditedSkill>,
     mut handles: ResMut<CastTimelineHandles>,
     mut timelines: ResMut<Assets<CastTimeline>>,
+    meshes: Option<ResMut<Assets<Mesh>>>,
+    materials: Option<ResMut<Assets<StandardMaterial>>>,
     mut commands: Commands,
 ) {
     if started.read().next().is_none() {
@@ -66,7 +91,10 @@ pub fn start_preview(
     );
     commands
         .entity(caster)
-        .insert((PreviewCaster, GameEntity))
+        // Visibility on the combatant root: the rig scene hangs under it, and a parent without
+        // `InheritedVisibility` breaks the child subtree's visibility propagation (Bevy B0004 —
+        // the rig silently doesn't render).
+        .insert((PreviewCaster, GameEntity, Visibility::default()))
         .grant_skill(skill_id.clone());
     let dummy = make_arena_combatant(
         &mut commands,
@@ -74,7 +102,24 @@ pub fn start_preview(
         Faction::Enemy,
         SPAWN_MARKERS[1],
     );
-    commands.entity(dummy).insert((PreviewDummy, GameEntity));
+    commands
+        .entity(dummy)
+        .insert((PreviewDummy, GameEntity, Visibility::default()));
+    // Windowed, make the (rig-less) dummy visible so there's something to shoot at; headless test
+    // apps have no `StandardMaterial` assets and skip it. The caster is rendered by its glb rig
+    // (`preview_rig`), so its capsule stays mesh-less like the game's proxy bodies.
+    if let (Some(mut meshes), Some(mut materials)) = (meshes, materials) {
+        commands.entity(dummy).insert((
+            Mesh3d(meshes.add(Capsule3d::new(
+                arena_sim::tuning::PLAYER_CAPSULE_RADIUS,
+                arena_sim::tuning::PLAYER_CAPSULE_LENGTH,
+            ))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.7, 0.25, 0.2),
+                ..default()
+            })),
+        ));
+    }
 
     // Cast by DIRECTION (caster→dummy), NOT `cast_skill_at(dummy)`: obelisk's entity-aim LOS raycast
     // excludes only the caster body entity, not its CHILD `Hurtbox` sensor, so an arena combatant
@@ -82,6 +127,28 @@ pub fn start_preview(
     // direction casts (see arena_sim `preview_smoke`), so the preview matches what the game plays.
     let dir = Dir3::new(SPAWN_MARKERS[1] - SPAWN_MARKERS[0]).unwrap_or(Dir3::X);
     commands.entity(caster).cast_skill_dir(skill_id, dir);
+}
+
+/// While Playing, upstream `sync_camera_states` deactivates the editor camera and activates only
+/// `GameCamera`-tagged cameras, expecting the game to provide its own view. The skill preview
+/// deliberately provides NONE: Play must not move the camera — the duel is watched from exactly
+/// the editor camera's current view (which is also the view the `bevy_vfx` billboard pipeline
+/// demonstrably renders on). So while Playing with no `GameCamera` in the world, re-assert the
+/// editor camera as the active view. Pause/Reset hand control back through the upstream sync as
+/// usual, and a future real game view that DOES spawn a `GameCamera` wins automatically.
+pub fn keep_editor_camera_during_play(
+    game_state: Res<State<GameState>>,
+    game_cameras: Query<(), (With<GameCamera>, Without<bevy_modal_editor::EditorCamera>)>,
+    mut editor_cameras: Query<&mut Camera, With<bevy_modal_editor::EditorCamera>>,
+) {
+    if *game_state.get() != GameState::Playing || !game_cameras.is_empty() {
+        return;
+    }
+    for mut cam in &mut editor_cameras {
+        if !cam.is_active {
+            cam.is_active = true;
+        }
+    }
 }
 
 /// The timeline scrubber the panel reads to draw where playback is: mirrors the `PreviewCaster`'s

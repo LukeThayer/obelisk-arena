@@ -3,11 +3,22 @@
 //! These map obelisk `PhaseDurations` / `CollisionWindow` timing into a normalized time axis and
 //! then into pixel-space `x` coordinates. Kept pure (no egui, no ECS) so they unit-test directly.
 
-use obelisk_bevy::assets::{CollisionWindow, PhaseDurations, WindowPhase};
+use obelisk_bevy::assets::{CastTimeline, CollisionWindow, PhaseDurations, WindowPhase};
 
 /// Total authored duration of the three phases (clamping negatives to 0).
 pub fn total_duration(d: &PhaseDurations) -> f32 {
     d.windup.max(0.0) + d.active.max(0.0) + d.recovery.max(0.0)
+}
+
+/// The full time span the timeline strip (and its scrubber) covers: the phase total, extended to
+/// the LATEST collision-window close. A projectile window routinely outlives the cast phases
+/// (firebolt: phases 0.6 s, bolt flies 2 s) — without the extension, the window bar runs off the
+/// strip and the scrub head can never reach the impact moment staged at the window close.
+pub fn strip_span(tl: &CastTimeline) -> f32 {
+    tl.collision_windows
+        .iter()
+        .map(|w| window_span(w, &tl.phase_durations).1)
+        .fold(total_duration(&tl.phase_durations), f32::max)
 }
 
 /// The `[windup, active, recovery]` phase spans as `(start, end)` absolute-time pairs.
@@ -83,6 +94,26 @@ mod tests {
         assert_eq!(time_to_x(0.6, 0.6, 10.0, 100.0), 110.0);
         assert_eq!(time_to_x(0.3, 0.6, 0.0, 100.0), 50.0);
         assert_eq!(time_to_x(5.0, 0.0, 7.0, 100.0), 7.0);
+    }
+
+    #[test]
+    fn strip_span_extends_to_the_latest_window_close() {
+        use obelisk_bevy::assets::{CastDelivery, CastTargeting};
+        let mut tl = CastTimeline {
+            skill_id: "x".into(),
+            phase_durations: pd(0.3, 0.1, 0.2),
+            collision_windows: vec![],
+            targeting: CastTargeting::SingleEntity { range: 15.0 },
+            delivery: CastDelivery::Instant,
+            vfx_cues: Default::default(),
+        };
+        assert_eq!(strip_span(&tl), 0.6, "no windows: phase total");
+        tl.collision_windows
+            .push(window(WindowPhase::Active, 0.0, 2.0));
+        assert!(
+            (strip_span(&tl) - 2.3).abs() < 1e-6,
+            "long window extends the strip to its close"
+        );
     }
 
     #[test]

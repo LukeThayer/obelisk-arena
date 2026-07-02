@@ -39,7 +39,13 @@ fn run(seed: u64, ticks: usize) -> App {
         ))
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         .add_plugins(ArenaSimPreviewPlugin)
-        .add_plugins(PreviewControllerPlugin);
+        .add_plugins(PreviewControllerPlugin)
+        // The rig attach (the `character.glb` handle never resolves headlessly — no GltfPlugin —
+        // but the SceneRoot child must still hang under the caster). No AnimationPlugin headlessly,
+        // so register the graph asset the plugin's builder system writes to.
+        .init_resource::<bevy_editor_game::AnimationLibrary>()
+        .init_asset::<AnimationGraph>()
+        .add_plugins(arena_editor::preview_rig::PreviewRigPlugin);
     app.add_obelisk_skills(SkillSource::Dir(root.join("config/skills")));
     app.seed_combat_rng(seed);
     let tl = load_cast_timeline(&root.join("assets/skills/firebolt.cast.ron")).expect("firebolt");
@@ -68,6 +74,35 @@ fn play_resolves_damage_on_the_dummy() {
             .map(|d| d.total_damage)
             .sum::<f64>()
             > 0.0
+    );
+}
+
+/// Regression: while Playing, upstream `sync_camera_states` deactivates the editor camera and
+/// activates only `GameCamera`s — the preview spawns none (Play must not move the view, and the
+/// vfx billboard pipeline renders on the editor camera), so `keep_editor_camera_during_play` must
+/// re-assert the editor camera as the active view.
+#[test]
+fn play_keeps_the_editor_camera_active() {
+    let mut app = run(5, 3);
+    // Simulate the upstream sync having deactivated the editor camera on the Playing transition.
+    let cam = app
+        .world_mut()
+        .spawn((
+            Camera {
+                is_active: false,
+                ..Default::default()
+            },
+            bevy_modal_editor::EditorCamera,
+        ))
+        .id();
+    app.world_mut()
+        .resource_mut::<NextState<bevy_editor_game::GameState>>()
+        .set(bevy_editor_game::GameState::Playing);
+    app.update();
+    app.update();
+    assert!(
+        app.world().get::<Camera>(cam).unwrap().is_active,
+        "the editor camera must be re-activated while Playing with no GameCamera"
     );
 }
 
@@ -118,6 +153,26 @@ fn playhead_tracks_active_cast_and_clears_on_reset() {
         .iter(app.world())
         .count();
     assert_eq!(casters, 0, "no PreviewCaster should remain after reset");
+}
+
+/// Regression (skill-editor first light): `spawn_preview_rig` used to gate on `GameStartedEvent`
+/// and consume it the same frame `start_preview` merely QUEUED the caster spawn — the caster query
+/// was still empty, so the rig never attached and Play rendered nothing. It is now driven by
+/// `Added<PreviewCaster>`, so the `character.glb` `SceneRoot` must hang under the caster.
+#[test]
+fn play_attaches_the_rig_scene_under_the_caster() {
+    let mut app = run(2, 3);
+    let caster = app
+        .world_mut()
+        .query_filtered::<Entity, With<PreviewCaster>>()
+        .single(app.world())
+        .expect("one caster");
+    let has_rig = app
+        .world_mut()
+        .query::<(&SceneRoot, &ChildOf)>()
+        .iter(app.world())
+        .any(|(_, child_of)| child_of.parent() == caster);
+    assert!(has_rig, "the character.glb SceneRoot should be a child of the PreviewCaster");
 }
 
 #[test]
