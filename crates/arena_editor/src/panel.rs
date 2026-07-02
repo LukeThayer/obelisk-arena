@@ -29,6 +29,7 @@ use crate::fx_edits::{
     add_param_binding, cue_keys_for, ensure_lane, set_anim_clip, set_particle_effect,
     set_particle_socket,
 };
+use crate::effect_model::EditedEffect;
 use crate::io::{save_cast_timeline, save_skillfx};
 use crate::model::{derive_vfx_cues, EditedSkill, EditedSkillFx};
 use crate::preview_controller::Playhead;
@@ -92,11 +93,13 @@ pub fn draw_skill_panel(
     mut edited: ResMut<EditedSkill>,
     mut edited_fx: ResMut<EditedSkillFx>,
     mut rules: ResMut<EditedRules>,
+    mut effect: ResMut<EditedEffect>,
     registry: Option<ResMut<SkillRegistry>>,
     mut tab: ResMut<PanelTab>,
     mut status: ResMut<RulesStatus>,
     playhead: Res<Playhead>,
     mut new_id: Local<String>,
+    mut stat_query: Local<String>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -170,7 +173,23 @@ pub fn draw_skill_panel(
                     }
                 }
                 PanelTab::Effects => {
-                    ui.label("Effect authoring lands in Stage 3.");
+                    let known = crate::io::list_skill_ids();
+                    let (c, open) = crate::effects_panel::draw_effects_tab(
+                        ui,
+                        &mut effect,
+                        &known,
+                        &mut stat_query,
+                    );
+                    if c {
+                        effect.dirty = true;
+                    }
+                    if let Some(id) = open {
+                        let id = if id.is_empty() { "new_effect".to_string() } else { id };
+                        let path = crate::io::default_effect_path(&id);
+                        let cfg = crate::io::load_effect_config(&path)
+                            .unwrap_or_else(|_| crate::effect_model::blank_effect(&id));
+                        *effect = crate::effect_model::EditedEffect::from_config(cfg, path);
+                    }
                 }
             }
         });

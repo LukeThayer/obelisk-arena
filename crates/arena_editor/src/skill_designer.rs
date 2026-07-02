@@ -62,6 +62,13 @@ impl Plugin for SkillDesignerPlugin {
         let skill = crate::io::load_skill_rules(&rules_path)
             .unwrap_or_else(|_| crate::rules_model::blank_attack_skill("firebolt", "Firebolt"));
         app.insert_resource(crate::rules_model::EditedRules::from_skill(skill, rules_path));
+        // Seed the Effects tab with the first effect on disk (burn today), else a blank.
+        let first = crate::io::list_effect_ids_on_disk().into_iter().next()
+            .unwrap_or_else(|| "new_effect".to_string());
+        let effect_path = crate::io::default_effect_path(&first);
+        let cfg = crate::io::load_effect_config(&effect_path)
+            .unwrap_or_else(|_| crate::effect_model::blank_effect(&first));
+        app.insert_resource(crate::effect_model::EditedEffect::from_config(cfg, effect_path));
     }
 }
 
