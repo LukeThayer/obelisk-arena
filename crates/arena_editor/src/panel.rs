@@ -25,7 +25,6 @@ use obelisk_bevy::assets::WindowPhase;
 
 use arena_skills::CueKind;
 
-use crate::fx_edits::cue_keys_for;
 use crate::effect_model::{sanitize_id, EditedEffect};
 use crate::io::{save_cast_timeline, save_skillfx};
 use crate::model::{derive_vfx_cues, EditedSkill, EditedSkillFx};
@@ -352,7 +351,7 @@ pub fn draw_skill_panel(
 fn draw_timeline_tab(
     ui: &mut egui::Ui,
     edited: &mut EditedSkill,
-    _edited_fx: &mut EditedSkillFx,
+    edited_fx: &mut EditedSkillFx,
     playhead: &Playhead,
     scrub: &mut crate::scrub::ScrubState,
     selection: &mut crate::selection::SkillSelection,
@@ -438,7 +437,7 @@ fn draw_timeline_tab(
             let sel = *selection == crate::selection::SkillSelection::Window(i);
             let chained = w.spawn_phase == WindowPhase::Chained;
             let label = if chained {
-                format!("↳ {}", w.id)
+                format!("» {}", w.id)
             } else {
                 w.id.clone()
             };
@@ -460,7 +459,7 @@ fn draw_timeline_tab(
             });
         // Delete the selected window (chips are the list; deletion lives with them).
         if let crate::selection::SkillSelection::Window(i) = *selection {
-            if ui.small_button("🗑 delete").clicked()
+            if ui.small_button("❌ delete").clicked()
                 && i < edited.timeline.collision_windows.len()
             {
                 edited.timeline.collision_windows.remove(i);
@@ -470,28 +469,41 @@ fn draw_timeline_tab(
         }
     });
 
-    // Moment (lane) chips — one per locked cue, click to author its visuals.
+    // Moment (lane) chips — one per locked cue, in TIMELINE order (cast, then each window's
+    // open/end in authored order, then hit), with human labels. ● = has authored visuals.
     ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new("Moments").strong());
-        for cue in cue_keys_for(&edited.timeline) {
-            let cue_value = derive_vfx_cues(&edited.timeline)
-                .get(&cue)
-                .cloned()
-                .unwrap_or_else(|| cue.clone());
+        let cues = derive_vfx_cues(&edited.timeline);
+        let mut moments: Vec<(String, String)> = Vec::new();
+        if let Some(v) = cues.get("on_cast") {
+            moments.push(("cast".into(), v.clone()));
+        }
+        for w in &edited.timeline.collision_windows {
+            if let Some(v) = cues.get(&format!("on_window_{}", w.id)) {
+                moments.push((format!("{} opens", w.id), v.clone()));
+            }
+            if let Some(v) = cues.get(&format!("on_end_{}", w.id)) {
+                moments.push((format!("{} ends", w.id), v.clone()));
+            }
+        }
+        if let Some(v) = cues.get("on_hit") {
+            moments.push(("hit".into(), v.clone()));
+        }
+        for (label, cue_value) in moments {
             let sel = *selection == crate::selection::SkillSelection::Lane(cue_value.clone());
-            // Human labels: on_cast -> "cast", on_window_bolt -> "bolt opens", ...
-            let label = if cue == "on_cast" {
-                "✨ cast".to_string()
-            } else if cue == "on_hit" {
-                "✚ hit".to_string()
-            } else if let Some(w) = cue.strip_prefix("on_window_") {
-                format!("▶ {w}")
-            } else if let Some(w) = cue.strip_prefix("on_end_") {
-                format!("💥 {w} ends")
+            let has_visuals = edited_fx.fx.lanes.get(&cue_value).is_some_and(|l| {
+                l.particle.is_some() || l.projectile.is_some() || l.beam.is_some() || l.anim.is_some()
+            });
+            let text = if has_visuals {
+                format!("● {label}")
             } else {
-                cue.clone()
+                format!("○ {label}")
             };
-            if ui.selectable_label(sel, label).clicked() {
+            if ui
+                .selectable_label(sel, text)
+                .on_hover_text("click to author this moment's visuals")
+                .clicked()
+            {
                 *selection = crate::selection::SkillSelection::Lane(cue_value);
             }
         }

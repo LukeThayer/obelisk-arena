@@ -161,7 +161,7 @@ fn draw_root(
                 c |= ui
                     .add(egui::DragValue::new(&mut d.max).speed(0.5).range(0.0..=100000.0).prefix("max "))
                     .changed();
-                if ui.small_button("✕").clicked() {
+                if ui.small_button("❌").clicked() {
                     remove = Some(i);
                 }
             });

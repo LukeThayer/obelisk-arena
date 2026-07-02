@@ -39,6 +39,34 @@ fn main() {
         // physics + Gravity + obelisk). The persistent floor is spawned at Startup and the
         // caster+dummy duel on Play, both by the `PreviewControllerPlugin` in `SkillDesignerPlugin`.
         .add_plugins(arena_sim::preview::ArenaSimPreviewPlugin)
+        // TEMP diagnostic: trace exactly what gates a K press (remove after the K-key bug hunt).
+        .add_systems(
+            Update,
+            |keyboard: Res<ButtonInput<KeyCode>>,
+             mode: Res<State<bevy_modal_editor::EditorMode>>,
+             game_state: Res<State<bevy_editor_game::GameState>>,
+             editor_state: Res<bevy_modal_editor::EditorState>,
+             registry: Res<bevy_modal_editor::CustomModeRegistry>,
+             mut contexts: bevy_egui::EguiContexts| {
+                if keyboard.just_pressed(KeyCode::KeyK) {
+                    let wants_kb = contexts
+                        .ctx_mut()
+                        .map(|c| c.wants_keyboard_input())
+                        .unwrap_or(false);
+                    info!(
+                        "K-PROBE mode={:?} game={:?} editor_active={} wants_kb={} registry_defs={} skill={:?}",
+                        mode.get(),
+                        game_state.get(),
+                        editor_state.editor_active,
+                        wants_kb,
+                        registry.defs.len(),
+                        registry
+                            .lookup(bevy_modal_editor::CustomModeId("skill"))
+                            .map(|d| d.activation_key)
+                    );
+                }
+            },
+        )
         // With `add_physics:false` the editor skips Avian's `PhysicsDebugPlugin`, which is what
         // normally registers the `PhysicsGizmos` gizmo-config group — but the editor's gizmo systems
         // still read that config, panicking on a missing `GizmoConfigStore` entry. Register the group

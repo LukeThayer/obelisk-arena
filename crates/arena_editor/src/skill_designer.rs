@@ -23,6 +23,30 @@ pub fn register_skill_mode(app: &mut App) {
     });
 }
 
+/// Release stuck egui keyboard focus when the user clicks OUTSIDE any egui area (i.e. into the
+/// 3D viewport). Without this, clicking into any egui text field and then into the viewport
+/// leaves the field focused forever — `wants_keyboard_input()` stays true and EVERY editor
+/// hotkey (K included) goes silently dead. The viewport isn't an egui widget, so egui never
+/// releases focus on its own.
+fn release_stuck_egui_focus(
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut contexts: bevy_egui::EguiContexts,
+) {
+    if !(mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right)) {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    if !ctx.is_pointer_over_area() {
+        ctx.memory_mut(|m| {
+            if let Some(focused) = m.focused() {
+                m.surrender_focus(focused);
+            }
+        });
+    }
+}
+
 /// Merge workspace-authored `.vfx.ron` presets into the live `VfxLibrary` (skipped headless —
 /// test apps without the bevy_vfx plugin have no library resource).
 fn load_workspace_vfx_presets(lib: Option<ResMut<bevy_vfx::VfxLibrary>>) {
@@ -75,6 +99,8 @@ impl Plugin for SkillDesignerPlugin {
         // `init_vfx_library` scans, so authored-in-designer == rendered-in-game. Startup: after
         // the upstream editor's PreStartup library init.
         app.add_systems(Startup, load_workspace_vfx_presets);
+        // Clicking the viewport must release egui keyboard focus, or hotkeys die (see fn doc).
+        app.add_systems(Update, release_stuck_egui_focus);
         // Seed the designer with firebolt's real `.cast.ron` if it parses, else a blank timeline
         // pointed at that canonical path (load-or-blank).
         let path = crate::io::default_cast_path("firebolt");
