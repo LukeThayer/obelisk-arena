@@ -55,6 +55,85 @@ pub fn add_collision_window(tl: &mut CastTimeline) {
     tl.collision_windows.push(default_window(id));
 }
 
+/// The archetype templates the "+ Add window" menu offers (UX spec: strike / projectile /
+/// zone / beam) — each a sensible, immediately-playable starting point.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WindowTemplate {
+    /// Melee sweep: brief static sphere at the caster.
+    Strike,
+    /// Straight bolt: Linear 20 u/s, first-hit-only, 2 s fuse.
+    Projectile,
+    /// Damage field: big static sphere, every-tick with a rehit interval.
+    Zone,
+    /// Instant strike on the designated target (hitscan skills).
+    Beam,
+}
+
+impl WindowTemplate {
+    pub const ALL: [WindowTemplate; 4] = [
+        WindowTemplate::Strike,
+        WindowTemplate::Projectile,
+        WindowTemplate::Zone,
+        WindowTemplate::Beam,
+    ];
+    pub fn label(&self) -> &'static str {
+        match self {
+            WindowTemplate::Strike => "Strike (melee sweep)",
+            WindowTemplate::Projectile => "Projectile (flying bolt)",
+            WindowTemplate::Zone => "Zone (damage field)",
+            WindowTemplate::Beam => "Beam (hitscan strike)",
+        }
+    }
+}
+
+/// Build a window from a template with the given id.
+pub fn template_window(t: WindowTemplate, id: impl Into<String>) -> CollisionWindow {
+    let mut w = default_window(id);
+    match t {
+        WindowTemplate::Strike => {
+            w.active_duration = 0.15;
+            w.shape = CollisionShape::Sphere { radius: 1.2 };
+        }
+        WindowTemplate::Projectile => {
+            w.active_duration = 2.0;
+            w.shape = CollisionShape::Sphere { radius: 0.5 };
+            w.motion = VolumeMotion::Linear { speed: 20.0 };
+            w.hit_mode = HitMode::FirstOnly;
+        }
+        WindowTemplate::Zone => {
+            w.active_duration = 3.0;
+            w.shape = CollisionShape::Sphere { radius: 2.0 };
+            w.hit_mode = HitMode::EveryTick;
+            w.rehit_interval = Some(0.5);
+        }
+        WindowTemplate::Beam => {
+            w.active_duration = 0.15;
+            w.shape = CollisionShape::Sphere { radius: 0.3 };
+            w.motion = VolumeMotion::Beam;
+            w.hit_mode = HitMode::FirstOnly;
+        }
+    }
+    w
+}
+
+/// Append a template window with an auto-assigned unique id; returns its index.
+pub fn add_window_from_template(tl: &mut CastTimeline, t: WindowTemplate) -> usize {
+    let base = match t {
+        WindowTemplate::Strike => "strike",
+        WindowTemplate::Projectile => "bolt",
+        WindowTemplate::Zone => "zone",
+        WindowTemplate::Beam => "arc",
+    };
+    let mut id = base.to_string();
+    let mut n = 1;
+    while tl.collision_windows.iter().any(|w| w.id == id) {
+        id = format!("{base}_{n}");
+        n += 1;
+    }
+    tl.collision_windows.push(template_window(t, id));
+    tl.collision_windows.len() - 1
+}
+
 /// Set a window's start to absolute time `new_start_abs`, converting to a phase-relative
 /// `spawn_offset` (clamped so a start before the phase begins pins the offset to 0). No-op for
 /// `Chained` windows — their start is their parent's end, not a scheduled time.

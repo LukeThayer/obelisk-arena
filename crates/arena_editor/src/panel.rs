@@ -1,45 +1,31 @@
-//! The bottom-dock egui panel — the skill designer's main authoring surface, dispatched by the
-//! editor's `dispatch_custom_panel` while in Skill mode.
+//! The skill designer's egui surfaces, dispatched by the editor's `dispatch_custom_panel`
+//! while in Skill mode (UX spec P1):
 //!
-//! A shared header row (skill id, an open/new-skill switcher, the Timeline|Rules|Effects tab
-//! strip, Save, and a status line) sits above whichever per-tab surface is active:
-//!   - Timeline: the M2/M3 phase strip — targeting/delivery ComboBoxes, windup/active/recovery
-//!     `DragValue`s, a painted phase-band + collision-window strip with a live playhead, the
-//!     hit-windows list — plus the cosmetic lanes (anim clip / vfx effect / socket / param
-//!     bindings). Edits flip `EditedSkill`/`EditedSkillFx` dirty.
-//!   - Rules: the obelisk `Skill` form (M4), editing `EditedRules`.
-//!   - Effects: the `EffectConfig` form (M4 stage 3), editing `EditedEffect`.
+//! - RIGHT: the selection-driven INSPECTOR (`inspector.rs`) — labeled, grouped properties for
+//!   whatever the [`crate::selection::SkillSelection`] points at (skill root / window / lane),
+//!   with registry-fed pickers and live validation.
+//! - BOTTOM: structure + time — the painted phase/window strip with the scrubber + playhead,
+//!   window chips and moment chips that drive the selection, template-based "+ Add", the
+//!   open/new-skill header, and Save. (The Rules/Effects tabs survive for advanced editing
+//!   until the graph canvas lands in P2.)
 //!
-//! Save is unified across all three surfaces: it always writes the `.cast.ron` (after deriving
-//! the locked vfx cues) and the `.skillfx.ron` — both editor-owned files with no external
-//! validation to fail. It writes the obelisk rules TOML only when `rules.dirty` and every
-//! `trigger_skill` ref resolves (the obelisk loader ERRORS on unknown refs), then hot-reloads the
-//! live `SkillRegistry`. It writes the effect TOML only when `effect.dirty`, then hot-swaps the
-//! process-global effect registry. Gating the rules/effect writes on their own dirty flags matters
-//! because `open_skill`/opening an effect is load-or-blank: a file the parser can't read opens as
-//! a blank seed with `dirty == false`, and an ungated Save would silently overwrite the real
-//! game-shared TOML with that blank.
+//! Save is unified: it always writes the `.cast.ron` (after deriving the locked vfx cues) and
+//! the `.skillfx.ron`; the obelisk rules TOML only when `rules.dirty` and every trigger ref
+//! resolves (hot-reloading the live `SkillRegistry`); the effect TOML only when `effect.dirty`
+//! (hot-swapping the process-global effect registry). The dirty gating matters because opening
+//! is load-or-blank — an ungated Save would overwrite a real game-shared TOML with a blank.
 //!
-//! Runs only windowed (needs a real egui context); `cargo build` is the compile gate and the boot
-//! test asserts the resource/registration wiring. The pure helpers it calls are unit-tested in their
-//! own modules.
+//! Runs only windowed (needs a real egui context); `cargo build` is the compile gate and the
+//! boot test asserts the resource/registration wiring. The pure helpers live in `derived`,
+//! `edits`, `fx_edits`, `timeline_geom` — unit-tested there.
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
-use obelisk_bevy::assets::{HitFilter, HitMode, WindowPhase};
+use obelisk_bevy::assets::WindowPhase;
 
-use arena_skills::{CueKind, VfxBindSource, VfxParamBinding};
+use arena_skills::CueKind;
 
-use crate::edits::add_collision_window;
-use crate::enum_ui::{
-    delivery_index, delivery_variant, motion_index, motion_variant, shape_index, shape_variant,
-    targeting_index, targeting_variant, DELIVERY_LABELS, MOTION_LABELS, SHAPE_LABELS,
-    TARGETING_LABELS,
-};
-use crate::fx_edits::{
-    add_param_binding, cue_keys_for, ensure_lane, set_anim_clip, set_particle_effect,
-    set_particle_socket,
-};
+use crate::fx_edits::cue_keys_for;
 use crate::effect_model::{sanitize_id, EditedEffect};
 use crate::io::{save_cast_timeline, save_skillfx};
 use crate::model::{derive_vfx_cues, EditedSkill, EditedSkillFx};
@@ -71,14 +57,60 @@ pub enum PanelTab {
 pub struct RulesStatus(pub String);
 
 /// Map a locked cue-id VALUE to the `CueKind` its lane reacts to, by suffix (`_cast` → OnCast,
-/// `_impact` → OnHit, otherwise a window cue → OnWindow).
-fn kind_for(cue: &str) -> CueKind {
+/// `_impact` → OnHit, `_end_*` → OnEnd, otherwise a window cue → OnWindow).
+pub(crate) fn kind_for(cue: &str) -> CueKind {
     if cue.ends_with("_cast") {
         CueKind::OnCast
     } else if cue.ends_with("_impact") {
         CueKind::OnHit
+    } else if cue.contains("_end_") {
+        CueKind::OnEnd
     } else {
         CueKind::OnWindow
+    }
+}
+
+/// The live registries the inspector's pickers list from, bundled as one `SystemParam` (Bevy
+/// caps systems at 16 params). Each is optional — headless test apps lack them.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct PanelRegistries<'w> {
+    sockets: Option<Res<'w, crate::socket::RigSockets>>,
+    anim_lib: Option<Res<'w, bevy_editor_game::AnimationLibrary>>,
+    vfx_lib: Option<Res<'w, bevy_vfx::VfxLibrary>>,
+}
+
+impl PanelRegistries<'_> {
+    fn picker_lists(&self) -> crate::inspector::PickerLists {
+        crate::inspector::PickerLists {
+            vfx_effects: self
+                .vfx_lib
+                .as_ref()
+                .map(|l| {
+                    let mut v: Vec<String> = l.effects.keys().cloned().collect();
+                    v.sort();
+                    v
+                })
+                .unwrap_or_default(),
+            anim_clips: self
+                .anim_lib
+                .as_ref()
+                .map(|l| {
+                    let mut v: Vec<String> = l
+                        .clips
+                        .keys()
+                        .map(|k| k.rsplit("::").next().unwrap_or(k).to_string())
+                        .collect();
+                    v.sort();
+                    v.dedup();
+                    v
+                })
+                .unwrap_or_default(),
+            sockets: self
+                .sockets
+                .as_ref()
+                .map(|s| s.names.clone())
+                .unwrap_or_default(),
+        }
     }
 }
 
@@ -110,6 +142,8 @@ pub fn draw_skill_panel(
     mut status: ResMut<RulesStatus>,
     playhead: Res<Playhead>,
     mut scrub: ResMut<crate::scrub::ScrubState>,
+    mut selection: ResMut<crate::selection::SkillSelection>,
+    registries: PanelRegistries,
     mut new_id: Local<String>,
     mut stat_query: Local<String>,
     mut new_effect_id: Local<String>,
@@ -119,6 +153,27 @@ pub fn draw_skill_panel(
     };
     let mut changed = false;
     let mut fx_changed = false;
+
+    // The selection-driven inspector (UX spec P1): a labeled right panel for whatever is
+    // selected — the properties surface; the bottom dock is structure + time only.
+    let lists = registries.picker_lists();
+    egui::SidePanel::right("skill_inspector")
+        .resizable(true)
+        .default_width(240.0)
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                crate::inspector::draw_inspector(
+                    ui,
+                    &mut selection,
+                    &mut edited,
+                    &mut edited_fx,
+                    &mut rules,
+                    &lists,
+                );
+            });
+        });
+    // Keep the legacy selected_window (gizmo reads it) in sync with the selection model.
+    edited.selected_window = selection.window();
     let mut save_clicked = false;
     let mut switch_to: Option<(EditedSkill, EditedSkillFx, EditedRules)> = None;
     egui::TopBottomPanel::bottom("skill_timeline")
@@ -177,8 +232,14 @@ pub fn draw_skill_panel(
             });
             match *tab {
                 PanelTab::Timeline => {
-                    let (c, fc) =
-                        draw_timeline_tab(ui, &mut edited, &mut edited_fx, &playhead, &mut scrub);
+                    let (c, fc) = draw_timeline_tab(
+                        ui,
+                        &mut edited,
+                        &mut edited_fx,
+                        &playhead,
+                        &mut scrub,
+                        &mut selection,
+                    );
                     changed |= c;
                     fx_changed |= fc;
                 }
@@ -284,77 +345,30 @@ pub fn draw_skill_panel(
     }
 }
 
-/// The M2/M3 timeline surface: targeting/delivery combos, phase DragValues, the painted
-/// phase/window strip + playhead, the hit-windows list, and the cosmetic lanes.
+/// The slim structure-and-time surface (UX spec P1): the painted phase/window strip with the
+/// scrubber + playhead, a window CHIP row and a lane CHIP row that drive the [`SkillSelection`]
+/// inspector, and a template-based "+ Add" menu. All property editing lives in the inspector.
 /// Returns (timeline_changed, fx_changed).
 fn draw_timeline_tab(
     ui: &mut egui::Ui,
     edited: &mut EditedSkill,
-    edited_fx: &mut EditedSkillFx,
+    _edited_fx: &mut EditedSkillFx,
     playhead: &Playhead,
     scrub: &mut crate::scrub::ScrubState,
+    selection: &mut crate::selection::SkillSelection,
 ) -> (bool, bool) {
     let mut changed = false;
-    let mut fx_changed = false;
-    ui.horizontal(|ui| {
-        let mut ti = targeting_index(&edited.timeline.targeting);
-        egui::ComboBox::from_id_salt("targeting")
-            .selected_text(TARGETING_LABELS[ti])
-            .show_ui(ui, |ui| {
-                for (i, l) in TARGETING_LABELS.iter().enumerate() {
-                    if ui.selectable_value(&mut ti, i, *l).clicked() {
-                        edited.timeline.targeting = targeting_variant(i);
-                        changed = true;
-                    }
-                }
-            });
-        let mut di = delivery_index(&edited.timeline.delivery);
-        egui::ComboBox::from_id_salt("delivery")
-            .selected_text(DELIVERY_LABELS[di])
-            .show_ui(ui, |ui| {
-                for (i, l) in DELIVERY_LABELS.iter().enumerate() {
-                    if ui.selectable_value(&mut di, i, *l).clicked() {
-                        edited.timeline.delivery = delivery_variant(i);
-                        changed = true;
-                    }
-                }
-            });
-    });
-    ui.horizontal(|ui| {
-        let d = &mut edited.timeline.phase_durations;
-        for (lab, val) in [
-            ("windup", &mut d.windup),
-            ("active", &mut d.active),
-            ("recovery", &mut d.recovery),
-        ] {
-            ui.label(lab);
-            if ui
-                .add(
-                    egui::DragValue::new(val)
-                        .speed(0.01)
-                        .range(0.0..=10.0)
-                        .suffix(" s"),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-        }
-    });
-    // The strip spans the phases EXTENDED to the latest window close (a projectile window
-    // routinely outlives the phases — firebolt's bolt flies 2 s past a 0.6 s cast), so the window
-    // bar fits and the scrub head can reach the impact moment at the window close.
+
+    // The strip spans the phases EXTENDED to the latest window close (chained windows resolved
+    // after their parent), so every end moment is reachable by the scrub head.
     let span = strip_span(&edited.timeline).max(0.0001);
-    // click_and_drag: the strip doubles as the scrubber — dragging across it fires the authored
-    // cue VFX in the viewport (see `crate::scrub`), no Play needed.
     let (rect, strip_resp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), STRIP_H),
         egui::Sense::click_and_drag(),
     );
     if strip_resp.clicked() || strip_resp.dragged() {
         if strip_resp.clicked() {
-            // A plain click re-arms the grab window so clicking directly ON a cue moment plays
-            // it (otherwise a click left of the last scrub position reads as a silent rewind).
+            // Re-arm the grab window so clicking directly ON a cue moment plays it.
             scrub.fired_up_to = None;
         }
         if let Some(pos) = strip_resp.interact_pointer_pos() {
@@ -376,17 +390,22 @@ fn draw_timeline_tab(
             PHASE_COLORS[i],
         );
     }
-    for w in &edited.timeline.collision_windows {
+    for (i, w) in edited.timeline.collision_windows.iter().enumerate() {
         let (ws, we) = resolved_window_span(&edited.timeline, w);
         let x0 = time_to_x(ws, span, rect.left(), rect.width());
         let x1 = time_to_x(we, span, rect.left(), rect.width());
+        let selected = *selection == crate::selection::SkillSelection::Window(i);
         p.rect_filled(
             egui::Rect::from_min_max(
                 egui::pos2(x0, rect.center().y + 2.0),
                 egui::pos2(x1.max(x0 + 2.0), rect.bottom()),
             ),
             2.0,
-            egui::Color32::from_rgb(220, 180, 60),
+            if selected {
+                egui::Color32::from_rgb(255, 220, 120)
+            } else {
+                egui::Color32::from_rgb(220, 180, 60)
+            },
         );
     }
     if playhead.active && playhead.total > 0.0 {
@@ -396,310 +415,87 @@ fn draw_timeline_tab(
             egui::Stroke::new(2.0, egui::Color32::from_rgb(230, 70, 70)),
         );
     } else if let Some(t) = scrub.time {
-        // The scrub head (idle only — the live playhead wins while a cast plays).
         let x = time_to_x(t, span, rect.left(), rect.width());
         p.line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
             egui::Stroke::new(2.0, egui::Color32::from_rgb(240, 160, 50)),
         );
     }
-    ui.horizontal(|ui| {
-        ui.label("Hit Windows");
-        if ui.button("+ Add").clicked() {
-            add_collision_window(&mut edited.timeline);
-            changed = true;
+    ui.label(
+        egui::RichText::new("drag the strip to scrub — bound vfx fire at their moments")
+            .small()
+            .weak(),
+    );
+
+    // Window chips — click to inspect. "+ Add" offers the archetype templates.
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new("Windows").strong());
+        let sel_root = *selection == crate::selection::SkillSelection::Root;
+        if ui.selectable_label(sel_root, "⚙ skill").clicked() {
+            *selection = crate::selection::SkillSelection::Root;
+        }
+        for (i, w) in edited.timeline.collision_windows.iter().enumerate() {
+            let sel = *selection == crate::selection::SkillSelection::Window(i);
+            let chained = w.spawn_phase == WindowPhase::Chained;
+            let label = if chained {
+                format!("↳ {}", w.id)
+            } else {
+                w.id.clone()
+            };
+            if ui.selectable_label(sel, label).clicked() {
+                *selection = crate::selection::SkillSelection::Window(i);
+            }
+        }
+        egui::ComboBox::from_id_salt("add_window")
+            .selected_text("+ Add")
+            .show_ui(ui, |ui| {
+                for t in crate::edits::WindowTemplate::ALL {
+                    if ui.button(t.label()).clicked() {
+                        let idx =
+                            crate::edits::add_window_from_template(&mut edited.timeline, t);
+                        *selection = crate::selection::SkillSelection::Window(idx);
+                        changed = true;
+                    }
+                }
+            });
+        // Delete the selected window (chips are the list; deletion lives with them).
+        if let crate::selection::SkillSelection::Window(i) = *selection {
+            if ui.small_button("🗑 delete").clicked()
+                && i < edited.timeline.collision_windows.len()
+            {
+                edited.timeline.collision_windows.remove(i);
+                *selection = crate::selection::SkillSelection::Root;
+                changed = true;
+            }
         }
     });
-    let len = edited.timeline.collision_windows.len();
-    for idx in 0..len {
-        let selected = edited.selected_window == Some(idx);
-        ui.push_id(idx, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(selected, &edited.timeline.collision_windows[idx].id)
-                    .clicked()
-                {
-                    edited.selected_window = Some(idx);
-                }
-                let mut si = shape_index(&edited.timeline.collision_windows[idx].shape);
-                egui::ComboBox::from_id_salt("shape")
-                    .selected_text(SHAPE_LABELS[si])
-                    .show_ui(ui, |ui| {
-                        for (i, l) in SHAPE_LABELS.iter().enumerate() {
-                            if ui.selectable_value(&mut si, i, *l).clicked() {
-                                edited.timeline.collision_windows[idx].shape = shape_variant(i);
-                                changed = true;
-                            }
-                        }
-                    });
-                let mut mi = motion_index(&edited.timeline.collision_windows[idx].motion);
-                egui::ComboBox::from_id_salt("motion")
-                    .selected_text(MOTION_LABELS[mi])
-                    .show_ui(ui, |ui| {
-                        for (i, l) in MOTION_LABELS.iter().enumerate() {
-                            if ui.selectable_value(&mut mi, i, *l).clicked() {
-                                edited.timeline.collision_windows[idx].motion = motion_variant(i);
-                                changed = true;
-                            }
-                        }
-                    });
-                // The motion variant's params, editable in place.
-                match &mut edited.timeline.collision_windows[idx].motion {
-                    obelisk_bevy::assets::VolumeMotion::Static => {}
-                    obelisk_bevy::assets::VolumeMotion::Linear { speed } => {
-                        if ui
-                            .add(egui::DragValue::new(speed).speed(0.1).range(0.0..=100.0).prefix("spd "))
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                    }
-                    obelisk_bevy::assets::VolumeMotion::Ballistic { speed, gravity } => {
-                        if ui
-                            .add(egui::DragValue::new(speed).speed(0.1).range(0.0..=100.0).prefix("spd "))
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                        if ui
-                            .add(egui::DragValue::new(gravity).speed(0.1).range(0.0..=100.0).prefix("grav "))
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                    }
-                    // Beam: instantaneous strike on the designated target — no motion params.
-                    obelisk_bevy::assets::VolumeMotion::Beam => {}
-                }
-                let f = &mut edited.timeline.collision_windows[idx].hit_filter;
-                egui::ComboBox::from_id_salt("filter")
-                    .selected_text(format!("{f:?}"))
-                    .show_ui(ui, |ui| {
-                        for o in [
-                            HitFilter::Caster,
-                            HitFilter::Allies,
-                            HitFilter::Enemies,
-                            HitFilter::All,
-                        ] {
-                            if ui.selectable_value(f, o, format!("{o:?}")).clicked() {
-                                changed = true;
-                            }
-                        }
-                    });
-                let m = &mut edited.timeline.collision_windows[idx].hit_mode;
-                egui::ComboBox::from_id_salt("mode")
-                    .selected_text(format!("{m:?}"))
-                    .show_ui(ui, |ui| {
-                        for o in [
-                            HitMode::OncePerTarget,
-                            HitMode::FirstOnly,
-                            HitMode::EveryTick,
-                        ] {
-                            if ui.selectable_value(m, o, format!("{o:?}")).clicked() {
-                                changed = true;
-                            }
-                        }
-                    });
-                let ph = &mut edited.timeline.collision_windows[idx].spawn_phase;
-                egui::ComboBox::from_id_salt("phase")
-                    .selected_text(format!("{ph:?}"))
-                    .show_ui(ui, |ui| {
-                        for o in [
-                            WindowPhase::Windup,
-                            WindowPhase::Active,
-                            WindowPhase::Recovery,
-                            // Chained: never scheduled — spawns at a parent window's end
-                            // position via that parent's `on_end` chain.
-                            WindowPhase::Chained,
-                        ] {
-                            if ui.selectable_value(ph, o, format!("{o:?}")).clicked() {
-                                changed = true;
-                            }
-                        }
-                    });
-                let w = &mut edited.timeline.collision_windows[idx];
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut w.spawn_offset)
-                            .speed(0.01)
-                            .range(0.0..=10.0)
-                            .prefix("off "),
-                    )
-                    .changed()
-                {
-                    changed = true;
-                }
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut w.active_duration)
-                            .speed(0.01)
-                            .range(0.0..=10.0)
-                            .prefix("dur "),
-                    )
-                    .changed()
-                {
-                    changed = true;
-                }
-                // The window's on_end reaction: what its termination spawns at the end position
-                // — chain a window there, or RETARGET (seek the nearest un-struck enemy and
-                // beam the window onto it; hit-reason only, hop-bounded). v1 UI sets the chain
-                // on ALL THREE reasons and retarget on hit — the schema stays per-reason.
-                use obelisk_bevy::assets::{EndReaction, OnEnd};
-                let other_ids: Vec<String> = edited
-                    .timeline
-                    .collision_windows
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != idx)
-                    .map(|(_, w)| w.id.clone())
-                    .collect();
-                let self_id = edited.timeline.collision_windows[idx].id.clone();
-                let w = &mut edited.timeline.collision_windows[idx];
-                let current = match &w.on_end.hit {
-                    Some(EndReaction::Chain(id)) => format!("chain {id}"),
-                    Some(EndReaction::Retarget { window, .. }) => format!("hop {window}"),
-                    None => "(none)".to_string(),
-                };
-                egui::ComboBox::from_id_salt("on_end")
-                    .selected_text(format!("end→{current}"))
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_label(current == "(none)", "(none)").clicked() {
-                            w.on_end = Default::default();
-                            changed = true;
-                        }
-                        for id in &other_ids {
-                            let label = format!("chain {id}");
-                            if ui.selectable_label(current == label, &label).clicked() {
-                                let chain = Some(EndReaction::Chain(id.clone()));
-                                w.on_end = OnEnd {
-                                    hit: chain.clone(),
-                                    world: chain.clone(),
-                                    fuse: chain,
-                                };
-                                changed = true;
-                            }
-                        }
-                        // Retarget may target any window INCLUDING this one (self-hop, the
-                        // chain-lightning shape) — the hop counter bounds the cycle.
-                        for id in other_ids.iter().chain([&self_id]) {
-                            let label = format!("hop {id}");
-                            if ui.selectable_label(current == label, &label).clicked() {
-                                w.on_end = OnEnd {
-                                    hit: Some(EndReaction::Retarget {
-                                        window: id.clone(),
-                                        radius: 6.0,
-                                        max_hops: 3,
-                                    }),
-                                    world: None,
-                                    fuse: None,
-                                };
-                                changed = true;
-                            }
-                        }
-                    });
-                if let Some(EndReaction::Retarget {
-                    radius, max_hops, ..
-                }) = &mut w.on_end.hit
-                {
-                    if ui
-                        .add(egui::DragValue::new(radius).speed(0.1).range(0.5..=30.0).prefix("r "))
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    let mut hops = *max_hops as u32;
-                    if ui
-                        .add(egui::DragValue::new(&mut hops).range(1..=16).prefix("hops "))
-                        .changed()
-                    {
-                        *max_hops = hops as u8;
-                        changed = true;
-                    }
-                }
-            });
-        });
-    }
 
-    ui.separator();
-    ui.label("Cosmetic Lanes");
-    for cue in cue_keys_for(&edited.timeline) {
-        let kind = kind_for(&cue);
-        ui.push_id(&cue, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(&cue);
-                let lane = ensure_lane(&mut edited_fx.fx, &cue, kind);
+    // Moment (lane) chips — one per locked cue, click to author its visuals.
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new("Moments").strong());
+        for cue in cue_keys_for(&edited.timeline) {
+            let cue_value = derive_vfx_cues(&edited.timeline)
+                .get(&cue)
+                .cloned()
+                .unwrap_or_else(|| cue.clone());
+            let sel = *selection == crate::selection::SkillSelection::Lane(cue_value.clone());
+            // Human labels: on_cast -> "cast", on_window_bolt -> "bolt opens", ...
+            let label = if cue == "on_cast" {
+                "✨ cast".to_string()
+            } else if cue == "on_hit" {
+                "✚ hit".to_string()
+            } else if let Some(w) = cue.strip_prefix("on_window_") {
+                format!("▶ {w}")
+            } else if let Some(w) = cue.strip_prefix("on_end_") {
+                format!("💥 {w} ends")
+            } else {
+                cue.clone()
+            };
+            if ui.selectable_label(sel, label).clicked() {
+                *selection = crate::selection::SkillSelection::Lane(cue_value);
+            }
+        }
+    });
 
-                // Anim clip text field (Task 29 upgrades this to a clip ComboBox).
-                let mut clip = lane
-                    .anim
-                    .as_ref()
-                    .and_then(|a| a.clip.clone())
-                    .unwrap_or_default();
-                if ui
-                    .add(egui::TextEdit::singleline(&mut clip).hint_text("anim clip"))
-                    .changed()
-                {
-                    let next = if clip.is_empty() { None } else { Some(clip) };
-                    set_anim_clip(lane, next, 0, 1.0);
-                    fx_changed = true;
-                }
-
-                // Particle effect name text field.
-                let mut effect = lane
-                    .particle
-                    .as_ref()
-                    .and_then(|p| p.effect.clone())
-                    .unwrap_or_default();
-                if ui
-                    .add(egui::TextEdit::singleline(&mut effect).hint_text("vfx effect"))
-                    .changed()
-                {
-                    set_particle_effect(
-                        lane,
-                        if effect.is_empty() {
-                            None
-                        } else {
-                            Some(effect)
-                        },
-                    );
-                    fx_changed = true;
-                }
-
-                // Socket text field (Task 28 upgrades this to a RigSockets ComboBox).
-                let mut socket = lane
-                    .particle
-                    .as_ref()
-                    .and_then(|p| p.socket.clone())
-                    .unwrap_or_default();
-                if ui
-                    .add(egui::TextEdit::singleline(&mut socket).hint_text("(root)"))
-                    .changed()
-                {
-                    set_particle_socket(
-                        lane,
-                        if socket.is_empty() {
-                            None
-                        } else {
-                            Some(socket)
-                        },
-                    );
-                    fx_changed = true;
-                }
-
-                if ui.button("+ charge→scale").clicked() {
-                    add_param_binding(
-                        lane,
-                        VfxParamBinding {
-                            param: "scale".into(),
-                            source: VfxBindSource::Charge,
-                            min: 0.5,
-                            max: 2.0,
-                        },
-                    );
-                    fx_changed = true;
-                }
-            });
-        });
-    }
-    (changed, fx_changed)
+    (changed, false)
 }

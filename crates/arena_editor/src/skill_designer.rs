@@ -42,6 +42,7 @@ impl Plugin for SkillDesignerPlugin {
     fn build(&self, app: &mut App) {
         register_skill_mode(app);
         app.init_resource::<crate::panel::PanelTab>();
+        app.init_resource::<crate::selection::SkillSelection>();
         app.init_resource::<crate::panel::RulesStatus>();
         // The preview lifecycle: a persistent floor at Startup + the Play→duel handler (retires the
         // old idle-startup combatant spawn — combatants now spawn on `GameStartedEvent`).

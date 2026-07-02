@@ -96,14 +96,9 @@ pub fn start_preview(
         // the rig silently doesn't render).
         .insert((PreviewCaster, GameEntity, Visibility::default()))
         .grant_skill(skill_id.clone());
-    let mut meshmat = meshes.zip(materials);
-    let mut spawn_dummy = |commands: &mut Commands,
-                           id: &str,
-                           pos: Vec3,
-                           meshmat: &mut Option<(
-        ResMut<Assets<Mesh>>,
-        ResMut<Assets<StandardMaterial>>,
-    )>| {
+    type MeshMat<'w> = Option<(ResMut<'w, Assets<Mesh>>, ResMut<'w, Assets<StandardMaterial>>)>;
+    let mut meshmat: MeshMat = meshes.zip(materials);
+    let spawn_dummy = |commands: &mut Commands, id: &str, pos: Vec3, meshmat: &mut MeshMat| {
         let dummy = make_arena_combatant(commands, id, Faction::Enemy, pos);
         commands
             .entity(dummy)
