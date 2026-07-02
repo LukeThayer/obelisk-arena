@@ -81,6 +81,7 @@ impl Plugin for SkillDesignerPlugin {
         // Cosmetics: on each fired obelisk `CueEvent`, play the bound `EditedSkillFx` lanes —
         // drive the caster's anim clip + spawn `bevy_vfx` at the resolved socket with baked params.
         // Every spawned cosmetic carries a `CosmeticLifetime` (presets loop forever otherwise).
+        // The cosmetic clocks share the scrub freeze so vfx hang mid-life at the frozen instant.
         app.init_resource::<crate::preview_cosmetics::PreviewCharge>()
             .add_observer(crate::preview_cosmetics::on_preview_cue)
             .add_systems(
@@ -88,12 +89,34 @@ impl Plugin for SkillDesignerPlugin {
                 (
                     crate::preview_cosmetics::age_preview_cosmetics,
                     crate::preview_cosmetics::fly_preview_cosmetics,
+                )
+                    .run_if(crate::scrub::sim_unfrozen),
+            );
+        // SIM-BACKED scrubbing (UX spec P3): dragging the strip restarts + fast-forwards the
+        // REAL deterministic sim on the persistent stage and freezes it at the target time.
+        // The freeze is a run-condition gate on the obelisk sets — EDITOR-ONLY (the game never
+        // adds this plugin), and set configs are additive so this composes with arena_sim's.
+        app.init_resource::<crate::scrub::ScrubSim>()
+            .add_systems(Update, crate::scrub::drive_scrub)
+            .add_systems(
+                FixedUpdate,
+                crate::scrub::tick_scrub_clock
+                    .run_if(crate::scrub::sim_unfrozen)
+                    .before(obelisk_bevy::ObeliskSet::Validate),
+            );
+        {
+            use obelisk_bevy::ObeliskSet;
+            app.configure_sets(
+                FixedUpdate,
+                (
+                    ObeliskSet::Validate.run_if(crate::scrub::sim_unfrozen),
+                    ObeliskSet::Advance.run_if(crate::scrub::sim_unfrozen),
+                    ObeliskSet::Projectiles.run_if(crate::scrub::sim_unfrozen),
+                    ObeliskSet::ResolveHits.run_if(crate::scrub::sim_unfrozen),
+                    ObeliskSet::TickEffects.run_if(crate::scrub::sim_unfrozen),
                 ),
             );
-        // Timeline scrubbing: dragging the panel's phase strip fires the authored cue VFX in the
-        // viewport without a Play (synthetic `CueEvent`s through the same observer).
-        app.init_resource::<crate::scrub::ScrubState>()
-            .add_systems(Update, crate::scrub::fire_scrub_cues);
+        }
         // Merge WORKSPACE-authored vfx presets (assets/vfx + assets/skills *.vfx.ron — e.g.
         // firebolt_trail) into the `VfxLibrary`, overriding built-ins — the same dirs the game's
         // `init_vfx_library` scans, so authored-in-designer == rendered-in-game. Startup: after

@@ -1,135 +1,166 @@
-//! Timeline scrubbing end-to-end (headless): dragging the scrub head across a cue moment fires the
-//! bound lane through the SAME `on_preview_cue` observer the live sim drives — with NO duel
-//! entities in the world (edit mode). The impact lane spawns a world-space cosmetic staged at the
-//! dummy marker, and `age_preview_cosmetics` despawns it once its `CosmeticLifetime` expires.
+//! SIM-BACKED scrubbing end-to-end (UX spec P3, headless): dragging the scrub target restarts
+//! the cast on the persistent stage, fast-forwards the REAL deterministic sim, and FREEZES it
+//! at the target — the bolt's hitbox is at its true arc position, damage has resolved iff the
+//! target is past the true hit moment, and a backward drag replays identically (same seed).
 
-use arena_editor::model::{EditedSkill, EditedSkillFx};
-use arena_editor::preview_controller::Playhead;
-use arena_editor::preview_cosmetics::{
-    age_preview_cosmetics, on_preview_cue, PreviewCharge, PreviewCosmetic,
-};
-use arena_editor::preview_rig::PreviewAnimGraph;
-use arena_editor::scrub::{fire_scrub_cues, ScrubState};
-use arena_editor::socket::RigSockets;
-use arena_sim::spawn::SPAWN_MARKERS;
-use arena_skills::{CueKind, LaneEvent, ParticleSpec, SkillFx};
+use arena_editor::io::{editor_root, load_cast_timeline};
+use arena_editor::model::EditedSkill;
+use arena_editor::preview_controller::PreviewControllerPlugin;
+use arena_editor::scrub::{drive_scrub, sim_unfrozen, tick_scrub_clock, ScrubMode, ScrubSim};
+use arena_sim::preview::ArenaSimPreviewPlugin;
 use bevy::prelude::*;
-use bevy_vfx::data::VfxLibrary;
-use obelisk_bevy::assets::{
-    CollisionShape, CollisionWindow, HitFilter, HitMode, VolumeMotion, WindowPhase,
-};
-use std::collections::HashMap;
-use std::path::PathBuf;
+use bevy_editor_game::GameStartedEvent;
+use obelisk_bevy::prelude::{ObeliskConfigExt, SkillSource};
+use obelisk_bevy::testkit::{init_test_obelisk, EventRecorder, EventRecorderPlugin};
 use std::time::Duration;
 
-fn impact_only_fx() -> SkillFx {
-    let impact = LaneEvent {
-        lane_id: "firebolt_impact".into(),
-        kind: CueKind::OnHit,
-        particle: Some(ParticleSpec {
-            count: 20,
-            lifetime: 0.5,
-            color: [1.0, 0.3, 0.05],
-            speed: 5.0,
-            effect: None,
-            socket: None,
-            offset: Vec3::ZERO,
-            param_bindings: Vec::new(),
-        }),
-        projectile: None,
-        beam: None,
-        anim: None,
-    };
-    SkillFx {
-        skill_id: "firebolt".into(),
-        lanes: HashMap::from([("firebolt_impact".to_string(), impact)]),
+fn scrub_app() -> App {
+    init_test_obelisk();
+    let root = editor_root();
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(bevy::asset::AssetPlugin {
+            file_path: ".".into(),
+            ..default()
+        })
+        .add_plugins(bevy::mesh::MeshPlugin)
+        .add_plugins(bevy::scene::ScenePlugin)
+        .add_plugins(EventRecorderPlugin)
+        .add_plugins(bevy::state::app::StatesPlugin)
+        .init_state::<bevy_editor_game::GameState>()
+        .add_message::<GameStartedEvent>()
+        .add_message::<bevy_editor_game::GameResetEvent>()
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_secs_f64(1.0 / 60.0),
+        ))
+        .insert_resource(Time::<Fixed>::from_hz(60.0))
+        .add_plugins(ArenaSimPreviewPlugin)
+        .add_plugins(PreviewControllerPlugin)
+        // The scrub machinery, wired exactly as the designer plugin does it.
+        .init_resource::<ScrubSim>()
+        .add_systems(Update, drive_scrub)
+        .add_systems(
+            FixedUpdate,
+            tick_scrub_clock
+                .run_if(sim_unfrozen)
+                .before(obelisk_bevy::ObeliskSet::Validate),
+        );
+    {
+        use obelisk_bevy::ObeliskSet;
+        app.configure_sets(
+            FixedUpdate,
+            (
+                ObeliskSet::Validate.run_if(sim_unfrozen),
+                ObeliskSet::Advance.run_if(sim_unfrozen),
+                ObeliskSet::Projectiles.run_if(sim_unfrozen),
+                ObeliskSet::ResolveHits.run_if(sim_unfrozen),
+                ObeliskSet::TickEffects.run_if(sim_unfrozen),
+            ),
+        );
+    }
+    app.add_obelisk_skills(SkillSource::Dir(root.join("config/skills")));
+    app.seed_combat_rng(0);
+    let path = root.join("assets/skills/firebolt.cast.ron");
+    let tl = load_cast_timeline(&path).expect("firebolt parses");
+    app.insert_resource(EditedSkill::from_timeline(tl, path));
+    app.finish();
+    app.cleanup();
+    app
+}
+
+fn step(app: &mut App, n: usize) {
+    for _ in 0..n {
+        app.update();
     }
 }
 
-fn firebolt_like_timeline() -> obelisk_bevy::assets::CastTimeline {
-    let mut tl = arena_editor::blank_cast_timeline("firebolt");
-    tl.collision_windows.push(CollisionWindow {
-        id: "bolt".into(),
-        spawn_phase: WindowPhase::Active,
-        spawn_offset: 0.0,
-        active_duration: 2.0,
-        shape: CollisionShape::Sphere { radius: 0.5 },
-        motion: VolumeMotion::Linear { speed: 20.0 },
-        hit_filter: HitFilter::Enemies,
-        hit_mode: HitMode::FirstOnly,
-        rehit_interval: None,
-        on_end: Default::default(),
-    });
-    tl
+fn set_target(app: &mut App, t: f32) {
+    app.world_mut().resource_mut::<ScrubSim>().target = Some(t);
 }
 
 #[test]
-fn scrubbing_past_the_hit_moment_spawns_and_then_ages_out_the_impact() {
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins)
-        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            Duration::from_secs_f64(0.3),
-        ))
-        .init_resource::<RigSockets>()
-        .init_resource::<PreviewAnimGraph>()
-        .init_resource::<VfxLibrary>()
-        .init_resource::<PreviewCharge>()
-        .init_resource::<Playhead>()
-        .init_resource::<ScrubState>()
-        .insert_resource(EditedSkill::from_timeline(
-            firebolt_like_timeline(),
-            PathBuf::from("firebolt.cast.ron"),
-        ))
-        .insert_resource(EditedSkillFx::from_fx(
-            impact_only_fx(),
-            PathBuf::from("firebolt.skillfx.ron"),
-        ))
-        .add_observer(on_preview_cue)
-        .add_systems(Update, (fire_scrub_cues, age_preview_cosmetics));
+fn seek_freezes_the_sim_at_the_target_before_the_hit() {
+    let mut app = scrub_app();
+    step(&mut app, 3); // stage spawns
 
-    // Drag from t=0 forward past the hit moment (window close at 0.3 + 2.0 = 2.3).
-    {
-        let mut scrub = app.world_mut().resource_mut::<ScrubState>();
-        scrub.fired_up_to = Some(0.0);
-        scrub.time = Some(2.5);
-    }
-    app.update();
+    // Seek to mid-flight: after the window opens (0.3) but before the true hit (~0.7).
+    set_target(&mut app, 0.5);
+    step(&mut app, 200); // plenty — seek runs at 24x
 
-    let cosmetics: Vec<Entity> = app
-        .world_mut()
-        .query_filtered::<Entity, With<PreviewCosmetic>>()
-        .iter(app.world())
-        .collect();
-    assert_eq!(cosmetics.len(), 1, "the impact lane fires once on crossing");
-    let tf = app.world().get::<Transform>(cosmetics[0]).unwrap();
-    assert_eq!(
-        tf.translation, SPAWN_MARKERS[1],
-        "impact staged at the dummy marker"
-    );
+    let scrub = app.world().resource::<ScrubSim>();
+    assert_eq!(scrub.mode, ScrubMode::Frozen, "seek must land in Frozen");
     assert!(
-        app.world().get::<ChildOf>(cosmetics[0]).is_none(),
-        "no caster exists — the cosmetic must be a world-space root"
+        (scrub.clock - 0.5).abs() < 0.1,
+        "frozen near the target: {}",
+        scrub.clock
+    );
+    // The bolt hitbox EXISTS, frozen mid-flight, and no damage has resolved yet.
+    let hitboxes = app
+        .world_mut()
+        .query::<&obelisk_bevy::prelude::Hitbox>()
+        .iter(app.world())
+        .count();
+    assert_eq!(hitboxes, 1, "bolt frozen mid-flight");
+    let rec = app.world().resource::<EventRecorder>();
+    assert!(
+        rec.damage_resolved.is_empty(),
+        "no damage before the true hit moment"
     );
 
-    // Holding still re-fires nothing.
-    app.update();
-    let n = app
-        .world_mut()
-        .query_filtered::<Entity, With<PreviewCosmetic>>()
-        .iter(app.world())
-        .count();
-    assert_eq!(n, 1, "a stationary scrub head must not re-fire the cue");
+    // FROZEN means frozen: many frames later the clock hasn't moved.
+    let clock_before = app.world().resource::<ScrubSim>().clock;
+    step(&mut app, 30);
+    let clock_after = app.world().resource::<ScrubSim>().clock;
+    assert_eq!(clock_before, clock_after, "the sim is paused at the instant");
+}
 
-    // The 0.5 s CosmeticLifetime expires after two more 0.3 s ticks, then the entity survives
-    // two grace frames (effect stopped, entity alive for bevy_vfx's queued cleanup) before the
-    // despawn lands.
-    for _ in 0..5 {
-        app.update();
-    }
-    let n = app
-        .world_mut()
-        .query_filtered::<Entity, With<PreviewCosmetic>>()
-        .iter(app.world())
-        .count();
-    assert_eq!(n, 0, "the impact cosmetic ages out");
+#[test]
+fn seeking_past_the_hit_resolves_real_damage_and_backward_replays() {
+    let mut app = scrub_app();
+    step(&mut app, 3);
+
+    // Past the whole flight: the direct hit + chained blast resolve for real.
+    set_target(&mut app, 1.2);
+    step(&mut app, 300);
+    let first = {
+        let rec = app.world().resource::<EventRecorder>();
+        let dmg: Vec<f64> = rec.damage_resolved.iter().map(|d| d.total_damage).collect();
+        assert!(
+            !dmg.is_empty(),
+            "seeking past the hit resolves REAL damage (bolt + blast)"
+        );
+        dmg
+    };
+
+    // Backward drag: restart + reseek — deterministic, so the same damage resolves again.
+    set_target(&mut app, 1.1);
+    step(&mut app, 300);
+    let rec = app.world().resource::<EventRecorder>();
+    let total = rec.damage_resolved.len();
+    assert_eq!(
+        total,
+        first.len() * 2,
+        "the replayed run resolves the same number of hits"
+    );
+    let second: Vec<f64> = rec
+        .damage_resolved
+        .iter()
+        .skip(first.len())
+        .map(|d| d.total_damage)
+        .collect();
+    assert_eq!(first, second, "same seed, identical replay");
+}
+
+#[test]
+fn replay_runs_to_the_end_and_freezes() {
+    let mut app = scrub_app();
+    step(&mut app, 3);
+    app.world_mut().resource_mut::<ScrubSim>().replay_requested = true;
+    // firebolt strip span = 2.3 s -> 138 fixed ticks at 1x; run enough frames.
+    step(&mut app, 200);
+    let scrub = app.world().resource::<ScrubSim>();
+    assert_eq!(scrub.mode, ScrubMode::Frozen, "replay freezes at the end");
+    assert!(scrub.clock >= 2.2, "ran the whole strip: {}", scrub.clock);
+    let rec = app.world().resource::<EventRecorder>();
+    assert!(!rec.damage_resolved.is_empty(), "the replayed cast hit for real");
 }

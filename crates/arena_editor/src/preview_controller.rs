@@ -1,21 +1,22 @@
-//! The preview lifecycle controller: turns the editor's Play/Reset into a real obelisk duel that
-//! casts the CURRENTLY-EDITED timeline, so "Play the real skill" runs exactly what you author.
+//! The preview lifecycle controller (UX spec P3): a PERSISTENT STAGE the whole session long.
 //!
-//! - `spawn_preview_floor` (Startup, persistent): the arena floor sits under the editor the whole
-//!   session (it is NOT a `GameEntity`, so Reset leaves it in place).
-//! - `start_preview` (on `GameStartedEvent`): registers `EditedSkill`'s timeline (with freshly
-//!   derived vfx cues) into `CastTimelineHandles`, spawns a Player `PreviewCaster` + Enemy
-//!   `PreviewDummy` duel — both tagged `GameEntity` so the editor despawns them on Reset — grants
-//!   the skill, and casts caster→dummy through the real deterministic sim.
-//!
-//! This retires Task 13's idle `spawn_preview_on_startup`: the floor is persistent (here), the
-//! combatants are spawned on Play (not at boot).
+//! - `spawn_preview_floor` (Startup): the arena floor + visible slab, never despawned.
+//! - `ensure_stage` (Update): the caster (+rig) and dummies exist while EDITING — visible
+//!   during scrubbing, synced to the edited skill (retargeting skills get a second dummy).
+//!   Stage entities are NOT `GameEntity`.
+//! - `start_preview` (on `GameStartedEvent` / Play): `reset_stage()` + `stage_cast()` — the
+//!   same deterministic reset/cast path the scrubber uses, at live speed.
+//! - `reset_stage_on_reset` (on `GameResetEvent`): heal + reposition + clear in-flight state
+//!   instead of despawning.
+//! - `PreviewStageReset`/`stage_cast` are the shared reset/cast machinery (scrub restart, Play,
+//!   editor Reset), keeping every path identical: reseeded RNG, cleared cooldowns, refilled
+//!   mana — every replay is the same replay.
 
 use crate::model::{derive_vfx_cues, EditedSkill};
 use arena_sim::preview::{PreviewCaster, PreviewDummy};
 use arena_sim::spawn::{make_arena_combatant, spawn_arena_floor, SPAWN_MARKERS};
 use bevy::prelude::*;
-use bevy_editor_game::{GameCamera, GameEntity, GameResetEvent, GameStartedEvent, GameState};
+use bevy_editor_game::{GameCamera, GameResetEvent, GameStartedEvent, GameState};
 use obelisk_bevy::prelude::{
     ActiveCast, CastSkillExt, CastTimeline, CastTimelineHandles, Faction, ObeliskCommandsExt,
     SkillPhase,
@@ -31,7 +32,10 @@ impl Plugin for PreviewControllerPlugin {
             .add_systems(
                 Update,
                 (
-                    start_preview,
+                    // Chained: the stage must exist (commands applied at the auto sync point)
+                    // before Play's cast looks for the caster.
+                    (ensure_stage, start_preview).chain(),
+                    reset_stage_on_reset,
                     sync_playhead,
                     clear_playhead_on_reset,
                     keep_editor_camera_during_play,
@@ -63,49 +67,61 @@ pub fn spawn_preview_floor(
     }
 }
 
-/// On a `GameStartedEvent`: register the edited timeline (with derived cues) into
-/// `CastTimelineHandles`, spawn the `GameEntity`-tagged caster+dummy duel, grant the skill, and cast.
-pub fn start_preview(
-    mut started: MessageReader<GameStartedEvent>,
+/// Marks a persistent stage combatant's home position (heal/reposition target on reset).
+#[derive(Component)]
+pub struct StagePost(pub Vec3);
+
+/// The PERSISTENT STAGE (UX spec P3): the caster + dummies exist the whole session — visible
+/// while editing and scrubbing, reused by Play. Spawns whatever is missing and syncs the dummy
+/// count to the edited skill (retargeting skills stage a second dummy to hop to). NOT
+/// `GameEntity`: the editor's Reset heals/repositions instead of despawning (see
+/// `reset_stage_on_reset`).
+pub fn ensure_stage(
     edited: Res<EditedSkill>,
-    mut handles: ResMut<CastTimelineHandles>,
-    mut timelines: ResMut<Assets<CastTimeline>>,
+    casters: Query<(), With<PreviewCaster>>,
+    dummies: Query<Entity, With<PreviewDummy>>,
     meshes: Option<ResMut<Assets<Mesh>>>,
     materials: Option<ResMut<Assets<StandardMaterial>>>,
     mut commands: Commands,
 ) {
-    if started.read().next().is_none() {
-        return;
-    }
-    let mut tl = edited.timeline.clone();
-    tl.vfx_cues = derive_vfx_cues(&tl);
-    let skill_id = tl.skill_id.clone();
-    let handle = timelines.add(tl);
-    handles.0.insert(skill_id.clone(), handle);
-
-    let caster = make_arena_combatant(
-        &mut commands,
-        "preview_caster",
-        Faction::Player,
-        SPAWN_MARKERS[0],
-    );
-    commands
-        .entity(caster)
-        // Visibility on the combatant root: the rig scene hangs under it, and a parent without
-        // `InheritedVisibility` breaks the child subtree's visibility propagation (Bevy B0004 —
-        // the rig silently doesn't render).
-        .insert((PreviewCaster, GameEntity, Visibility::default()))
-        .grant_skill(skill_id.clone());
     type MeshMat<'w> = Option<(ResMut<'w, Assets<Mesh>>, ResMut<'w, Assets<StandardMaterial>>)>;
     let mut meshmat: MeshMat = meshes.zip(materials);
-    let spawn_dummy = |commands: &mut Commands, id: &str, pos: Vec3, meshmat: &mut MeshMat| {
-        let dummy = make_arena_combatant(commands, id, Faction::Enemy, pos);
+    if casters.is_empty() {
+        let caster = make_arena_combatant(
+            &mut commands,
+            "preview_caster",
+            Faction::Player,
+            SPAWN_MARKERS[0],
+        );
+        commands.entity(caster).insert((
+            PreviewCaster,
+            StagePost(SPAWN_MARKERS[0]),
+            // Visibility on the root: a parent without InheritedVisibility silently unrenders
+            // the rig subtree (Bevy B0004).
+            Visibility::default(),
+        ));
+    }
+    let retargets = edited.timeline.collision_windows.iter().any(|w| {
+        [&w.on_end.hit, &w.on_end.world, &w.on_end.fuse]
+            .into_iter()
+            .flatten()
+            .any(|r| matches!(r, obelisk_bevy::assets::EndReaction::Retarget { .. }))
+    });
+    let want = if retargets { 2 } else { 1 };
+    let have = dummies.iter().count();
+    for i in have..want {
+        let pos = SPAWN_MARKERS[1] + Vec3::new(0.0, 0.0, 2.5) * i as f32;
+        let dummy = make_arena_combatant(
+            &mut commands,
+            if i == 0 { "preview_dummy" } else { "preview_dummy_2" },
+            Faction::Enemy,
+            pos,
+        );
         commands
             .entity(dummy)
-            .insert((PreviewDummy, GameEntity, Visibility::default()));
-        // Windowed, make the (rig-less) dummy visible so there's something to shoot at;
-        // headless test apps have no `StandardMaterial` assets and skip it. The caster is
-        // rendered by its glb rig (`preview_rig`), so its capsule stays mesh-less.
+            .insert((PreviewDummy, StagePost(pos), Visibility::default()));
+        // Windowed, give the (rig-less) dummy a visible capsule; headless test apps have no
+        // StandardMaterial assets and skip it.
         if let Some((meshes, materials)) = meshmat.as_mut() {
             commands.entity(dummy).insert((
                 Mesh3d(meshes.add(Capsule3d::new(
@@ -118,42 +134,128 @@ pub fn start_preview(
                 })),
             ));
         }
-        dummy
-    };
-    let dummy = spawn_dummy(&mut commands, "preview_dummy", SPAWN_MARKERS[1], &mut meshmat);
-    // A retargeting skill (chain lightning) needs someone to hop TO: stage a second dummy
-    // beside the first, inside typical hop radii.
-    let retargets = edited.timeline.collision_windows.iter().any(|w| {
-        [&w.on_end.hit, &w.on_end.world, &w.on_end.fuse]
-            .into_iter()
-            .flatten()
-            .any(|r| matches!(r, obelisk_bevy::assets::EndReaction::Retarget { .. }))
-    });
-    if retargets {
-        spawn_dummy(
-            &mut commands,
-            "preview_dummy_2",
-            SPAWN_MARKERS[1] + Vec3::new(0.0, 0.0, 2.5),
-            &mut meshmat,
-        );
     }
+    for (i, e) in dummies.iter().enumerate() {
+        if i >= want {
+            commands.entity(e).despawn();
+        }
+    }
+}
 
-    // Beam skills (SingleEntity targeting / Beam windows) cast ENTITY-AIMED at the dummy —
-    // hitscan acquisition already resolved in the real game, and obelisk's LOS raycast now
-    // excludes the caster's own hurtbox. Everything else casts by DIRECTION, matching the
-    // game's free aim; for a BALLISTIC window the aim is lofted (solve the launch pitch that
-    // lands the arc ON the dummy — level aim would ground the bolt short of it).
-    let is_beam_skill = edited
-        .timeline
+/// Everything a stage reset / stage cast needs, bundled (shared by the scrub restart, Play,
+/// and the editor's Reset).
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct PreviewStageReset<'w, 's> {
+    pub commands: Commands<'w, 's>,
+    casters: Query<'w, 's, Entity, With<PreviewCaster>>,
+    dummies: Query<'w, 's, Entity, (With<PreviewDummy>, Without<PreviewCaster>)>,
+    stage: Query<
+        'w,
+        's,
+        (
+            &'static mut obelisk_bevy::prelude::Attributes,
+            &'static StagePost,
+            &'static mut avian3d::prelude::Position,
+            &'static mut avian3d::prelude::LinearVelocity,
+        ),
+    >,
+    hitboxes: Query<'w, 's, Entity, With<obelisk_bevy::prelude::Hitbox>>,
+    cosmetics: Query<'w, 's, &'static mut crate::preview_cosmetics::CosmeticLifetime>,
+    rng: ResMut<'w, obelisk_bevy::prelude::CombatRng>,
+    cooldowns: ResMut<'w, obelisk_bevy::prelude::Cooldowns>,
+    handles: ResMut<'w, CastTimelineHandles>,
+    timelines: ResMut<'w, Assets<CastTimeline>>,
+}
+
+impl PreviewStageReset<'_, '_> {
+    /// Reset the stage to a clean, deterministic instant: despawn in-flight hitboxes and
+    /// cosmetics, interrupt any live cast, heal + refill everyone, reposition to home posts,
+    /// reseed the combat RNG (seed-0 default), clear cooldowns.
+    pub fn reset_stage(&mut self) {
+        for e in self.hitboxes.iter() {
+            self.commands.entity(e).try_despawn();
+        }
+        // Cosmetics EXPIRE in place (the grace path despawns them) rather than hard-despawn:
+        // bevy_vfx queues component inserts on fresh vfx entities the same frame, and a
+        // same-frame despawn makes those commands panic on a dead entity.
+        for mut life in self.cosmetics.iter_mut() {
+            life.elapsed = life.duration;
+        }
+        for e in self.casters.iter() {
+            self.commands.entity(e).interrupt_cast();
+        }
+        for (mut attrs, post, mut pos, mut vel) in self.stage.iter_mut() {
+            attrs.0.current_life = attrs.0.max_life.base;
+            attrs.0.current_mana = attrs.0.max_mana.base;
+            pos.0 = post.0;
+            vel.0 = Vec3::ZERO;
+        }
+        *self.rng = obelisk_bevy::prelude::CombatRng::default();
+        *self.cooldowns = Default::default();
+    }
+}
+
+/// Register `tl` under its skill id and cast it on the stage caster: entity-aimed at the first
+/// dummy for beam skills (hitscan acquisition already resolved in the real game), otherwise by
+/// direction with the ballistic loft solved to land ON the dummy. `charge` is the cast's
+/// charge byte (None = uncharged 1.0×; 85 ≈ a tap).
+pub fn stage_cast(reset: &mut PreviewStageReset, tl: CastTimeline, charge: Option<u8>) {
+    let skill_id = tl.skill_id.clone();
+    let is_beam_skill = tl
         .collision_windows
         .iter()
         .any(|w| matches!(w.motion, obelisk_bevy::assets::VolumeMotion::Beam));
-    if is_beam_skill {
-        commands.entity(caster).cast_skill_at(skill_id, dummy);
-    } else {
-        let aim = preview_aim(&edited.timeline, SPAWN_MARKERS[0], SPAWN_MARKERS[1]);
-        let dir = Dir3::new(aim).unwrap_or(Dir3::X);
-        commands.entity(caster).cast_skill_dir(skill_id, dir);
+    let aim = preview_aim(&tl, SPAWN_MARKERS[0], SPAWN_MARKERS[1]);
+    let handle = reset.timelines.add(tl);
+    reset.handles.0.insert(skill_id.clone(), handle);
+    let Some(caster) = reset.casters.iter().next() else {
+        return;
+    };
+    let dummy = reset.dummies.iter().next();
+    reset.commands.entity(caster).grant_skill(skill_id.clone());
+    match (is_beam_skill, dummy) {
+        (true, Some(dummy)) => {
+            reset
+                .commands
+                .entity(caster)
+                .cast_skill_at_charged(skill_id, dummy, charge.unwrap_or(85));
+        }
+        _ => {
+            let dir = Dir3::new(aim).unwrap_or(Dir3::X);
+            match charge {
+                Some(c) => reset
+                    .commands
+                    .entity(caster)
+                    .cast_skill_dir_charged(skill_id, dir, c),
+                None => reset.commands.entity(caster).cast_skill_dir(skill_id, dir),
+            };
+        }
+    }
+}
+
+/// On a `GameStartedEvent` (Play): reset the stage and cast the edited skill on it — the same
+/// deterministic path the scrubber uses, at live speed.
+pub fn start_preview(
+    mut started: MessageReader<GameStartedEvent>,
+    edited: Res<EditedSkill>,
+    scrub: Option<Res<crate::scrub::ScrubSim>>,
+    mut reset: PreviewStageReset,
+) {
+    if started.read().next().is_none() {
+        return;
+    }
+    let mut tl = edited.timeline.clone();
+    tl.vfx_cues = derive_vfx_cues(&tl);
+    let charge = scrub.map(|s| s.charge);
+    reset.reset_stage();
+    stage_cast(&mut reset, tl, charge);
+}
+
+/// The editor's Reset heals + repositions the persistent stage (it is not `GameEntity`, so the
+/// upstream despawn pass leaves it alone).
+pub fn reset_stage_on_reset(mut ev: MessageReader<GameResetEvent>, mut reset: PreviewStageReset) {
+    if ev.read().next().is_some() {
+        reset.reset_stage();
     }
 }
 

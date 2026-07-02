@@ -140,7 +140,7 @@ pub fn draw_skill_panel(
     mut tab: ResMut<PanelTab>,
     mut status: ResMut<RulesStatus>,
     playhead: Res<Playhead>,
-    mut scrub: ResMut<crate::scrub::ScrubState>,
+    mut scrub: ResMut<crate::scrub::ScrubSim>,
     mut selection: ResMut<crate::selection::SkillSelection>,
     registries: PanelRegistries,
     mut new_id: Local<String>,
@@ -353,7 +353,7 @@ fn draw_timeline_tab(
     edited: &mut EditedSkill,
     edited_fx: &mut EditedSkillFx,
     playhead: &Playhead,
-    scrub: &mut crate::scrub::ScrubState,
+    scrub: &mut crate::scrub::ScrubSim,
     selection: &mut crate::selection::SkillSelection,
 ) -> (bool, bool) {
     let mut changed = false;
@@ -366,13 +366,9 @@ fn draw_timeline_tab(
         egui::Sense::click_and_drag(),
     );
     if strip_resp.clicked() || strip_resp.dragged() {
-        if strip_resp.clicked() {
-            // Re-arm the grab window so clicking directly ON a cue moment plays it.
-            scrub.fired_up_to = None;
-        }
         if let Some(pos) = strip_resp.interact_pointer_pos() {
             let t = ((pos.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0) * span;
-            scrub.time = Some(t);
+            scrub.target = Some(t);
         }
     }
     let p = ui.painter_at(rect);
@@ -413,18 +409,57 @@ fn draw_timeline_tab(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
             egui::Stroke::new(2.0, egui::Color32::from_rgb(230, 70, 70)),
         );
-    } else if let Some(t) = scrub.time {
-        let x = time_to_x(t, span, rect.left(), rect.width());
+    } else if scrub.mode != crate::scrub::ScrubMode::Idle {
+        // The scrub head shows the SIM's actual clock (the frozen truth), not the request.
+        let x = time_to_x(scrub.clock, span, rect.left(), rect.width());
         p.line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
             egui::Stroke::new(2.0, egui::Color32::from_rgb(240, 160, 50)),
         );
     }
-    ui.label(
-        egui::RichText::new("drag the strip to scrub — bound vfx fire at their moments")
-            .small()
-            .weak(),
-    );
+    ui.horizontal(|ui| {
+        if ui
+            .button("⟳ replay")
+            .on_hover_text("re-run the cast at 1× from the start (deterministic)")
+            .clicked()
+        {
+            scrub.replay_requested = true;
+        }
+        match scrub.mode {
+            crate::scrub::ScrubMode::Frozen => {
+                ui.label(
+                    egui::RichText::new(format!("frozen at {:.2}s — drag to seek", scrub.clock))
+                        .small(),
+                );
+            }
+            crate::scrub::ScrubMode::Replaying | crate::scrub::ScrubMode::Seeking => {
+                ui.label(egui::RichText::new(format!("{:.2}s", scrub.clock)).small());
+            }
+            crate::scrub::ScrubMode::Idle => {
+                ui.label(
+                    egui::RichText::new("drag the strip to scrub the REAL sim; ⟳ replays")
+                        .small()
+                        .weak(),
+                );
+            }
+        }
+        ui.separator();
+        ui.label("charge");
+        let mut charge = scrub.charge as u32;
+        if ui
+            .add(egui::Slider::new(&mut charge, 0..=255).show_value(false))
+            .on_hover_text(
+                "cast charge: 85 ≈ tap (1.0×), 255 = full hold (2.0×) — scales speed AND damage",
+            )
+            .changed()
+        {
+            scrub.charge = charge as u8;
+        }
+        ui.label(
+            egui::RichText::new(format!("{:.2}×", 0.5 + (scrub.charge as f32 / 255.0) * 1.5))
+                .small(),
+        );
+    });
 
     // Window chips — click to inspect. "+ Add" offers the archetype templates.
     ui.horizontal_wrapped(|ui| {
@@ -494,14 +529,19 @@ fn draw_timeline_tab(
             let has_visuals = edited_fx.fx.lanes.get(&cue_value).is_some_and(|l| {
                 l.particle.is_some() || l.projectile.is_some() || l.beam.is_some() || l.anim.is_some()
             });
+            // Authored moments read solid; empty ones read as faint opportunities.
             let text = if has_visuals {
-                format!("● {label}")
+                egui::RichText::new(label).strong()
             } else {
-                format!("○ {label}")
+                egui::RichText::new(label).weak()
             };
             if ui
                 .selectable_label(sel, text)
-                .on_hover_text("click to author this moment's visuals")
+                .on_hover_text(if has_visuals {
+                    "has visuals — click to edit"
+                } else {
+                    "no visuals yet — click to author"
+                })
                 .clicked()
             {
                 *selection = crate::selection::SkillSelection::Lane(cue_value);

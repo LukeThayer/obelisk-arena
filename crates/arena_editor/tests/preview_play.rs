@@ -108,15 +108,17 @@ fn play_keeps_the_editor_camera_active() {
     );
 }
 
+/// The stage is PERSISTENT (UX spec P3): the caster exists without any Play, is NOT
+/// `GameEntity` (Reset heals instead of despawning), and there is exactly one.
 #[test]
-fn play_spawns_game_entity_tagged_caster() {
+fn stage_caster_is_persistent_and_not_game_entity() {
     let mut app = run(1, 3);
     let n = app
         .world_mut()
-        .query_filtered::<Entity, (With<PreviewCaster>, With<GameEntity>)>()
+        .query_filtered::<Entity, (With<PreviewCaster>, Without<GameEntity>)>()
         .iter(app.world())
         .count();
-    assert_eq!(n, 1);
+    assert_eq!(n, 1, "one persistent, non-GameEntity stage caster");
 }
 
 #[test]
@@ -134,16 +136,10 @@ fn playhead_tracks_active_cast_and_clears_on_reset() {
         assert!(ph.total > 0.0, "playhead total duration should be > 0");
     }
 
-    // Reset: despawn the GameEntity duel + fire GameResetEvent -> playhead clears, no PreviewCaster.
-    let game_entities: Vec<Entity> = app
-        .world_mut()
-        .query_filtered::<Entity, With<GameEntity>>()
-        .iter(app.world())
-        .collect();
-    for e in game_entities {
-        app.world_mut().entity_mut(e).despawn();
-    }
+    // Reset: the stage SURVIVES (heal/reposition, not despawn) — the playhead clears and the
+    // interrupted cast is gone, but the caster remains for the next scrub/Play.
     app.world_mut().write_message(GameResetEvent);
+    app.update();
     app.update();
 
     let ph = app.world().resource::<Playhead>();
@@ -154,7 +150,7 @@ fn playhead_tracks_active_cast_and_clears_on_reset() {
         .query_filtered::<Entity, With<PreviewCaster>>()
         .iter(app.world())
         .count();
-    assert_eq!(casters, 0, "no PreviewCaster should remain after reset");
+    assert_eq!(casters, 1, "the persistent stage caster survives reset");
 }
 
 /// Regression (skill-editor first light): `spawn_preview_rig` used to gate on `GameStartedEvent`
