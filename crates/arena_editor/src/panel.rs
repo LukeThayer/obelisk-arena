@@ -242,6 +242,20 @@ pub fn draw_skill_panel(
                 Err(e) => status.0 = format!("rules save failed: {e}"),
             }
         }
+        if effect.dirty {
+            match crate::io::save_effect_config(&effect.config, &effect.path) {
+                Ok(()) => {
+                    effect.dirty = false;
+                    match crate::io::reload_effect_registry() {
+                        Ok(n) => {
+                            status.0 = format!("{} | {n} effects swapped", status.0);
+                        }
+                        Err(e2) => status.0 = format!("{} | effect swap failed: {e2}", status.0),
+                    }
+                }
+                Err(e2) => status.0 = format!("{} | effect save failed: {e2}", status.0),
+            }
+        }
     }
 }
 
