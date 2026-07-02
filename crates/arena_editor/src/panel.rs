@@ -41,6 +41,21 @@ const PHASE_COLORS: [egui::Color32; 3] = [
     egui::Color32::from_rgb(60, 110, 80),
 ];
 
+/// Which authoring surface the bottom dock shows. Timeline = the M2/M3 phase strip + cosmetic
+/// lanes; Rules = the obelisk Skill form (M4); Effects = the EffectConfig form (M4 stage 3).
+#[derive(Resource, Default, PartialEq, Eq, Clone, Copy)]
+pub enum PanelTab {
+    #[default]
+    Timeline,
+    Rules,
+    Effects,
+}
+
+/// One-line save/reload status shown in the panel header (e.g. "saved; 3 skills reloaded",
+/// "rules save blocked: unknown trigger_skill 'x'").
+#[derive(Resource, Default)]
+pub struct RulesStatus(pub String);
+
 /// Map a locked cue-id VALUE to the `CueKind` its lane reacts to, by suffix (`_cast` → OnCast,
 /// `_impact` → OnHit, otherwise a window cue → OnWindow).
 fn kind_for(cue: &str) -> CueKind {
@@ -58,6 +73,8 @@ pub fn draw_skill_panel(
     mut contexts: EguiContexts,
     mut edited: ResMut<EditedSkill>,
     mut edited_fx: ResMut<EditedSkillFx>,
+    mut tab: ResMut<PanelTab>,
+    status: Res<RulesStatus>,
     playhead: Res<Playhead>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -72,287 +89,28 @@ pub fn draw_skill_panel(
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(&edited.timeline.skill_id).strong());
-                let mut ti = targeting_index(&edited.timeline.targeting);
-                egui::ComboBox::from_id_salt("targeting")
-                    .selected_text(TARGETING_LABELS[ti])
-                    .show_ui(ui, |ui| {
-                        for (i, l) in TARGETING_LABELS.iter().enumerate() {
-                            if ui.selectable_value(&mut ti, i, *l).clicked() {
-                                edited.timeline.targeting = targeting_variant(i);
-                                changed = true;
-                            }
-                        }
-                    });
-                let mut di = delivery_index(&edited.timeline.delivery);
-                egui::ComboBox::from_id_salt("delivery")
-                    .selected_text(DELIVERY_LABELS[di])
-                    .show_ui(ui, |ui| {
-                        for (i, l) in DELIVERY_LABELS.iter().enumerate() {
-                            if ui.selectable_value(&mut di, i, *l).clicked() {
-                                edited.timeline.delivery = delivery_variant(i);
-                                changed = true;
-                            }
-                        }
-                    });
+                ui.selectable_value(&mut *tab, PanelTab::Timeline, "Timeline");
+                ui.selectable_value(&mut *tab, PanelTab::Rules, "Rules");
+                ui.selectable_value(&mut *tab, PanelTab::Effects, "Effects");
                 if ui.button("Save").clicked() {
                     save_clicked = true;
                 }
-            });
-            ui.horizontal(|ui| {
-                let d = &mut edited.timeline.phase_durations;
-                for (lab, val) in [
-                    ("windup", &mut d.windup),
-                    ("active", &mut d.active),
-                    ("recovery", &mut d.recovery),
-                ] {
-                    ui.label(lab);
-                    if ui
-                        .add(
-                            egui::DragValue::new(val)
-                                .speed(0.01)
-                                .range(0.0..=10.0)
-                                .suffix(" s"),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
+                if !status.0.is_empty() {
+                    ui.label(egui::RichText::new(&status.0).small().weak());
                 }
             });
-            let span = total_duration(&edited.timeline.phase_durations).max(0.0001);
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), STRIP_H),
-                egui::Sense::hover(),
-            );
-            let p = ui.painter_at(rect);
-            p.rect_filled(rect, 0.0, egui::Color32::from_rgb(24, 24, 28));
-            for (i, (s, e)) in phase_spans(&edited.timeline.phase_durations)
-                .iter()
-                .enumerate()
-            {
-                let x0 = time_to_x(*s, span, rect.left(), rect.width());
-                let x1 = time_to_x(*e, span, rect.left(), rect.width());
-                p.rect_filled(
-                    egui::Rect::from_min_max(
-                        egui::pos2(x0, rect.top()),
-                        egui::pos2(x1, rect.center().y),
-                    ),
-                    0.0,
-                    PHASE_COLORS[i],
-                );
-            }
-            for w in &edited.timeline.collision_windows {
-                let (ws, we) = window_span(w, &edited.timeline.phase_durations);
-                let x0 = time_to_x(ws, span, rect.left(), rect.width());
-                let x1 = time_to_x(we, span, rect.left(), rect.width());
-                p.rect_filled(
-                    egui::Rect::from_min_max(
-                        egui::pos2(x0, rect.center().y + 2.0),
-                        egui::pos2(x1.max(x0 + 2.0), rect.bottom()),
-                    ),
-                    2.0,
-                    egui::Color32::from_rgb(220, 180, 60),
-                );
-            }
-            if playhead.active && playhead.total > 0.0 {
-                let x = time_to_x(playhead.elapsed, span, rect.left(), rect.width());
-                p.line_segment(
-                    [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                    egui::Stroke::new(2.0, egui::Color32::from_rgb(230, 70, 70)),
-                );
-            }
-            ui.horizontal(|ui| {
-                ui.label("Hit Windows");
-                if ui.button("+ Add").clicked() {
-                    add_collision_window(&mut edited.timeline);
-                    changed = true;
+            match *tab {
+                PanelTab::Timeline => {
+                    let (c, fc) = draw_timeline_tab(ui, &mut edited, &mut edited_fx, &playhead);
+                    changed |= c;
+                    fx_changed |= fc;
                 }
-            });
-            let len = edited.timeline.collision_windows.len();
-            for idx in 0..len {
-                let selected = edited.selected_window == Some(idx);
-                ui.push_id(idx, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .selectable_label(selected, &edited.timeline.collision_windows[idx].id)
-                            .clicked()
-                        {
-                            edited.selected_window = Some(idx);
-                        }
-                        let mut si = shape_index(&edited.timeline.collision_windows[idx].shape);
-                        egui::ComboBox::from_id_salt("shape")
-                            .selected_text(SHAPE_LABELS[si])
-                            .show_ui(ui, |ui| {
-                                for (i, l) in SHAPE_LABELS.iter().enumerate() {
-                                    if ui.selectable_value(&mut si, i, *l).clicked() {
-                                        edited.timeline.collision_windows[idx].shape =
-                                            shape_variant(i);
-                                        changed = true;
-                                    }
-                                }
-                            });
-                        let mut mi = motion_index(&edited.timeline.collision_windows[idx].motion);
-                        egui::ComboBox::from_id_salt("motion")
-                            .selected_text(MOTION_LABELS[mi])
-                            .show_ui(ui, |ui| {
-                                for (i, l) in MOTION_LABELS.iter().enumerate() {
-                                    if ui.selectable_value(&mut mi, i, *l).clicked() {
-                                        edited.timeline.collision_windows[idx].motion =
-                                            motion_variant(i);
-                                        changed = true;
-                                    }
-                                }
-                            });
-                        let f = &mut edited.timeline.collision_windows[idx].hit_filter;
-                        egui::ComboBox::from_id_salt("filter")
-                            .selected_text(format!("{f:?}"))
-                            .show_ui(ui, |ui| {
-                                for o in [
-                                    HitFilter::Caster,
-                                    HitFilter::Allies,
-                                    HitFilter::Enemies,
-                                    HitFilter::All,
-                                ] {
-                                    if ui.selectable_value(f, o, format!("{o:?}")).clicked() {
-                                        changed = true;
-                                    }
-                                }
-                            });
-                        let m = &mut edited.timeline.collision_windows[idx].hit_mode;
-                        egui::ComboBox::from_id_salt("mode")
-                            .selected_text(format!("{m:?}"))
-                            .show_ui(ui, |ui| {
-                                for o in [
-                                    HitMode::OncePerTarget,
-                                    HitMode::FirstOnly,
-                                    HitMode::EveryTick,
-                                ] {
-                                    if ui.selectable_value(m, o, format!("{o:?}")).clicked() {
-                                        changed = true;
-                                    }
-                                }
-                            });
-                        let ph = &mut edited.timeline.collision_windows[idx].spawn_phase;
-                        egui::ComboBox::from_id_salt("phase")
-                            .selected_text(format!("{ph:?}"))
-                            .show_ui(ui, |ui| {
-                                for o in [
-                                    WindowPhase::Windup,
-                                    WindowPhase::Active,
-                                    WindowPhase::Recovery,
-                                ] {
-                                    if ui.selectable_value(ph, o, format!("{o:?}")).clicked() {
-                                        changed = true;
-                                    }
-                                }
-                            });
-                        let w = &mut edited.timeline.collision_windows[idx];
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut w.spawn_offset)
-                                    .speed(0.01)
-                                    .range(0.0..=10.0)
-                                    .prefix("off "),
-                            )
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut w.active_duration)
-                                    .speed(0.01)
-                                    .range(0.0..=10.0)
-                                    .prefix("dur "),
-                            )
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                    });
-                });
-            }
-
-            ui.separator();
-            ui.label("Cosmetic Lanes");
-            for cue in cue_keys_for(&edited.timeline) {
-                let kind = kind_for(&cue);
-                ui.push_id(&cue, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(&cue);
-                        let lane = ensure_lane(&mut edited_fx.fx, &cue, kind);
-
-                        // Anim clip text field (Task 29 upgrades this to a clip ComboBox).
-                        let mut clip = lane
-                            .anim
-                            .as_ref()
-                            .and_then(|a| a.clip.clone())
-                            .unwrap_or_default();
-                        if ui
-                            .add(egui::TextEdit::singleline(&mut clip).hint_text("anim clip"))
-                            .changed()
-                        {
-                            let next = if clip.is_empty() { None } else { Some(clip) };
-                            set_anim_clip(lane, next, 0, 1.0);
-                            fx_changed = true;
-                        }
-
-                        // Particle effect name text field.
-                        let mut effect = lane
-                            .particle
-                            .as_ref()
-                            .and_then(|p| p.effect.clone())
-                            .unwrap_or_default();
-                        if ui
-                            .add(egui::TextEdit::singleline(&mut effect).hint_text("vfx effect"))
-                            .changed()
-                        {
-                            set_particle_effect(
-                                lane,
-                                if effect.is_empty() {
-                                    None
-                                } else {
-                                    Some(effect)
-                                },
-                            );
-                            fx_changed = true;
-                        }
-
-                        // Socket text field (Task 28 upgrades this to a RigSockets ComboBox).
-                        let mut socket = lane
-                            .particle
-                            .as_ref()
-                            .and_then(|p| p.socket.clone())
-                            .unwrap_or_default();
-                        if ui
-                            .add(egui::TextEdit::singleline(&mut socket).hint_text("(root)"))
-                            .changed()
-                        {
-                            set_particle_socket(
-                                lane,
-                                if socket.is_empty() {
-                                    None
-                                } else {
-                                    Some(socket)
-                                },
-                            );
-                            fx_changed = true;
-                        }
-
-                        if ui.button("+ charge→scale").clicked() {
-                            add_param_binding(
-                                lane,
-                                VfxParamBinding {
-                                    param: "scale".into(),
-                                    source: VfxBindSource::Charge,
-                                    min: 0.5,
-                                    max: 2.0,
-                                },
-                            );
-                            fx_changed = true;
-                        }
-                    });
-                });
+                PanelTab::Rules => {
+                    ui.label("Rules authoring lands in Task 5.");
+                }
+                PanelTab::Effects => {
+                    ui.label("Effect authoring lands in Stage 3.");
+                }
             }
         });
     if changed {
@@ -372,4 +130,293 @@ pub fn draw_skill_panel(
             edited_fx.dirty = false;
         }
     }
+}
+
+/// The M2/M3 timeline surface: targeting/delivery combos, phase DragValues, the painted
+/// phase/window strip + playhead, the hit-windows list, and the cosmetic lanes.
+/// Returns (timeline_changed, fx_changed).
+fn draw_timeline_tab(
+    ui: &mut egui::Ui,
+    edited: &mut EditedSkill,
+    edited_fx: &mut EditedSkillFx,
+    playhead: &Playhead,
+) -> (bool, bool) {
+    let mut changed = false;
+    let mut fx_changed = false;
+    ui.horizontal(|ui| {
+        let mut ti = targeting_index(&edited.timeline.targeting);
+        egui::ComboBox::from_id_salt("targeting")
+            .selected_text(TARGETING_LABELS[ti])
+            .show_ui(ui, |ui| {
+                for (i, l) in TARGETING_LABELS.iter().enumerate() {
+                    if ui.selectable_value(&mut ti, i, *l).clicked() {
+                        edited.timeline.targeting = targeting_variant(i);
+                        changed = true;
+                    }
+                }
+            });
+        let mut di = delivery_index(&edited.timeline.delivery);
+        egui::ComboBox::from_id_salt("delivery")
+            .selected_text(DELIVERY_LABELS[di])
+            .show_ui(ui, |ui| {
+                for (i, l) in DELIVERY_LABELS.iter().enumerate() {
+                    if ui.selectable_value(&mut di, i, *l).clicked() {
+                        edited.timeline.delivery = delivery_variant(i);
+                        changed = true;
+                    }
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        let d = &mut edited.timeline.phase_durations;
+        for (lab, val) in [
+            ("windup", &mut d.windup),
+            ("active", &mut d.active),
+            ("recovery", &mut d.recovery),
+        ] {
+            ui.label(lab);
+            if ui
+                .add(
+                    egui::DragValue::new(val)
+                        .speed(0.01)
+                        .range(0.0..=10.0)
+                        .suffix(" s"),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+        }
+    });
+    let span = total_duration(&edited.timeline.phase_durations).max(0.0001);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), STRIP_H),
+        egui::Sense::hover(),
+    );
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 0.0, egui::Color32::from_rgb(24, 24, 28));
+    for (i, (s, e)) in phase_spans(&edited.timeline.phase_durations)
+        .iter()
+        .enumerate()
+    {
+        let x0 = time_to_x(*s, span, rect.left(), rect.width());
+        let x1 = time_to_x(*e, span, rect.left(), rect.width());
+        p.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.center().y)),
+            0.0,
+            PHASE_COLORS[i],
+        );
+    }
+    for w in &edited.timeline.collision_windows {
+        let (ws, we) = window_span(w, &edited.timeline.phase_durations);
+        let x0 = time_to_x(ws, span, rect.left(), rect.width());
+        let x1 = time_to_x(we, span, rect.left(), rect.width());
+        p.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(x0, rect.center().y + 2.0),
+                egui::pos2(x1.max(x0 + 2.0), rect.bottom()),
+            ),
+            2.0,
+            egui::Color32::from_rgb(220, 180, 60),
+        );
+    }
+    if playhead.active && playhead.total > 0.0 {
+        let x = time_to_x(playhead.elapsed, span, rect.left(), rect.width());
+        p.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(230, 70, 70)),
+        );
+    }
+    ui.horizontal(|ui| {
+        ui.label("Hit Windows");
+        if ui.button("+ Add").clicked() {
+            add_collision_window(&mut edited.timeline);
+            changed = true;
+        }
+    });
+    let len = edited.timeline.collision_windows.len();
+    for idx in 0..len {
+        let selected = edited.selected_window == Some(idx);
+        ui.push_id(idx, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(selected, &edited.timeline.collision_windows[idx].id)
+                    .clicked()
+                {
+                    edited.selected_window = Some(idx);
+                }
+                let mut si = shape_index(&edited.timeline.collision_windows[idx].shape);
+                egui::ComboBox::from_id_salt("shape")
+                    .selected_text(SHAPE_LABELS[si])
+                    .show_ui(ui, |ui| {
+                        for (i, l) in SHAPE_LABELS.iter().enumerate() {
+                            if ui.selectable_value(&mut si, i, *l).clicked() {
+                                edited.timeline.collision_windows[idx].shape = shape_variant(i);
+                                changed = true;
+                            }
+                        }
+                    });
+                let mut mi = motion_index(&edited.timeline.collision_windows[idx].motion);
+                egui::ComboBox::from_id_salt("motion")
+                    .selected_text(MOTION_LABELS[mi])
+                    .show_ui(ui, |ui| {
+                        for (i, l) in MOTION_LABELS.iter().enumerate() {
+                            if ui.selectable_value(&mut mi, i, *l).clicked() {
+                                edited.timeline.collision_windows[idx].motion = motion_variant(i);
+                                changed = true;
+                            }
+                        }
+                    });
+                let f = &mut edited.timeline.collision_windows[idx].hit_filter;
+                egui::ComboBox::from_id_salt("filter")
+                    .selected_text(format!("{f:?}"))
+                    .show_ui(ui, |ui| {
+                        for o in [
+                            HitFilter::Caster,
+                            HitFilter::Allies,
+                            HitFilter::Enemies,
+                            HitFilter::All,
+                        ] {
+                            if ui.selectable_value(f, o, format!("{o:?}")).clicked() {
+                                changed = true;
+                            }
+                        }
+                    });
+                let m = &mut edited.timeline.collision_windows[idx].hit_mode;
+                egui::ComboBox::from_id_salt("mode")
+                    .selected_text(format!("{m:?}"))
+                    .show_ui(ui, |ui| {
+                        for o in [
+                            HitMode::OncePerTarget,
+                            HitMode::FirstOnly,
+                            HitMode::EveryTick,
+                        ] {
+                            if ui.selectable_value(m, o, format!("{o:?}")).clicked() {
+                                changed = true;
+                            }
+                        }
+                    });
+                let ph = &mut edited.timeline.collision_windows[idx].spawn_phase;
+                egui::ComboBox::from_id_salt("phase")
+                    .selected_text(format!("{ph:?}"))
+                    .show_ui(ui, |ui| {
+                        for o in [
+                            WindowPhase::Windup,
+                            WindowPhase::Active,
+                            WindowPhase::Recovery,
+                        ] {
+                            if ui.selectable_value(ph, o, format!("{o:?}")).clicked() {
+                                changed = true;
+                            }
+                        }
+                    });
+                let w = &mut edited.timeline.collision_windows[idx];
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut w.spawn_offset)
+                            .speed(0.01)
+                            .range(0.0..=10.0)
+                            .prefix("off "),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut w.active_duration)
+                            .speed(0.01)
+                            .range(0.0..=10.0)
+                            .prefix("dur "),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+            });
+        });
+    }
+
+    ui.separator();
+    ui.label("Cosmetic Lanes");
+    for cue in cue_keys_for(&edited.timeline) {
+        let kind = kind_for(&cue);
+        ui.push_id(&cue, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(&cue);
+                let lane = ensure_lane(&mut edited_fx.fx, &cue, kind);
+
+                // Anim clip text field (Task 29 upgrades this to a clip ComboBox).
+                let mut clip = lane
+                    .anim
+                    .as_ref()
+                    .and_then(|a| a.clip.clone())
+                    .unwrap_or_default();
+                if ui
+                    .add(egui::TextEdit::singleline(&mut clip).hint_text("anim clip"))
+                    .changed()
+                {
+                    let next = if clip.is_empty() { None } else { Some(clip) };
+                    set_anim_clip(lane, next, 0, 1.0);
+                    fx_changed = true;
+                }
+
+                // Particle effect name text field.
+                let mut effect = lane
+                    .particle
+                    .as_ref()
+                    .and_then(|p| p.effect.clone())
+                    .unwrap_or_default();
+                if ui
+                    .add(egui::TextEdit::singleline(&mut effect).hint_text("vfx effect"))
+                    .changed()
+                {
+                    set_particle_effect(
+                        lane,
+                        if effect.is_empty() {
+                            None
+                        } else {
+                            Some(effect)
+                        },
+                    );
+                    fx_changed = true;
+                }
+
+                // Socket text field (Task 28 upgrades this to a RigSockets ComboBox).
+                let mut socket = lane
+                    .particle
+                    .as_ref()
+                    .and_then(|p| p.socket.clone())
+                    .unwrap_or_default();
+                if ui
+                    .add(egui::TextEdit::singleline(&mut socket).hint_text("(root)"))
+                    .changed()
+                {
+                    set_particle_socket(
+                        lane,
+                        if socket.is_empty() {
+                            None
+                        } else {
+                            Some(socket)
+                        },
+                    );
+                    fx_changed = true;
+                }
+
+                if ui.button("+ charge→scale").clicked() {
+                    add_param_binding(
+                        lane,
+                        VfxParamBinding {
+                            param: "scale".into(),
+                            source: VfxBindSource::Charge,
+                            min: 0.5,
+                            max: 2.0,
+                        },
+                    );
+                    fx_changed = true;
+                }
+            });
+        });
+    }
+    (changed, fx_changed)
 }
