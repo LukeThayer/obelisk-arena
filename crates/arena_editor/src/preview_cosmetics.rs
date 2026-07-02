@@ -67,7 +67,7 @@ pub struct PreviewFlight {
 /// reaches the floor plane has hit the ground: pin it there and expire its [`CosmeticLifetime`]
 /// (mirrors the sim, which despawns grounded projectile hitboxes).
 pub fn fly_preview_cosmetics(
-    time: Res<Time>,
+    time: Res<Time<Fixed>>,
     mut q: Query<(&mut PreviewFlight, &mut Transform, &mut CosmeticLifetime)>,
 ) {
     let dt = time.delta_secs();
@@ -85,7 +85,7 @@ pub fn fly_preview_cosmetics(
 /// Tick every [`CosmeticLifetime`]; on expiry stop the effect (remove its `VfxSystem`), then
 /// despawn the entity after the grace frames (see [`CosmeticLifetime::grace`]).
 pub fn age_preview_cosmetics(
-    time: Res<Time>,
+    time: Res<Time<Fixed>>,
     mut q: Query<(Entity, &mut CosmeticLifetime)>,
     mut commands: Commands,
 ) {

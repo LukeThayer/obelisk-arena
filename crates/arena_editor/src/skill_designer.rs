@@ -81,11 +81,13 @@ impl Plugin for SkillDesignerPlugin {
         // Cosmetics: on each fired obelisk `CueEvent`, play the bound `EditedSkillFx` lanes —
         // drive the caster's anim clip + spawn `bevy_vfx` at the resolved socket with baked params.
         // Every spawned cosmetic carries a `CosmeticLifetime` (presets loop forever otherwise).
-        // The cosmetic clocks share the scrub freeze so vfx hang mid-life at the frozen instant.
+        // The cosmetic clocks live on SIM time (FixedUpdate, gated with the sim): they age and
+        // fly inside the synchronous seek exactly as many ticks as the sim ran, and hang
+        // mid-life at the frozen instant.
         app.init_resource::<crate::preview_cosmetics::PreviewCharge>()
             .add_observer(crate::preview_cosmetics::on_preview_cue)
             .add_systems(
-                Update,
+                FixedUpdate,
                 (
                     crate::preview_cosmetics::age_preview_cosmetics,
                     crate::preview_cosmetics::fly_preview_cosmetics,

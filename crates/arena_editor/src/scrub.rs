@@ -1,24 +1,29 @@
 //! SIM-BACKED scrubbing (UX spec P3, D2): the scrub head drives the REAL deterministic sim,
 //! not a synthetic staging. Dragging to time `t` restarts the cast on the persistent stage
-//! (same seed → identical every time) and fast-forwards the fixed-tick sim to `t`, then
-//! FREEZES it there — the bolt hangs mid-arc exactly where the game would have it, hits and
-//! chains land at their true moments, and you can orbit the frozen instant with the camera
-//! (only the SIM is frozen, via a run-condition gate on the obelisk sets; virtual time only
-//! pulses fast during the brief catch-up).
+//! (same seed → identical every time) and runs the fixed-tick sim to `t` SYNCHRONOUSLY —
+//! `drive_scrub` is an exclusive system that calls `world.run_schedule(FixedUpdate)` for
+//! exactly the ticks needed, so every drag frame ends with the sim AT the pointer (no
+//! multi-frame catch-up, no virtual-time games, camera untouched). Between drags the sim is
+//! FROZEN via a run-condition gate on the obelisk sets: the bolt hangs mid-arc exactly where
+//! the game would have it, and hits/chains have resolved iff the target is past their true
+//! moments.
 //!
-//! Verbs: DRAG the strip (seek — forward continues, backward restarts + reseeks), ⟳ REPLAY
-//! (restart, run at 1×, auto-freeze at the end), and the charge slider (the cast's charge
-//! byte — arcs flatten and damage scales, honestly, because it IS the sim).
+//! Verbs: DRAG the strip (forward continues from the current tick; backward restarts and
+//! re-sims the prefix — deterministic, identical every time), ⟳ REPLAY (restart, run ambient
+//! at 1×, auto-freeze at the strip end), and the charge slider (the cast's charge byte —
+//! arcs flatten and damage scales, honestly, because it IS the sim).
 
 use crate::model::derive_vfx_cues;
 use crate::model::EditedSkill;
 use crate::preview_controller::{stage_cast, PreviewStageReset};
 use crate::timeline_geom::strip_span;
+use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy_editor_game::GameState;
 
-/// How fast the catch-up runs (virtual-time relative speed while seeking).
-const SEEK_SPEED: f32 = 24.0;
+/// Hard cap on fixed ticks one synchronous seek may run (10 s of sim at 60 Hz) — a guard
+/// against a runaway span, not a tuning knob.
+const MAX_SEEK_TICKS: u32 = 600;
 
 /// The scrub session's state machine.
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
@@ -49,14 +54,15 @@ pub struct ScrubSim {
     pub charge: u8,
     /// True once a scrub cast has been fired on the stage this session.
     cast_live: bool,
-    /// The target the CURRENT seek is running toward. `tick_scrub_clock` freezes the sim the
-    /// moment the clock crosses it — BETWEEN fixed ticks, so a fast-forward frame that would
-    /// gulp seconds of sim stops on the exact tick instead of overshooting. Comparing the
-    /// USER's `target` against this (not against the clock) is what distinguishes a real
-    /// backward drag from seek overshoot.
+    /// The target the last seek served. Comparing the USER's `target` against this (never
+    /// against the clock, which sits one tick past by construction) distinguishes a real new
+    /// request from holding still.
     sought: Option<f32>,
     /// Where a replay auto-freezes (the strip end, captured at replay start).
     end: f32,
+    /// True only INSIDE `drive_scrub`'s synchronous tick loop — unfreezes the obelisk sets
+    /// for the manually-run schedule while the ambient fixed loop stays frozen.
+    exclusive_running: bool,
 }
 
 impl Default for ScrubSim {
@@ -70,124 +76,118 @@ impl Default for ScrubSim {
             cast_live: false,
             sought: None,
             end: 0.0,
+            exclusive_running: false,
         }
     }
 }
 
-impl ScrubSim {
-    pub fn frozen(&self) -> bool {
-        self.mode == ScrubMode::Frozen
-    }
-}
-
-/// Run condition gating the obelisk sim sets (+ the preview cosmetic clocks): the sim runs
-/// unless the scrub has it frozen. Registered by the skill designer ONLY — the game never sees
-/// this gate.
+/// Run condition gating the obelisk sim sets (+ the preview cosmetic clocks). The ambient
+/// fixed loop runs the sim only when NO scrub session holds it (Idle) or a replay is playing;
+/// during Seeking/Frozen all sim advancement happens inside `drive_scrub`'s synchronous loop
+/// (which sets `exclusive_running`). Registered by the skill designer ONLY — the game never
+/// sees this gate.
 pub fn sim_unfrozen(scrub: Option<Res<ScrubSim>>) -> bool {
-    scrub.is_none_or(|s| !s.frozen())
+    scrub.is_none_or(|s| match s.mode {
+        ScrubMode::Idle | ScrubMode::Replaying => true,
+        ScrubMode::Seeking | ScrubMode::Frozen => s.exclusive_running,
+    })
 }
 
-/// Tick the scrub clock with the fixed clock while a scrub cast is live, and FREEZE the sim
-/// the tick the clock crosses the sought time / replay end. Runs in FixedUpdate ordered before
-/// the obelisk sets and gated like them: a fast-forward frame that runs many fixed ticks stops
-/// on the exact tick (the remaining obelisk iterations that frame see the freeze and skip),
-/// instead of overshooting by the whole frame's virtual gulp.
+/// Tick the scrub clock with the fixed clock while a scrub cast is live; freeze a replay the
+/// tick it crosses the strip end. Gated like the sim, ordered before the obelisk sets.
 pub fn tick_scrub_clock(time: Res<Time<Fixed>>, mut scrub: ResMut<ScrubSim>) {
     if !scrub.cast_live {
         return;
     }
     scrub.clock += time.delta_secs();
-    match scrub.mode {
-        ScrubMode::Seeking if scrub.sought.is_some_and(|t| scrub.clock >= t) => {
-            scrub.mode = ScrubMode::Frozen;
-        }
-        ScrubMode::Replaying if scrub.clock >= scrub.end => {
-            scrub.mode = ScrubMode::Frozen;
-        }
-        _ => {}
+    if scrub.mode == ScrubMode::Replaying && scrub.clock >= scrub.end {
+        scrub.mode = ScrubMode::Frozen;
     }
 }
 
-/// The scrub state machine (Update):
-/// - a new/backward `target` (or a replay request) RESTARTS the stage cast — deterministic
-///   reseed, so every replay is identical;
-/// - Seeking runs virtual time at [`SEEK_SPEED`] until `clock` reaches `target`, then freezes;
-/// - Replaying runs at 1× and freezes at the strip end;
-/// - entering Play (GameState != Editing) ends the session and returns everything to normal.
-#[allow(clippy::too_many_arguments)]
-pub fn drive_scrub(
-    mut scrub: ResMut<ScrubSim>,
-    edited: Res<EditedSkill>,
-    game_state: Res<State<GameState>>,
-    mut virtual_time: ResMut<Time<Virtual>>,
-    mut reset: PreviewStageReset,
-) {
+/// The scrub state machine — an EXCLUSIVE system: a new target runs the fixed schedule
+/// synchronously for exactly the ticks needed (restarting first for backward targets), so the
+/// frame ends with the sim AT the pointer and frozen there. Replay runs on the ambient fixed
+/// loop at 1× and freezes at the strip end. Entering Play ends the session.
+pub fn drive_scrub(world: &mut World) {
     // Play owns the sim: end any scrub session the moment we leave Editing.
-    if *game_state.get() != GameState::Editing {
+    let game_state = *world.resource::<State<GameState>>().get();
+    if game_state != GameState::Editing {
+        let mut scrub = world.resource_mut::<ScrubSim>();
         if scrub.mode != ScrubMode::Idle {
             scrub.mode = ScrubMode::Idle;
             scrub.cast_live = false;
-            virtual_time.set_relative_speed(1.0);
         }
         return;
     }
 
-    let span = strip_span(&edited.timeline).max(0.0001);
+    let span = strip_span(&world.resource::<EditedSkill>().timeline).max(0.0001);
 
-    // Replay request: restart and run at 1×; `tick_scrub_clock` freezes at the strip end.
-    if scrub.replay_requested {
+    // Replay request: restart, then let the ambient loop play it at 1×.
+    if world.resource::<ScrubSim>().replay_requested {
+        restart_cast(world);
+        let mut scrub = world.resource_mut::<ScrubSim>();
         scrub.replay_requested = false;
-        restart_cast(&mut scrub, &edited, &mut reset);
         scrub.mode = ScrubMode::Replaying;
         scrub.end = span;
         scrub.target = None;
-        virtual_time.set_relative_speed(1.0);
         return;
     }
 
-    match scrub.mode {
-        ScrubMode::Replaying => {
-            // Freeze happens tick-precise in `tick_scrub_clock`; restore normal speed once it
-            // lands (harmless if already 1×).
-        }
-        ScrubMode::Idle | ScrubMode::Frozen | ScrubMode::Seeking => {
-            let Some(raw) = scrub.target else {
-                return;
-            };
-            let target = raw.clamp(0.0, span);
-            if scrub.sought == Some(target) && scrub.cast_live {
-                // Same request as the running/finished seek: hold. (Overshoot past `target`
-                // is seek granularity, NOT a backward drag — never compare clock to target
-                // for restart decisions.)
-                if scrub.mode == ScrubMode::Frozen {
-                    virtual_time.set_relative_speed(1.0);
-                }
-                return;
-            }
-            // New request: restart only if we can't reach it by running FORWARD.
-            if !scrub.cast_live || target < scrub.clock - 1e-4 {
-                restart_cast(&mut scrub, &edited, &mut reset);
-            }
-            scrub.sought = Some(target);
-            if scrub.clock >= target {
-                scrub.mode = ScrubMode::Frozen;
-                virtual_time.set_relative_speed(1.0);
-            } else {
-                scrub.mode = ScrubMode::Seeking;
-                virtual_time.set_relative_speed(SEEK_SPEED);
-            }
-        }
+    if world.resource::<ScrubSim>().mode == ScrubMode::Replaying {
+        return; // ambient loop is playing; tick_scrub_clock freezes it at the end
     }
+
+    // Seek requests.
+    let (target, needs_restart) = {
+        let scrub = world.resource::<ScrubSim>();
+        let Some(raw) = scrub.target else { return };
+        let target = raw.clamp(0.0, span);
+        if scrub.sought == Some(target) && scrub.cast_live {
+            return; // already there — hold the frozen instant
+        }
+        // Backward (or no cast yet): restart and re-sim the prefix. NEVER compare the clock
+        // (it sits at tick granularity past the sought time by construction).
+        (target, !scrub.cast_live || target < scrub.clock - 1e-4)
+    };
+    if needs_restart {
+        restart_cast(world);
+    }
+    // Synchronous seek: run the fixed schedule tick by tick until the clock reaches the
+    // target. `exclusive_running` unfreezes the obelisk sets for these manual runs only.
+    {
+        let mut scrub = world.resource_mut::<ScrubSim>();
+        scrub.sought = Some(target);
+        scrub.mode = ScrubMode::Seeking;
+        scrub.exclusive_running = true;
+    }
+    let mut guard = 0;
+    while world.resource::<ScrubSim>().clock < target && guard < MAX_SEEK_TICKS {
+        world.run_schedule(FixedUpdate);
+        guard += 1;
+    }
+    let mut scrub = world.resource_mut::<ScrubSim>();
+    scrub.exclusive_running = false;
+    scrub.mode = ScrubMode::Frozen;
 }
 
 /// Restart the deterministic scrub cast: reset the stage (heal, reposition, clear hitboxes +
 /// cosmetics, reseed, clear cooldowns), re-register the edited timeline, cast with the
-/// session's charge, zero the clock.
-fn restart_cast(scrub: &mut ScrubSim, edited: &EditedSkill, reset: &mut PreviewStageReset) {
-    reset.reset_stage();
-    let mut tl = edited.timeline.clone();
+/// session's charge, zero the clock. Uses `run_system_once` so the queued commands (despawns,
+/// the cast) are APPLIED before the caller's synchronous tick loop starts.
+fn restart_cast(world: &mut World) {
+    let mut tl = world.resource::<EditedSkill>().timeline.clone();
     tl.vfx_cues = derive_vfx_cues(&tl);
-    stage_cast(reset, tl, Some(scrub.charge));
+    let charge = world.resource::<ScrubSim>().charge;
+    world
+        .run_system_once(|mut reset: PreviewStageReset| reset.reset_stage())
+        .expect("stage reset runs");
+    world
+        .run_system_once(move |mut reset: PreviewStageReset| {
+            stage_cast(&mut reset, tl.clone(), Some(charge));
+        })
+        .expect("stage cast runs");
+    let mut scrub = world.resource_mut::<ScrubSim>();
     scrub.clock = 0.0;
     scrub.cast_live = true;
     scrub.sought = None;
