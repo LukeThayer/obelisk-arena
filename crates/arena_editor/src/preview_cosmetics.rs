@@ -117,16 +117,19 @@ pub fn on_preview_cue(
     caster_q: Query<Entity, With<PreviewCaster>>,
     mut players: Query<&mut AnimationPlayer>,
     children: Query<&Children>,
-    mut flights: Query<&mut CosmeticLifetime, With<PreviewFlight>>,
+    mut flights: Query<(&mut CosmeticLifetime, &mut PreviewFlight, &mut Transform)>,
     mut commands: Commands,
 ) {
     let ev = cue.event();
-    // An END cue is the sim saying "the bolt stopped HERE": retire every flying preview
-    // cosmetic (the preview runs one skill at a time, so no per-cue correlation is needed) —
-    // its end lanes below render the explosion at the cue position.
+    // An END cue is the sim saying "the bolt stopped HERE": snap every flying preview cosmetic
+    // to the end position and retire it (the preview runs one skill at a time, so no per-cue
+    // correlation is needed) — its end lanes below render the explosion at that same spot.
     if ev.kind == ObeliskCueKind::OnEnd {
-        for mut life in &mut flights {
+        for (mut life, mut flight, mut tf) in &mut flights {
             life.elapsed = life.duration;
+            flight.velocity = Vec3::ZERO;
+            flight.gravity = 0.0;
+            tf.translation = ev.position;
         }
     }
     let Some(lanes) = edited.fx.lanes.get(&ev.cue_id).map(std::slice::from_ref) else {

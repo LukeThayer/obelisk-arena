@@ -103,9 +103,12 @@ victim-anchored):
     "<id>_cast": ( lane_id: "<id>_muzzle", kind: OnCast,
       particle: Some(( count: 12, lifetime: 0.4, color: (1.0, 0.5, 0.1), speed: 4.0,
         effect: Some("Fire") )),
-      projectile: Some(( speed: 20.0, gravity: 9.8, color: (1.0, 0.4, 0.05), radius: 0.2,
-        effect: Some("<id>_trail"), end_cue: Some("<id>_end_bolt") )),
       anim: Some(( state: "cast_release" )) ),
+    // Flight visuals bind to the WINDOW-OPEN cue (the hitbox exists NOW, here) — an on_cast
+    // projectile launches a whole windup early and visually overshoots the real bolt.
+    "<id>_window_bolt": ( lane_id: "<id>_flight", kind: OnWindow,
+      projectile: Some(( speed: 20.0, gravity: 9.8, color: (1.0, 0.4, 0.05), radius: 0.2,
+        effect: Some("<id>_trail"), end_cue: Some("<id>_end_bolt") )) ),
     // The BIG payoff renders at the end position — enemy, ground, or mid-air fuse.
     "<id>_end_bolt": ( lane_id: "<id>_blast", kind: OnEnd,
       particle: Some(( count: 20, lifetime: 0.5, color: (1.0, 0.3, 0.05), speed: 5.0,
@@ -125,6 +128,10 @@ Hard rules:
   at the victim; `OnEnd` renders at the carried world position. Put area payoffs (explosions,
   ground fields) on `OnEnd`, never `OnHit` — an `OnHit` explosion silently vanishes when the
   bolt hits the ground or fuses out.
+- Timing by cue kind: muzzle flash + cast anim on `OnCast` (windup start); the PROJECTILE on
+  `OnWindow` (windup end — when the hitbox spawns); the payoff on `OnEnd`. The window cue slot
+  (`on_window_<wid>`) must be present in the `.cast.ron` `vfx_cues` map (designer Save derives
+  it; hand-edited files must include it or the lane never fires).
 - `effect:` names are **case-sensitive `VfxLibrary` keys**: built-ins are capitalized
   (`"Fire"`, `"Explosion"`, `"Sparks"`, …); workspace-authored presets load from
   `assets/skills/<name>.vfx.ron` and `assets/vfx/` by file stem (both the game and the
