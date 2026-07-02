@@ -23,6 +23,18 @@ pub fn register_skill_mode(app: &mut App) {
     });
 }
 
+/// Merge workspace-authored `.vfx.ron` presets into the live `VfxLibrary` (skipped headless —
+/// test apps without the bevy_vfx plugin have no library resource).
+fn load_workspace_vfx_presets(lib: Option<ResMut<bevy_vfx::VfxLibrary>>) {
+    let Some(mut lib) = lib else {
+        return;
+    };
+    let root = crate::io::editor_root();
+    for dir in ["assets/vfx", "assets/skills"] {
+        crate::io::load_vfx_presets_into(&mut lib, &root.join(dir));
+    }
+}
+
 /// Plugin that registers the Skill mode. Added by the windowed binary + the headless editor app.
 pub struct SkillDesignerPlugin;
 
@@ -46,11 +58,22 @@ impl Plugin for SkillDesignerPlugin {
         // Every spawned cosmetic carries a `CosmeticLifetime` (presets loop forever otherwise).
         app.init_resource::<crate::preview_cosmetics::PreviewCharge>()
             .add_observer(crate::preview_cosmetics::on_preview_cue)
-            .add_systems(Update, crate::preview_cosmetics::age_preview_cosmetics);
+            .add_systems(
+                Update,
+                (
+                    crate::preview_cosmetics::age_preview_cosmetics,
+                    crate::preview_cosmetics::fly_preview_cosmetics,
+                ),
+            );
         // Timeline scrubbing: dragging the panel's phase strip fires the authored cue VFX in the
         // viewport without a Play (synthetic `CueEvent`s through the same observer).
         app.init_resource::<crate::scrub::ScrubState>()
             .add_systems(Update, crate::scrub::fire_scrub_cues);
+        // Merge WORKSPACE-authored vfx presets (assets/vfx + assets/skills *.vfx.ron — e.g.
+        // firebolt_trail) into the `VfxLibrary`, overriding built-ins — the same dirs the game's
+        // `init_vfx_library` scans, so authored-in-designer == rendered-in-game. Startup: after
+        // the upstream editor's PreStartup library init.
+        app.add_systems(Startup, load_workspace_vfx_presets);
         // Seed the designer with firebolt's real `.cast.ron` if it parses, else a blank timeline
         // pointed at that canonical path (load-or-blank).
         let path = crate::io::default_cast_path("firebolt");

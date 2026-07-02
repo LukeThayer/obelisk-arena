@@ -180,6 +180,9 @@ pub struct ParticleLifetime {
 #[derive(Component)]
 pub struct CosmeticProjectile {
     pub velocity: Vec3,
+    /// Downward acceleration (units/s²), mirroring the authoritative `Projectile.gravity` so a
+    /// ballistic bolt's cosmetic flies the same arc as the invisible hitbox. `0.0` = straight.
+    pub gravity: f32,
 }
 
 /// Read every [`LocalCue`] dispatched this frame, resolve its lanes from the [`SkillFxRegistry`]
@@ -295,6 +298,7 @@ pub fn spawn_cue_cosmetics(
                     aim.0.get(&m.source_id).copied().unwrap_or(Vec3::Z)
                 };
                 let velocity = dir * proj.speed;
+                let gravity = proj.gravity;
                 // Prefer an authored `bevy_vfx` trail effect flown along `velocity`; else the emissive
                 // sphere stand-in. Both carry `CosmeticProjectile` so they track the obelisk hitbox.
                 let spawned_vfx = spawn_lane_vfx(
@@ -306,7 +310,7 @@ pub fn spawn_cue_cosmetics(
                     &[],
                     charge,
                     2.0,
-                    Some(CosmeticProjectile { velocity }),
+                    Some(CosmeticProjectile { velocity, gravity }),
                 );
                 if !spawned_vfx {
                     let c = LinearRgba::rgb(proj.color[0], proj.color[1], proj.color[2]);
@@ -328,7 +332,7 @@ pub fn spawn_cue_cosmetics(
                         Mesh3d(assets.sphere.clone()),
                         MeshMaterial3d(material),
                         Transform::from_translation(spawn_pos).with_scale(Vec3::splat(proj.radius)),
-                        CosmeticProjectile { velocity },
+                        CosmeticProjectile { velocity, gravity },
                         ParticleLifetime {
                             elapsed: 0.0,
                             duration: 2.0, // matches the .cast.ron window active_duration
@@ -340,15 +344,19 @@ pub fn spawn_cue_cosmetics(
     }
 }
 
-/// Advance each cosmetic projectile by `velocity * delta`. Render-time motion (uses `Time`, the
-/// per-frame clock) — purely visual, never touches the obelisk sim.
+/// Advance each cosmetic projectile: gravity into velocity, then velocity into position
+/// (semi-implicit Euler, the same integration obelisk's `move_projectiles` runs on the
+/// authoritative hitbox). Render-time motion (uses `Time`, the per-frame clock) — purely visual,
+/// never touches the obelisk sim.
 pub fn fly_cosmetic_projectiles(
     time: Res<Time>,
-    mut q: Query<(&CosmeticProjectile, &mut Transform)>,
+    mut q: Query<(&mut CosmeticProjectile, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
-    for (proj, mut tf) in &mut q {
-        tf.translation += proj.velocity * dt;
+    for (mut proj, mut tf) in &mut q {
+        proj.velocity.y -= proj.gravity * dt;
+        let velocity = proj.velocity;
+        tf.translation += velocity * dt;
     }
 }
 

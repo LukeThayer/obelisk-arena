@@ -25,6 +25,7 @@ fn extended_lane() -> LaneEvent {
         }),
         projectile: Some(ProjectileCosmetic {
             speed: 20.0,
+            gravity: 9.8,
             color: [1.0, 0.4, 0.05],
             radius: 0.2,
             effect: Some("fire_trail".into()),

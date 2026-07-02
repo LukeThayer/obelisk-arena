@@ -9,7 +9,7 @@ use arena_editor::preview_cosmetics::{on_preview_cue, PreviewCharge, PreviewCosm
 use arena_editor::preview_rig::PreviewAnimGraph;
 use arena_editor::socket::RigSockets;
 use arena_sim::preview::PreviewCaster;
-use arena_skills::{AnimLayer, CueKind, LaneEvent, ParticleSpec, SkillFx};
+use arena_skills::{AnimLayer, CueKind, LaneEvent, ParticleSpec, ProjectileCosmetic, SkillFx};
 use bevy::prelude::*;
 use bevy_vfx::data::VfxLibrary;
 use obelisk_bevy::events::{CueEvent, CueKind as ObeliskCueKind};
@@ -109,6 +109,57 @@ fn cue_spawns_one_preview_cosmetic_child_for_the_bound_lane() {
         .get::<ChildOf>(cosmetics[0])
         .expect("cosmetic parented to its socket");
     assert_eq!(parent.0, caster);
+}
+
+/// The cast lane's cosmetic projectile spawns world-space at the cue position and carries a
+/// `PreviewFlight` with the AUTHORED speed and gravity along the duel axis — the visible bolt
+/// traces the same ballistic arc the sim's hitbox flies.
+#[test]
+fn cast_cue_projectile_lane_flies_the_authored_arc() {
+    use arena_editor::preview_cosmetics::PreviewFlight;
+    let mut app = setup_app();
+    app.world_mut()
+        .resource_mut::<EditedSkillFx>()
+        .fx
+        .lanes
+        .get_mut("firebolt_cast")
+        .unwrap()
+        .projectile = Some(ProjectileCosmetic {
+        speed: 20.0,
+        gravity: 9.8,
+        color: [1.0, 0.4, 0.05],
+        radius: 0.2,
+        effect: None,
+        socket: None,
+    });
+    let caster = app.world_mut().spawn(PreviewCaster).id();
+    let cast_pos = Vec3::new(-4.0, 0.59, 0.0);
+    app.world_mut().trigger(CueEvent {
+        cue_id: "firebolt_cast".into(),
+        source: caster,
+        position: cast_pos,
+        kind: ObeliskCueKind::OnCast,
+    });
+    app.world_mut().flush();
+
+    let mut flights = app.world_mut().query::<(&PreviewFlight, &Transform)>();
+    let (flight, tf) = flights.single(app.world()).expect("one flying bolt");
+    assert_eq!(tf.translation, cast_pos, "launches from the cue position");
+    assert_eq!(flight.gravity, 9.8);
+    // The launch is LOFTED (the same ballistic solve the preview cast uses) so the arc lands on
+    // the dummy marker instead of grounding short of it.
+    let expected = arena_sim::ballistics::ballistic_launch_dir(
+        cast_pos,
+        arena_sim::spawn::SPAWN_MARKERS[1],
+        20.0,
+        9.8,
+    ) * 20.0;
+    assert!(
+        (flight.velocity - expected).length() < 1e-4,
+        "lofted launch at authored speed: {:?}",
+        flight.velocity
+    );
+    assert!(flight.velocity.y > 0.5, "visibly pitched up");
 }
 
 /// An `OnHit` cue carries the authoritative hit position — the impact cosmetic must spawn as a

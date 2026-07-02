@@ -125,8 +125,26 @@ pub fn start_preview(
     // excludes only the caster body entity, not its CHILD `Hurtbox` sensor, so an arena combatant
     // self-blocks the ray (`NoLineOfSight`). The live game sidesteps this identically with free-aim
     // direction casts (see arena_sim `preview_smoke`), so the preview matches what the game plays.
-    let dir = Dir3::new(SPAWN_MARKERS[1] - SPAWN_MARKERS[0]).unwrap_or(Dir3::X);
+    //
+    // For a BALLISTIC window, loft the aim like a free-looking player would: solve the launch
+    // pitch that lands the arc ON the dummy (level aim would ground the bolt short of it).
+    let aim = preview_aim(&edited.timeline, SPAWN_MARKERS[0], SPAWN_MARKERS[1]);
+    let dir = Dir3::new(aim).unwrap_or(Dir3::X);
     commands.entity(caster).cast_skill_dir(skill_id, dir);
+}
+
+/// The preview's cast direction from `from` toward `to`: straight for non-ballistic skills, the
+/// low-arc ballistic solution (first `Ballistic` window's speed/gravity) for arcing ones — the
+/// aim a free-looking player compensating for gravity would take.
+pub fn preview_aim(tl: &CastTimeline, from: Vec3, to: Vec3) -> Vec3 {
+    let ballistic = tl.collision_windows.iter().find_map(|w| match w.motion {
+        obelisk_bevy::assets::VolumeMotion::Ballistic { speed, gravity } => Some((speed, gravity)),
+        _ => None,
+    });
+    match ballistic {
+        Some((speed, gravity)) => arena_sim::ballistics::ballistic_launch_dir(from, to, speed, gravity),
+        None => (to - from).normalize_or(Vec3::X),
+    }
 }
 
 /// While Playing, upstream `sync_camera_states` deactivates the editor camera and activates only

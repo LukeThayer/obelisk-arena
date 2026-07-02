@@ -54,6 +54,34 @@ pub struct CosmeticLifetime {
     pub grace: u8,
 }
 
+/// Flies a preview cosmetic projectile: gravity into velocity, then velocity into position —
+/// the same semi-implicit Euler obelisk's `move_projectiles` runs on the authoritative hitbox,
+/// so the visible bolt traces the arc the sim actually resolves hits along.
+#[derive(Component)]
+pub struct PreviewFlight {
+    pub velocity: Vec3,
+    pub gravity: f32,
+}
+
+/// Integrate every [`PreviewFlight`] each frame (render-time cosmetic motion). A bolt that
+/// reaches the floor plane has hit the ground: pin it there and expire its [`CosmeticLifetime`]
+/// (mirrors the sim, which despawns grounded projectile hitboxes).
+pub fn fly_preview_cosmetics(
+    time: Res<Time>,
+    mut q: Query<(&mut PreviewFlight, &mut Transform, &mut CosmeticLifetime)>,
+) {
+    let dt = time.delta_secs();
+    for (mut flight, mut tf, mut life) in &mut q {
+        flight.velocity.y -= flight.gravity * dt;
+        let velocity = flight.velocity;
+        tf.translation += velocity * dt;
+        if tf.translation.y < 0.0 {
+            tf.translation.y = 0.0;
+            life.elapsed = life.duration;
+        }
+    }
+}
+
 /// Tick every [`CosmeticLifetime`]; on expiry stop the effect (remove its `VfxSystem`), then
 /// despawn the entity after the grace frames (see [`CosmeticLifetime::grace`]).
 pub fn age_preview_cosmetics(
@@ -131,17 +159,30 @@ pub fn on_preview_cue(
             );
         }
         if let Some(pr) = &lane.projectile {
-            let anchor = caster.map(|c| resolve_socket(&sockets, pr.socket.as_deref(), c));
-            spawn_effect(
+            // The cosmetic projectile FLIES (world-space, never socket-parented) at the authored
+            // speed/gravity, tracing the same arc as the authoritative hitbox: launched from the
+            // cue position toward the dummy marker with the same lofted ballistic aim the
+            // preview cast uses (level for gravity 0).
+            let dir = arena_sim::ballistics::ballistic_launch_dir(
+                ev.position,
+                arena_sim::spawn::SPAWN_MARKERS[1],
+                pr.speed,
+                pr.gravity,
+            );
+            let bolt = spawn_effect(
                 &mut commands,
                 &library,
                 pr.effect.as_deref(),
-                if anchor.is_some() { Vec3::ZERO } else { ev.position },
+                ev.position,
                 &[],
                 charge.0,
-                anchor,
-                1.0,
+                None,
+                2.0,
             );
+            commands.entity(bolt).insert(PreviewFlight {
+                velocity: dir * pr.speed,
+                gravity: pr.gravity,
+            });
         }
     }
 }
@@ -170,7 +211,7 @@ fn find_anim_player(
 /// tagged, with a [`CosmeticLifetime`] so looping presets don't burn forever. `anchor:
 /// Some(socket)` parents it to the socket with `translation` as the LOCAL offset; `anchor: None`
 /// (impact cues, or no live caster) leaves it a world-space root with `translation` as the WORLD
-/// position.
+/// position. Returns the spawned entity so callers can attach extras (e.g. [`PreviewFlight`]).
 #[allow(clippy::too_many_arguments)]
 fn spawn_effect(
     commands: &mut Commands,
@@ -181,7 +222,7 @@ fn spawn_effect(
     charge: f32,
     anchor: Option<Entity>,
     lifetime: f32,
-) {
+) -> Entity {
     let mut base = commands.spawn((
         Transform::from_translation(translation),
         Visibility::default(),
@@ -204,4 +245,5 @@ fn spawn_effect(
     if let Some(socket) = anchor {
         commands.entity(child).insert(ChildOf(socket));
     }
+    child
 }

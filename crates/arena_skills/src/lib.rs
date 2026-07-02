@@ -130,6 +130,10 @@ pub struct ProjectileCosmetic {
     /// World units/sec. MUST match the `.cast.ron` window motion speed so the cosmetic mesh tracks
     /// the authoritative hitbox (firebolt = 20.0). NOT speed-scaled.
     pub speed: f32,
+    /// Downward acceleration (world units/s²). MUST match the `.cast.ron` window's `Ballistic`
+    /// gravity so the cosmetic arc tracks the authoritative hitbox; `0.0` for `Linear` motion.
+    #[serde(default)]
+    pub gravity: f32,
     #[serde(default)]
     pub color: [f32; 3],
     #[serde(default = "default_proj_radius")]

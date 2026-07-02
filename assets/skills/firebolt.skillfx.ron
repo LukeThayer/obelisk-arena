@@ -5,7 +5,12 @@
         // count/lifetime/color/speed remain as the billboard fallback if the preset is unavailable.
         "firebolt_cast": ( lane_id: "firebolt_muzzle", kind: OnCast,
             particle: Some(( count: 12, lifetime: 0.4, color: (1.0, 0.5, 0.1), speed: 4.0, effect: Some("Fire") )),
-            projectile: Some(( speed: 20.0, color: (1.0, 0.4, 0.05), radius: 0.2 )),
+            // speed + gravity MUST match the .cast.ron window motion (Ballistic 20 / 9.8) so the
+            // cosmetic bolt tracks the authoritative arcing hitbox. `effect` names the authored
+            // in-flight preset (assets/skills/firebolt_trail.vfx.ron); color/radius remain the
+            // emissive-sphere fallback if the preset is unavailable.
+            projectile: Some(( speed: 20.0, gravity: 9.8, color: (1.0, 0.4, 0.05), radius: 0.2,
+                effect: Some("firebolt_trail") )),
             anim: Some(( state: "cast_release" )) ),
         "firebolt_impact": ( lane_id: "firebolt_impact", kind: OnHit,
             particle: Some(( count: 20, lifetime: 0.5, color: (1.0, 0.3, 0.05), speed: 5.0, effect: Some("Explosion") )) ),

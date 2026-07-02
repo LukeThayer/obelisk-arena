@@ -68,6 +68,31 @@ pub fn load_skillfx(path: &Path) -> Result<SkillFx, String> {
     ron::de::from_str::<SkillFx>(&s).map_err(|e| e.to_string())
 }
 
+/// Merge every `<name>.vfx.ron` in `dir` into `lib` keyed by `<name>`, overriding built-ins.
+/// Mirrors `arena_game::client::cosmetics::load_vfx_presets_from_dir` so a workspace-authored
+/// preset (e.g. `assets/skills/firebolt_trail.vfx.ron`) renders identically in the designer and
+/// in-game. Missing dir / unparseable file = skip (never crash on content).
+pub fn load_vfx_presets_into(lib: &mut bevy_vfx::VfxLibrary, dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(name) = fname.strip_suffix(".vfx.ron").filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        match std::fs::read_to_string(&path).map(|s| ron::from_str::<bevy_vfx::VfxSystem>(&s)) {
+            Ok(Ok(system)) => {
+                lib.effects.insert(name.to_string(), system);
+            }
+            other => bevy::log::warn!("skipping vfx preset {path:?}: {other:?}"),
+        }
+    }
+}
+
 /// The canonical obelisk rules path for a skill id, under the workspace `config/skills/`.
 pub fn default_rules_path(skill_id: &str) -> PathBuf {
     editor_root().join(format!("config/skills/{skill_id}.toml"))
@@ -211,6 +236,20 @@ mod tests {
     #[test]
     fn list_effect_ids_on_disk_contains_burn() {
         assert!(list_effect_ids_on_disk().iter().any(|s| s == "burn"));
+    }
+
+    /// The authored in-flight preset must PARSE as a `bevy_vfx::VfxSystem` and load under its
+    /// stem — this is what both the game and the designer resolve `effect: "firebolt_trail"` to.
+    #[test]
+    fn workspace_vfx_presets_load_the_firebolt_trail() {
+        let mut lib = bevy_vfx::VfxLibrary::default();
+        super::load_vfx_presets_into(&mut lib, &super::editor_root().join("assets/skills"));
+        let trail = lib
+            .effects
+            .get("firebolt_trail")
+            .expect("assets/skills/firebolt_trail.vfx.ron parses and loads");
+        assert!(trail.looping, "bolt lifetime bounds it; the preset loops");
+        assert_eq!(trail.emitters.len(), 3, "core + trail + sparks");
     }
 
     #[test]

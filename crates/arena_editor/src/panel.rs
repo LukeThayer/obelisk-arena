@@ -443,6 +443,32 @@ fn draw_timeline_tab(
                             }
                         }
                     });
+                // The motion variant's params, editable in place.
+                match &mut edited.timeline.collision_windows[idx].motion {
+                    obelisk_bevy::assets::VolumeMotion::Static => {}
+                    obelisk_bevy::assets::VolumeMotion::Linear { speed } => {
+                        if ui
+                            .add(egui::DragValue::new(speed).speed(0.1).range(0.0..=100.0).prefix("spd "))
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                    obelisk_bevy::assets::VolumeMotion::Ballistic { speed, gravity } => {
+                        if ui
+                            .add(egui::DragValue::new(speed).speed(0.1).range(0.0..=100.0).prefix("spd "))
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        if ui
+                            .add(egui::DragValue::new(gravity).speed(0.1).range(0.0..=100.0).prefix("grav "))
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                }
                 let f = &mut edited.timeline.collision_windows[idx].hit_filter;
                 egui::ComboBox::from_id_salt("filter")
                     .selected_text(format!("{f:?}"))

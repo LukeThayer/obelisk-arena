@@ -74,7 +74,15 @@ pub fn add_obelisk_sim(app: &mut App, resolve_hits: bool) {
                 timeline::advance::expire_hitboxes,
             )
                 .in_set(ObeliskSet::Advance),
-            spatial::projectile::move_projectiles.in_set(ObeliskSet::Projectiles),
+            (
+                spatial::projectile::move_projectiles,
+                // Arena rule obelisk doesn't know: the flat floor. A (ballistic or down-aimed)
+                // projectile hitbox that crosses the floor plane has HIT THE GROUND — despawn it
+                // rather than let it sail on underneath the arena. After move, before detect.
+                ground_stop_projectile_hitboxes,
+            )
+                .chain()
+                .in_set(ObeliskSet::Projectiles),
         ),
     );
     if resolve_hits {
@@ -161,6 +169,27 @@ pub fn add_obelisk_sim_headless(app: &mut App) {
 /// `Validate` LOS read could otherwise see an empty pipeline) — harmless on the client.
 pub fn add_obelisk_sim_client(app: &mut App) {
     add_obelisk_sim(app, false);
+}
+
+/// Despawn any moving projectile hitbox that has fallen through the arena floor plane (top face
+/// at world y = 0 — see `spawn_arena_floor`). Obelisk hitboxes only ever overlap hurtboxes, so
+/// without this an arcing bolt keeps flying underground for the rest of its window. Runs on both
+/// peers (the client has no `Hitbox` entities — harmless there).
+fn ground_stop_projectile_hitboxes(
+    q: Query<
+        (Entity, &Transform),
+        (
+            With<obelisk_bevy::prelude::Hitbox>,
+            With<obelisk_bevy::spatial::projectile::Projectile>,
+        ),
+    >,
+    mut commands: Commands,
+) {
+    for (e, tf) in &q {
+        if tf.translation.y < 0.0 {
+            commands.entity(e).try_despawn();
+        }
+    }
 }
 
 /// Force the avian `SpatialQueryPipeline` to reflect the current collider set. See the call sites in
