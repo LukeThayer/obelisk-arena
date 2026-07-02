@@ -83,7 +83,8 @@ impl Plugin for SkillDesignerPlugin {
         // Every spawned cosmetic carries a `CosmeticLifetime` (presets loop forever otherwise).
         // The cosmetic clocks live on SIM time (FixedUpdate, gated with the sim): they age and
         // fly inside the synchronous seek exactly as many ticks as the sim ran, and hang
-        // mid-life at the frozen instant.
+        // mid-life at the frozen instant. REAPING (despawn) stays on render frames in Update —
+        // see reap_preview_cosmetics for why (bevy_vfx command race).
         app.init_resource::<crate::preview_cosmetics::PreviewCharge>()
             .add_observer(crate::preview_cosmetics::on_preview_cue)
             .add_systems(
@@ -93,7 +94,8 @@ impl Plugin for SkillDesignerPlugin {
                     crate::preview_cosmetics::fly_preview_cosmetics,
                 )
                     .run_if(crate::scrub::sim_unfrozen),
-            );
+            )
+            .add_systems(Update, crate::preview_cosmetics::reap_preview_cosmetics);
         // SIM-BACKED scrubbing (UX spec P3): dragging the strip restarts + fast-forwards the
         // REAL deterministic sim on the persistent stage and freezes it at the target time.
         // The freeze is a run-condition gate on the obelisk sets — EDITOR-ONLY (the game never

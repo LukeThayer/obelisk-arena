@@ -82,15 +82,27 @@ pub fn fly_preview_cosmetics(
     }
 }
 
-/// Tick every [`CosmeticLifetime`]; on expiry stop the effect (remove its `VfxSystem`), then
-/// despawn the entity after the grace frames (see [`CosmeticLifetime::grace`]).
-pub fn age_preview_cosmetics(
-    time: Res<Time<Fixed>>,
+/// Age every [`CosmeticLifetime`] with SIM time (FixedUpdate, gated with the sim — advances
+/// inside the synchronous seek exactly as many ticks as the sim ran, freezes with it). Pure
+/// mutation: expiry CONSEQUENCES live in [`reap_preview_cosmetics`].
+pub fn age_preview_cosmetics(time: Res<Time<Fixed>>, mut q: Query<&mut CosmeticLifetime>) {
+    for mut life in &mut q {
+        life.elapsed += time.delta_secs();
+    }
+}
+
+/// Reap expired cosmetics in RENDER frames (plain Update, never inside the synchronous seek):
+/// stop the effect (remove `VfxSystem`), wait two frames, despawn. The grace MUST count render
+/// frames: `bevy_vfx`'s Update systems queue component commands on live vfx entities, and a
+/// same-frame despawn (which the seek's collapsed sim time would cause if this ladder ran on
+/// sim ticks) makes those commands panic on a dead entity. Two live frames after the
+/// `VfxSystem` removal guarantee no pending upstream command can target the entity when it
+/// finally despawns.
+pub fn reap_preview_cosmetics(
     mut q: Query<(Entity, &mut CosmeticLifetime)>,
     mut commands: Commands,
 ) {
     for (e, mut life) in &mut q {
-        life.elapsed += time.delta_secs();
         if life.elapsed < life.duration {
             continue;
         }
