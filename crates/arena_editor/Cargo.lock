@@ -761,6 +761,7 @@ dependencies = [
 [[package]]
 name = "bevy_channel_mat"
 version = "0.1.0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#4113492692b9dcbf04ab42d6183de79299e01010"
 dependencies = [
  "bevy",
 ]
@@ -912,6 +913,7 @@ dependencies = [
 [[package]]
 name = "bevy_editor_game"
 version = "0.1.0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#4113492692b9dcbf04ab42d6183de79299e01010"
 dependencies = [
  "bevy",
  "bevy_egui",
@@ -922,7 +924,7 @@ dependencies = [
 [[package]]
 name = "bevy_egui"
 version = "0.39.0"
-source = "git+https://github.com/vladbat00/bevy_egui?branch=main#81904dac9a09d49563e39962bf3039afc47016dc"
+source = "git+https://github.com/vladbat00/bevy_egui?rev=81904dac9a09d49563e39962bf3039afc47016dc#81904dac9a09d49563e39962bf3039afc47016dc"
 dependencies = [
  "arboard",
  "bevy_app",
@@ -1114,6 +1116,7 @@ dependencies = [
 [[package]]
 name = "bevy_grid_shader"
 version = "0.1.0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#4113492692b9dcbf04ab42d6183de79299e01010"
 dependencies = [
  "bevy",
  "bitflags 2.10.0",
@@ -1428,6 +1431,7 @@ checksum = "7ef8e4b7e61dfe7719bb03c884dc270cd46a82efb40f93e9933b990c5c190c59"
 [[package]]
 name = "bevy_modal_editor"
 version = "0.1.0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#4113492692b9dcbf04ab42d6183de79299e01010"
 dependencies = [
  "avian3d",
  "avian_rerecast",
@@ -1455,6 +1459,7 @@ dependencies = [
 [[package]]
 name = "bevy_outliner"
 version = "0.1.0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#4113492692b9dcbf04ab42d6183de79299e01010"
 dependencies = [
  "bevy",
  "bytemuck",
@@ -1574,6 +1579,7 @@ dependencies = [
 [[package]]
 name = "bevy_procedural"
 version = "0.1.0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#4113492692b9dcbf04ab42d6183de79299e01010"
 dependencies = [
  "avian3d",
  "bevy",
@@ -1838,6 +1844,7 @@ dependencies = [
 [[package]]
 name = "bevy_spline_3d"
 version = "0.1.0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#4113492692b9dcbf04ab42d6183de79299e01010"
 dependencies = [
  "avian3d",
  "bevy",
@@ -2096,6 +2103,7 @@ dependencies = [
 [[package]]
 name = "bevy_vfx"
 version = "0.1.0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#4113492692b9dcbf04ab42d6183de79299e01010"
 dependencies = [
  "avian3d",
  "bevy",
@@ -4554,6 +4562,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 [[package]]
 name = "loot_core"
 version = "0.1.0"
+source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#54d0837bef10ea97491c3e928b7c6ff3ad0934fc"
 dependencies = [
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -5025,6 +5034,7 @@ dependencies = [
 [[package]]
 name = "obelisk-bevy"
 version = "0.1.0"
+source = "git+https://github.com/LukeThayer/bevy-obelisk?branch=main#264b4c39a65fe6e29cfd85fb651500fa04583052"
 dependencies = [
  "avian3d",
  "bevy",
@@ -6424,6 +6434,7 @@ dependencies = [
 [[package]]
 name = "skill_tree"
 version = "0.1.0"
+source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#54d0837bef10ea97491c3e928b7c6ff3ad0934fc"
 dependencies = [
  "loot_core",
  "rand 0.8.5",
@@ -6575,6 +6586,7 @@ dependencies = [
 [[package]]
 name = "stat_core"
 version = "0.1.0"
+source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#54d0837bef10ea97491c3e928b7c6ff3ad0934fc"
 dependencies = [
  "loot_core",
  "rand 0.8.5",
@@ -6678,6 +6690,7 @@ dependencies = [
 [[package]]
 name = "tables_core"
 version = "0.1.0"
+source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#54d0837bef10ea97491c3e928b7c6ff3ad0934fc"
 dependencies = [
  "rand 0.8.5",
  "serde",

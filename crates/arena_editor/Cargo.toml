@@ -19,25 +19,25 @@ path = "src/main.rs"
 [dependencies]
 bevy = "0.18"
 avian3d = { version = "0.5", features = ["default", "serialize"] }
-obelisk-bevy = { path = "../../../obelisk-bevy" }
+obelisk-bevy = { git = "https://github.com/LukeThayer/bevy-obelisk", branch = "main" }
 arena_sim = { path = "../arena_sim" }
 arena_skills = { path = "../arena_skills" }
-bevy_modal_editor = { path = "../../../bevy_modal_editor" }
-bevy_editor_game = { path = "../../../bevy_modal_editor/crates/bevy_editor_game" }
-bevy_vfx = { path = "../../../bevy_modal_editor/crates/bevy_vfx" }
-bevy_egui = { git = "https://github.com/vladbat00/bevy_egui", branch = "main" }
+bevy_modal_editor = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }
+bevy_editor_game = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }
+bevy_vfx = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }
+bevy_egui = { git = "https://github.com/vladbat00/bevy_egui", rev = "81904dac9a09d49563e39962bf3039afc47016dc" }
 ron = "0.8"
-stat_core = { path = "../../../obelisk/stat_core" }
-loot_core = { path = "../../../obelisk/loot_core" }
+stat_core = { git = "ssh://git@github.com/vothuul/obelisk.git", branch = "master" }
+loot_core = { git = "ssh://git@github.com/vothuul/obelisk.git", branch = "master" }
 toml = "0.8"
 
 [dev-dependencies]
-obelisk-bevy = { path = "../../../obelisk-bevy", features = ["test-support"] }
+obelisk-bevy = { git = "https://github.com/LukeThayer/bevy-obelisk", branch = "main", features = ["test-support"] }
 
 # bevy_egui is only published intermittently; the editor uses the git branch for Bevy 0.18. As the
 # workspace root, arena_editor must carry the same patch so any crates.io bevy_egui resolves to git.
 [patch.crates-io]
-bevy_egui = { git = "https://github.com/vladbat00/bevy_egui", branch = "main" }
+bevy_egui = { git = "https://github.com/vladbat00/bevy_egui", rev = "81904dac9a09d49563e39962bf3039afc47016dc" }
 
 # Empty [workspace] table => this crate is its own workspace root, isolated from obelisk-arena.
 [workspace]
