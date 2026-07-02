@@ -45,6 +45,7 @@ pub fn default_window(id: impl Into<String>) -> CollisionWindow {
         hit_filter: HitFilter::Enemies,
         hit_mode: HitMode::OncePerTarget,
         rehit_interval: None,
+        on_end: Default::default(),
     }
 }
 
@@ -55,12 +56,14 @@ pub fn add_collision_window(tl: &mut CastTimeline) {
 }
 
 /// Set a window's start to absolute time `new_start_abs`, converting to a phase-relative
-/// `spawn_offset` (clamped so a start before the phase begins pins the offset to 0).
+/// `spawn_offset` (clamped so a start before the phase begins pins the offset to 0). No-op for
+/// `Chained` windows — their start is their parent's end, not a scheduled time.
 pub fn set_window_start(w: &mut CollisionWindow, d: &PhaseDurations, new_start_abs: f32) {
     let phase_start = match w.spawn_phase {
         WindowPhase::Windup => 0.0,
         WindowPhase::Active => d.windup.max(0.0),
         WindowPhase::Recovery => d.windup.max(0.0) + d.active.max(0.0),
+        WindowPhase::Chained => return,
     };
     w.spawn_offset = (new_start_abs - phase_start).max(0.0);
 }

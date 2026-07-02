@@ -117,9 +117,18 @@ pub fn on_preview_cue(
     caster_q: Query<Entity, With<PreviewCaster>>,
     mut players: Query<&mut AnimationPlayer>,
     children: Query<&Children>,
+    mut flights: Query<&mut CosmeticLifetime, With<PreviewFlight>>,
     mut commands: Commands,
 ) {
     let ev = cue.event();
+    // An END cue is the sim saying "the bolt stopped HERE": retire every flying preview
+    // cosmetic (the preview runs one skill at a time, so no per-cue correlation is needed) —
+    // its end lanes below render the explosion at the cue position.
+    if ev.kind == ObeliskCueKind::OnEnd {
+        for mut life in &mut flights {
+            life.elapsed = life.duration;
+        }
+    }
     let Some(lanes) = edited.fx.lanes.get(&ev.cue_id).map(std::slice::from_ref) else {
         return;
     };
@@ -139,10 +148,11 @@ pub fn on_preview_cue(
             }
         }
         if let Some(p) = &lane.particle {
-            // OnHit cues carry the authoritative hit position — spawn the impact THERE, in world
-            // space (a socket anchor would render the explosion on the caster). Cast/window cues
-            // stay socket-anchored (the muzzle burst tracks the rig) when a caster exists.
-            let anchor = if ev.kind == ObeliskCueKind::OnHit {
+            // OnHit/OnEnd cues carry an authoritative world position — spawn the impact THERE,
+            // in world space (a socket anchor would render the explosion on the caster).
+            // Cast/window cues stay socket-anchored (the muzzle burst tracks the rig) when a
+            // caster exists.
+            let anchor = if matches!(ev.kind, ObeliskCueKind::OnHit | ObeliskCueKind::OnEnd) {
                 None
             } else {
                 caster.map(|c| resolve_socket(&sockets, p.socket.as_deref(), c))

@@ -26,6 +26,7 @@ fn author_save_reload_round_trips() {
         hit_filter: HitFilter::Enemies,
         hit_mode: HitMode::OncePerTarget,
         rehit_interval: None,
+        on_end: Default::default(),
     });
     tl.targeting = CastTargeting::Cone {
         angle: 90.0,
@@ -55,8 +56,17 @@ fn author_save_reload_round_trips() {
 
 #[test]
 fn loads_the_real_firebolt_asset() {
+    use obelisk_bevy::assets::{EndReaction, WindowPhase};
     let path = arena_editor::io::editor_root().join("assets/skills/firebolt.cast.ron");
     let tl = load_cast_timeline(&path).expect("parses");
     assert_eq!(tl.skill_id, "firebolt");
-    assert_eq!(tl.collision_windows.len(), 1);
+    // Firebolt v2: the scheduled bolt + the CHAINED blast it spawns at its end position.
+    assert_eq!(tl.collision_windows.len(), 2);
+    let bolt = &tl.collision_windows[0];
+    assert_eq!(
+        bolt.on_end.hit,
+        Some(EndReaction::Chain("blast".into())),
+        "the bolt chains the blast on every end reason"
+    );
+    assert_eq!(tl.collision_windows[1].spawn_phase, WindowPhase::Chained);
 }

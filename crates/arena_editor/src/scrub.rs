@@ -12,7 +12,7 @@
 
 use crate::model::{derive_vfx_cues, EditedSkill};
 use crate::preview_controller::Playhead;
-use crate::timeline_geom::{strip_span, window_span};
+use crate::timeline_geom::{resolved_window_span, strip_span};
 use arena_sim::spawn::SPAWN_MARKERS;
 use bevy::prelude::*;
 use obelisk_bevy::assets::CastTimeline;
@@ -51,7 +51,9 @@ pub struct CueMoment {
 }
 
 /// The scrub-preview cue schedule for `tl`, sorted by time. See the module doc for the timing and
-/// staging rules.
+/// staging rules. Window spans are chain-resolved (a `Chained` blast opens at its parent's close),
+/// and every window gets an END moment at its close — the `on_end_{id}` cue staged at the dummy
+/// marker (scheduled windows launch toward it; chained windows spawn there).
 pub fn cue_moments(tl: &CastTimeline) -> Vec<CueMoment> {
     let cues = derive_vfx_cues(tl);
     let mut moments = Vec::new();
@@ -65,14 +67,29 @@ pub fn cue_moments(tl: &CastTimeline) -> Vec<CueMoment> {
     }
     let mut first_window_close: Option<f32> = None;
     for w in &tl.collision_windows {
-        let (open, close) = window_span(w, &tl.phase_durations);
+        let (open, close) = resolved_window_span(tl, w);
         first_window_close = Some(first_window_close.map_or(close, |c: f32| c.min(close)));
+        let chained = w.spawn_phase == obelisk_bevy::assets::WindowPhase::Chained;
         if let Some(id) = cues.get(&format!("on_window_{}", w.id)) {
             moments.push(CueMoment {
                 t: open,
                 cue_id: id.clone(),
                 kind: ObeliskCueKind::OnWindow,
-                position: SPAWN_MARKERS[0] + WINDOW_FORWARD,
+                // Chained windows open where their parent ended (the target area); scheduled
+                // ones open in front of the caster.
+                position: if chained {
+                    SPAWN_MARKERS[1]
+                } else {
+                    SPAWN_MARKERS[0] + WINDOW_FORWARD
+                },
+            });
+        }
+        if let Some(id) = cues.get(&format!("on_end_{}", w.id)) {
+            moments.push(CueMoment {
+                t: close,
+                cue_id: id.clone(),
+                kind: ObeliskCueKind::OnEnd,
+                position: SPAWN_MARKERS[1],
             });
         }
     }
@@ -167,21 +184,25 @@ mod tests {
             hit_filter: HitFilter::Enemies,
             hit_mode: HitMode::FirstOnly,
             rehit_interval: None,
+            on_end: Default::default(),
         });
         tl
     }
 
     #[test]
-    fn cue_moments_schedule_cast_window_and_hit() {
+    fn cue_moments_schedule_cast_window_end_and_hit() {
         let m = cue_moments(&firebolt_like());
-        assert_eq!(m.len(), 3);
+        assert_eq!(m.len(), 4, "cast + window open + window end + hit");
         assert_eq!(m[0].cue_id, "firebolt_cast");
         assert_eq!(m[0].t, 0.0);
         assert_eq!(m[1].cue_id, "firebolt_window_bolt");
         assert!((m[1].t - 0.3).abs() < 1e-6, "window opens at windup end");
-        assert_eq!(m[2].cue_id, "firebolt_impact");
-        assert!((m[2].t - 2.3).abs() < 1e-6, "hit staged at window close");
+        assert_eq!(m[2].cue_id, "firebolt_end_bolt");
+        assert!((m[2].t - 2.3).abs() < 1e-6, "end staged at window close");
+        assert_eq!(m[2].kind, ObeliskCueKind::OnEnd);
         assert_eq!(m[2].position, SPAWN_MARKERS[1]);
+        assert_eq!(m[3].cue_id, "firebolt_impact");
+        assert!((m[3].t - 2.3).abs() < 1e-6);
     }
 
     #[test]

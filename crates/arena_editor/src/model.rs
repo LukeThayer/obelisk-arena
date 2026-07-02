@@ -80,9 +80,11 @@ pub fn blank_skillfx(skill_id: impl Into<String>) -> SkillFx {
     }
 }
 
-/// The LOCKED cue-key → cue-id map the designer exposes as VFX-bind targets: always `on_cast` and
-/// `on_hit`, plus one `on_window_{wid}` per collision window. The VALUES (`{id}_cast`,
-/// `{id}_window_{wid}`, `{id}_impact`) are the cue ids the preview cosmetics (M3) bind lanes to.
+/// The LOCKED cue-key → cue-id map the designer exposes as VFX-bind targets: always `on_cast`
+/// and `on_hit`, plus one `on_window_{wid}` (open) and one `on_end_{wid}` (termination, fired at
+/// the END POSITION — hit / world / fuse) per collision window. The VALUES (`{id}_cast`,
+/// `{id}_window_{wid}`, `{id}_end_{wid}`, `{id}_impact`) are the cue ids the preview cosmetics
+/// bind lanes to.
 pub fn derive_vfx_cues(tl: &CastTimeline) -> HashMap<String, String> {
     let id = &tl.skill_id;
     let mut cues = HashMap::new();
@@ -92,6 +94,7 @@ pub fn derive_vfx_cues(tl: &CastTimeline) -> HashMap<String, String> {
             format!("on_window_{}", w.id),
             format!("{id}_window_{}", w.id),
         );
+        cues.insert(format!("on_end_{}", w.id), format!("{id}_end_{}", w.id));
     }
     cues.insert("on_hit".to_string(), format!("{id}_impact"));
     cues
@@ -113,6 +116,7 @@ mod tests {
             hit_filter: HitFilter::Enemies,
             hit_mode: HitMode::OncePerTarget,
             rehit_interval: None,
+            on_end: Default::default(),
         }
     }
 
@@ -129,11 +133,11 @@ mod tests {
     }
 
     #[test]
-    fn derive_vfx_cues_for_a_one_window_firebolt_yields_the_three_locked_keys() {
+    fn derive_vfx_cues_for_a_one_window_firebolt_yields_the_locked_keys() {
         let mut tl = blank_cast_timeline("firebolt");
         tl.collision_windows.push(firebolt_window());
         let cues = derive_vfx_cues(&tl);
-        assert_eq!(cues.len(), 3);
+        assert_eq!(cues.len(), 4, "cast + window open + window end + hit");
         assert_eq!(
             cues.get("on_cast").map(String::as_str),
             Some("firebolt_cast")
@@ -141,6 +145,10 @@ mod tests {
         assert_eq!(
             cues.get("on_window_bolt").map(String::as_str),
             Some("firebolt_window_bolt")
+        );
+        assert_eq!(
+            cues.get("on_end_bolt").map(String::as_str),
+            Some("firebolt_end_bolt")
         );
         assert_eq!(
             cues.get("on_hit").map(String::as_str),

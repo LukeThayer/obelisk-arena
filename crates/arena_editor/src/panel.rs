@@ -45,7 +45,7 @@ use crate::io::{save_cast_timeline, save_skillfx};
 use crate::model::{derive_vfx_cues, EditedSkill, EditedSkillFx};
 use crate::preview_controller::Playhead;
 use crate::rules_model::EditedRules;
-use crate::timeline_geom::{phase_spans, strip_span, time_to_x, window_span};
+use crate::timeline_geom::{phase_spans, resolved_window_span, strip_span, time_to_x};
 use obelisk_bevy::prelude::SkillRegistry;
 
 const STRIP_H: f32 = 40.0;
@@ -377,7 +377,7 @@ fn draw_timeline_tab(
         );
     }
     for w in &edited.timeline.collision_windows {
-        let (ws, we) = window_span(w, &edited.timeline.phase_durations);
+        let (ws, we) = resolved_window_span(&edited.timeline, w);
         let x0 = time_to_x(ws, span, rect.left(), rect.width());
         let x1 = time_to_x(we, span, rect.left(), rect.width());
         p.rect_filled(
@@ -506,6 +506,9 @@ fn draw_timeline_tab(
                             WindowPhase::Windup,
                             WindowPhase::Active,
                             WindowPhase::Recovery,
+                            // Chained: never scheduled — spawns at a parent window's end
+                            // position via that parent's `on_end` chain.
+                            WindowPhase::Chained,
                         ] {
                             if ui.selectable_value(ph, o, format!("{o:?}")).clicked() {
                                 changed = true;
@@ -535,6 +538,42 @@ fn draw_timeline_tab(
                 {
                     changed = true;
                 }
+                // The window's on_end chain: what its termination spawns at the end position.
+                // v1 UI sets ALL THREE reasons (hit/world/fuse) to the same target — the schema
+                // stays per-reason for later per-reason authoring.
+                let all_ids: Vec<String> = edited
+                    .timeline
+                    .collision_windows
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != idx)
+                    .map(|(_, w)| w.id.clone())
+                    .collect();
+                let w = &mut edited.timeline.collision_windows[idx];
+                let current = match &w.on_end.hit {
+                    Some(obelisk_bevy::assets::EndReaction::Chain(id)) => id.clone(),
+                    None => "(none)".to_string(),
+                };
+                egui::ComboBox::from_id_salt("on_end")
+                    .selected_text(format!("end→{current}"))
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(current == "(none)", "(none)").clicked() {
+                            w.on_end = Default::default();
+                            changed = true;
+                        }
+                        for id in &all_ids {
+                            if ui.selectable_label(&current == id, id).clicked() {
+                                let chain =
+                                    Some(obelisk_bevy::assets::EndReaction::Chain(id.clone()));
+                                w.on_end = obelisk_bevy::assets::OnEnd {
+                                    hit: chain.clone(),
+                                    world: chain.clone(),
+                                    fuse: chain,
+                                };
+                                changed = true;
+                            }
+                        }
+                    });
             });
         });
     }

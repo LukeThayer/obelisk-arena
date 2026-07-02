@@ -131,6 +131,7 @@ fn cast_cue_projectile_lane_flies_the_authored_arc() {
         radius: 0.2,
         effect: None,
         socket: None,
+        end_cue: None,
     });
     let caster = app.world_mut().spawn(PreviewCaster).id();
     let cast_pos = Vec3::new(-4.0, 0.59, 0.0);

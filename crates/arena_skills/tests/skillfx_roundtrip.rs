@@ -30,6 +30,7 @@ fn extended_lane() -> LaneEvent {
             radius: 0.2,
             effect: Some("fire_trail".into()),
             socket: Some("wand_tip".into()),
+            end_cue: Some("x_end_bolt".into()),
         }),
         anim: Some(AnimLayer {
             state: String::new(),

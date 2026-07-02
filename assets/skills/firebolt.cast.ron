@@ -4,11 +4,20 @@
   collision_windows: [
     // Ballistic: launched along the free-look aim at 20 u/s, arcing down at 9.8 u/s² — a level
     // shot drops ~0.8 m over the 8 m duel gap (still torso/leg height), aim up to lob further.
+    // HOWEVER it ends, the bolt chains the blast at its end position: on an enemy (direct hit
+    // + splash), on the ground (area denial where it landed), or mid-air when the 2 s fuse runs
+    // out.
     ( id: "bolt", spawn_phase: Active, spawn_offset: 0.0, active_duration: 2.0,
       shape: Sphere( radius: 0.5 ), motion: Ballistic( speed: 20.0, gravity: 9.8 ),
-      hit_filter: Enemies, hit_mode: FirstOnly ),
+      hit_filter: Enemies, hit_mode: FirstOnly,
+      on_end: ( hit: Some(Chain("blast")), world: Some(Chain("blast")), fuse: Some(Chain("blast")) ) ),
+    // The explosion: spawned ONLY by the bolt's ending, at that position (never scheduled).
+    ( id: "blast", spawn_phase: Chained, spawn_offset: 0.0, active_duration: 0.05,
+      shape: Sphere( radius: 1.5 ), motion: Static,
+      hit_filter: Enemies, hit_mode: OncePerTarget ),
   ],
   targeting: SingleEntity( range: 15.0 ),
   delivery: Projectile( speed: 20.0 ),
-  vfx_cues: { "on_cast": "firebolt_cast", "on_hit": "firebolt_impact" },
+  vfx_cues: { "on_cast": "firebolt_cast", "on_hit": "firebolt_impact",
+              "on_end_bolt": "firebolt_end_bolt", "on_end_blast": "firebolt_end_blast" },
 )

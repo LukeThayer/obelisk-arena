@@ -175,6 +175,33 @@ fn play_attaches_the_rig_scene_under_the_caster() {
     assert!(has_rig, "the character.glb SceneRoot should be a child of the PreviewCaster");
 }
 
+/// Increment 1 end-to-end on the REAL firebolt v2 asset: the bolt ends (entity hit) and chains
+/// the blast AT its end position, which splashes the dummy — two windows confirm hits, and the
+/// end event carries the bolt's termination.
+#[test]
+fn play_chains_the_blast_where_the_bolt_ends() {
+    let app = run(21, 90);
+    let rec = app.world().resource::<EventRecorder>();
+    assert!(
+        rec.hit_confirmed.iter().any(|h| h.window_id == "bolt"),
+        "direct bolt hit"
+    );
+    assert!(
+        rec.hit_confirmed.iter().any(|h| h.window_id == "blast"),
+        "chained blast splashes the dummy"
+    );
+    let ended = rec
+        .hitbox_ended
+        .iter()
+        .find(|e| e.window_id == "bolt")
+        .expect("bolt end event");
+    assert_eq!(
+        ended.reason,
+        obelisk_bevy::events::EndReason::HitEntity,
+        "aimed preview cast ends on the dummy"
+    );
+}
+
 #[test]
 fn preview_is_deterministic() {
     let total = |s: u64| {

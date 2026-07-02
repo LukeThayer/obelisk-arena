@@ -7,12 +7,17 @@
             particle: Some(( count: 12, lifetime: 0.4, color: (1.0, 0.5, 0.1), speed: 4.0, effect: Some("Fire") )),
             // speed + gravity MUST match the .cast.ron window motion (Ballistic 20 / 9.8) so the
             // cosmetic bolt tracks the authoritative arcing hitbox. `effect` names the authored
-            // in-flight preset (assets/skills/firebolt_trail.vfx.ron); color/radius remain the
-            // emissive-sphere fallback if the preset is unavailable.
+            // in-flight preset (assets/skills/firebolt_trail.vfx.ron). `end_cue` terminates the
+            // flight the moment the sim says the bolt ended.
             projectile: Some(( speed: 20.0, gravity: 9.8, color: (1.0, 0.4, 0.05), radius: 0.2,
-                effect: Some("firebolt_trail") )),
+                effect: Some("firebolt_trail"), end_cue: Some("firebolt_end_bolt") )),
             anim: Some(( state: "cast_release" )) ),
-        "firebolt_impact": ( lane_id: "firebolt_impact", kind: OnHit,
+        // The explosion renders at the bolt's END position — enemy, ground, or mid-air fuse —
+        // never anchored to a victim.
+        "firebolt_end_bolt": ( lane_id: "firebolt_blast", kind: OnEnd,
             particle: Some(( count: 20, lifetime: 0.5, color: (1.0, 0.3, 0.05), speed: 5.0, effect: Some("Explosion") )) ),
+        // Small victim-anchored flash on the direct hit (the big boom is the end lane above).
+        "firebolt_impact": ( lane_id: "firebolt_impact", kind: OnHit,
+            particle: Some(( count: 8, lifetime: 0.3, color: (1.0, 0.6, 0.2), speed: 3.0 )) ),
     },
 )

@@ -65,21 +65,25 @@ pub fn add_obelisk_sim(app: &mut App, resolve_hits: bool) {
             .chain(),
     );
 
+    // Host-fired world impacts (report_ground_hits below) feed obelisk's `end_hitboxes` funnel
+    // via this observer (mirrors `ObeliskSimPlugin::build`).
+    app.add_observer(timeline::advance::on_hitbox_world_hit);
     app.add_systems(
         FixedUpdate,
         (
             timeline::advance::validate_casts.in_set(ObeliskSet::Validate),
             (
                 timeline::advance::advance_casts,
-                timeline::advance::expire_hitboxes,
+                timeline::advance::end_hitboxes,
             )
                 .in_set(ObeliskSet::Advance),
             (
                 spatial::projectile::move_projectiles,
                 // Arena rule obelisk doesn't know: the flat floor. A (ballistic or down-aimed)
-                // projectile hitbox that crosses the floor plane has HIT THE GROUND — despawn it
-                // rather than let it sail on underneath the arena. After move, before detect.
-                ground_stop_projectile_hitboxes,
+                // projectile hitbox that crosses the floor plane has HIT THE WORLD — report it
+                // into obelisk's `end_hitboxes` funnel (HitWorld ending: end event + authored
+                // chain reaction at the impact point). After move, before detect.
+                report_ground_hits,
             )
                 .chain()
                 .in_set(ObeliskSet::Projectiles),
@@ -171,23 +175,29 @@ pub fn add_obelisk_sim_client(app: &mut App) {
     add_obelisk_sim(app, false);
 }
 
-/// Despawn any moving projectile hitbox that has fallen through the arena floor plane (top face
-/// at world y = 0 — see `spawn_arena_floor`). Obelisk hitboxes only ever overlap hurtboxes, so
-/// without this an arcing bolt keeps flying underground for the rest of its window. Runs on both
-/// peers (the client has no `Hitbox` entities — harmless there).
-fn ground_stop_projectile_hitboxes(
+/// Report any moving projectile hitbox that crossed the arena floor plane (top face at world
+/// y = 0 — see `spawn_arena_floor`) as a WORLD HIT into obelisk's termination funnel. The
+/// world is the host's knowledge (like physics), so the host detects the impact and fires
+/// `HitboxWorldHit`; obelisk's `end_hitboxes` then ends the hitbox with `EndReason::HitWorld`
+/// at the impact point — firing the end cue and spawning any authored `on_end` chain (e.g.
+/// firebolt's ground explosion). Runs on both peers (the client has no `Hitbox` entities).
+#[allow(clippy::type_complexity)]
+fn report_ground_hits(
     q: Query<
         (Entity, &Transform),
         (
             With<obelisk_bevy::prelude::Hitbox>,
             With<obelisk_bevy::spatial::projectile::Projectile>,
+            Without<obelisk_bevy::timeline::advance::WorldHit>,
         ),
     >,
     mut commands: Commands,
 ) {
     for (e, tf) in &q {
         if tf.translation.y < 0.0 {
-            commands.entity(e).try_despawn();
+            // Impact point pinned ONTO the floor plane, not the underground overshoot.
+            let position = Vec3::new(tf.translation.x, 0.0, tf.translation.z);
+            commands.trigger(obelisk_bevy::events::HitboxWorldHit { hitbox: e, position });
         }
     }
 }

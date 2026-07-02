@@ -183,6 +183,9 @@ pub struct CosmeticProjectile {
     /// Downward acceleration (units/s²), mirroring the authoritative `Projectile.gravity` so a
     /// ballistic bolt's cosmetic flies the same arc as the invisible hitbox. `0.0` = straight.
     pub gravity: f32,
+    /// The end-cue id whose arrival terminates this cosmetic (the sim's authoritative
+    /// where/when the bolt stopped). `None` = legacy fixed-lifetime flight.
+    pub end_cue: Option<String>,
 }
 
 /// Read every [`LocalCue`] dispatched this frame, resolve its lanes from the [`SkillFxRegistry`]
@@ -206,6 +209,7 @@ pub fn spawn_cue_cosmetics(
     // this is `None` there and every lane falls back to the billboard — keeping the headless net-test
     // path free of any GPU-particle dependency).
     vfx_library: Option<Res<VfxLibrary>>,
+    flying: Query<(Entity, &CosmeticProjectile)>,
 ) {
     // Charge fraction used to bake `VfxBindSource::Charge` params. The `LocalCue` doesn't carry the
     // cast's charge, so bake at full strength for now (stat-driven params fall back to 0.0). Threading
@@ -213,6 +217,18 @@ pub fn spawn_cue_cosmetics(
     let charge = 1.0;
     let library = vfx_library.as_deref();
     for LocalCue(m) in msgs.read() {
+        // An END cue is the sim saying "the bolt stopped HERE" — terminate every cosmetic
+        // projectile bound to it (its lanes below then render the ending, e.g. the explosion,
+        // at the cue position). This closes the visual/sim loop: the cosmetic can't outfly or
+        // undershoot the authoritative hitbox.
+        if m.kind == CueKind::OnEnd {
+            for (e, proj) in &flying {
+                if proj.end_cue.as_deref() == Some(m.cue_id.as_str()) {
+                    commands.entity(e).try_despawn();
+                }
+            }
+        }
+
         // Re-look-up the lanes bound to this cue id (an unbound cue resolves to an empty slice and
         // no-ops — spec §12: never crash on missing content).
         let lanes = resolve_cue(&registry, m);
@@ -299,6 +315,7 @@ pub fn spawn_cue_cosmetics(
                 };
                 let velocity = dir * proj.speed;
                 let gravity = proj.gravity;
+                let end_cue = proj.end_cue.clone();
                 // Prefer an authored `bevy_vfx` trail effect flown along `velocity`; else the emissive
                 // sphere stand-in. Both carry `CosmeticProjectile` so they track the obelisk hitbox.
                 let spawned_vfx = spawn_lane_vfx(
@@ -310,7 +327,11 @@ pub fn spawn_cue_cosmetics(
                     &[],
                     charge,
                     2.0,
-                    Some(CosmeticProjectile { velocity, gravity }),
+                    Some(CosmeticProjectile {
+                        velocity,
+                        gravity,
+                        end_cue: end_cue.clone(),
+                    }),
                 );
                 if !spawned_vfx {
                     let c = LinearRgba::rgb(proj.color[0], proj.color[1], proj.color[2]);
@@ -332,7 +353,11 @@ pub fn spawn_cue_cosmetics(
                         Mesh3d(assets.sphere.clone()),
                         MeshMaterial3d(material),
                         Transform::from_translation(spawn_pos).with_scale(Vec3::splat(proj.radius)),
-                        CosmeticProjectile { velocity, gravity },
+                        CosmeticProjectile {
+                            velocity,
+                            gravity,
+                            end_cue,
+                        },
                         ParticleLifetime {
                             elapsed: 0.0,
                             duration: 2.0, // matches the .cast.ron window active_duration

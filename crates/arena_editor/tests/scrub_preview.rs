@@ -57,6 +57,7 @@ fn firebolt_like_timeline() -> obelisk_bevy::assets::CastTimeline {
         hit_filter: HitFilter::Enemies,
         hit_mode: HitMode::FirstOnly,
         rehit_interval: None,
+        on_end: Default::default(),
     });
     tl
 }

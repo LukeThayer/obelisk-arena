@@ -92,6 +92,9 @@ pub enum CueKind {
     OnCast,
     OnWindow,
     OnHit,
+    /// A window ended (hit an entity, hit the world, or its fuse ran out) — the cue carries the
+    /// world position where it happened; lanes bound to it render THERE.
+    OnEnd,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +147,11 @@ pub struct ProjectileCosmetic {
     /// Rig socket the projectile launches from (e.g. `"wand_tip"`). `None` = spawn at cue position.
     #[serde(default)]
     pub socket: Option<String>,
+    /// The end-cue id VALUE (e.g. `"firebolt_end_bolt"`) whose arrival TERMINATES this cosmetic
+    /// projectile — the sim says where/when the authoritative bolt stopped, so the visual can't
+    /// drift. `None` = legacy fixed-lifetime flight.
+    #[serde(default)]
+    pub end_cue: Option<String>,
 }
 fn default_proj_radius() -> f32 {
     0.2
@@ -339,6 +347,7 @@ impl From<ObeliskCueKind> for CueKind {
             ObeliskCueKind::OnCast => CueKind::OnCast,
             ObeliskCueKind::OnWindow => CueKind::OnWindow,
             ObeliskCueKind::OnHit => CueKind::OnHit,
+            ObeliskCueKind::OnEnd => CueKind::OnEnd,
         }
     }
 }
