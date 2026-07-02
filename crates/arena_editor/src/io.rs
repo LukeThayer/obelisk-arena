@@ -7,6 +7,7 @@
 use arena_skills::SkillFx;
 use obelisk_bevy::assets::CastTimeline;
 use obelisk_bevy::prelude::SkillRegistry;
+use stat_core::config::EffectConfig;
 use stat_core::Skill;
 use std::path::{Path, PathBuf};
 
@@ -118,9 +119,57 @@ pub fn reload_skill_registry(reg: &mut SkillRegistry) -> Result<usize, String> {
     Ok(n)
 }
 
+/// The canonical effect-body path for an effect id, under the workspace `config/effects/`.
+pub fn default_effect_path(effect_id: &str) -> PathBuf {
+    editor_root().join(format!("config/effects/{effect_id}.toml"))
+}
+
+/// Serialize an `EffectConfig` to `path` as TOML (full-rewrite, like skill rules).
+pub fn save_effect_config(config: &EffectConfig, path: &Path) -> std::io::Result<()> {
+    let s = toml::to_string(config)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, s)
+}
+
+/// Parse an `EffectConfig` from a TOML file, human-readable error on failure.
+pub fn load_effect_config(path: &Path) -> Result<EffectConfig, String> {
+    let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    toml::from_str::<EffectConfig>(&s).map_err(|e| e.to_string())
+}
+
+/// The effect ids on disk: `config/effects/*.toml` stems, sorted.
+pub fn list_effect_ids_on_disk() -> Vec<String> {
+    let dir = editor_root().join("config/effects");
+    let mut ids: Vec<String> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+                .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids
+}
+
+/// Re-load `config/effects` and SWAP it into the process-global obelisk registry so the preview
+/// resolves the just-saved effect bodies (Task 9's stat_core API). Returns the effect count.
+/// On load error the registry is left unchanged.
+pub fn reload_effect_registry() -> Result<usize, String> {
+    let reg = stat_core::config::load_effect_configs(&editor_root().join("config/effects"))
+        .map_err(|e| e.to_string())?;
+    let n = reg.all_ids().len();
+    stat_core::config::swap_effect_registry(reg);
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{default_rules_path, load_skill_rules, save_skill_rules, list_skill_ids, reload_skill_registry};
+    use super::{default_rules_path, load_skill_rules, save_skill_rules, list_skill_ids, reload_skill_registry, default_effect_path, load_effect_config, save_effect_config, list_effect_ids_on_disk, reload_effect_registry};
 
     /// Full-rewrite round-trip against the REAL firebolt rules file (under cargo,
     /// `editor_root()` resolves the obelisk-arena workspace root where config/skills lives).
@@ -146,5 +195,28 @@ mod tests {
         let n = reload_skill_registry(&mut reg).expect("reload");
         assert!(n >= 1);
         assert!(reg.0.contains_key("firebolt"));
+    }
+
+    #[test]
+    fn effect_config_round_trips_the_real_burn() {
+        let loaded = load_effect_config(&default_effect_path("burn")).expect("burn.toml parses");
+        assert_eq!(loaded.id, "burn");
+        let tmp = std::env::temp_dir().join("m4_io_test_burn.toml");
+        save_effect_config(&loaded, &tmp).expect("save");
+        let reloaded = load_effect_config(&tmp).expect("reparse");
+        assert_eq!(loaded, reloaded);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn list_effect_ids_on_disk_contains_burn() {
+        assert!(list_effect_ids_on_disk().iter().any(|s| s == "burn"));
+    }
+
+    #[test]
+    fn reload_effect_registry_swaps_in_the_real_dir() {
+        let n = reload_effect_registry().expect("swap");
+        assert!(n >= 1);
+        assert!(stat_core::config::effect_registry().get("burn").is_some());
     }
 }

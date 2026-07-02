@@ -12,6 +12,7 @@ use bevy::prelude::*;
 use bevy_modal_editor::{EditorPlugin, EditorPluginConfig, GamePlugin};
 
 pub mod edits;
+pub mod effect_model;
 pub mod enum_ui;
 pub mod fx_edits;
 pub mod gizmo;
