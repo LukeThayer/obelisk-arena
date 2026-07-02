@@ -28,6 +28,7 @@ pub mod sim_config;
 pub mod skill_designer;
 pub mod socket;
 pub mod timeline_geom;
+pub mod trigger_ui;
 pub mod vfx_bind;
 pub use model::{blank_cast_timeline, blank_skillfx, derive_vfx_cues, EditedSkill, EditedSkillFx};
 pub use preview_controller::PreviewControllerPlugin;
