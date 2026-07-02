@@ -274,8 +274,11 @@ dependencies = [
  "bevy_egui",
  "bevy_modal_editor",
  "bevy_vfx",
+ "loot_core",
  "obelisk-bevy",
  "ron 0.8.1",
+ "stat_core",
+ "toml",
 ]
 
 [[package]]

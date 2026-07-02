@@ -27,6 +27,9 @@ bevy_editor_game = { path = "../../../bevy_modal_editor/crates/bevy_editor_game"
 bevy_vfx = { path = "../../../bevy_modal_editor/crates/bevy_vfx" }
 bevy_egui = { git = "https://github.com/vladbat00/bevy_egui", branch = "main" }
 ron = "0.8"
+stat_core = { path = "../../../obelisk/stat_core" }
+loot_core = { path = "../../../obelisk/loot_core" }
+toml = "0.8"
 
 [dev-dependencies]
 obelisk-bevy = { path = "../../../obelisk-bevy", features = ["test-support"] }
