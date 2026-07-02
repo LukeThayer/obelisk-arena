@@ -56,6 +56,12 @@ impl Plugin for SkillDesignerPlugin {
         let fx_path = crate::io::default_skillfx_path("firebolt");
         let fx = crate::io::load_skillfx(&fx_path).unwrap_or_else(|_| blank_skillfx("firebolt"));
         app.insert_resource(EditedSkillFx::from_fx(fx, fx_path));
+        // Load firebolt's obelisk rules if they parse, else a blank attack seed at the canonical
+        // path (load-or-blank) — the rules side of the skill triad.
+        let rules_path = crate::io::default_rules_path("firebolt");
+        let skill = crate::io::load_skill_rules(&rules_path)
+            .unwrap_or_else(|_| crate::rules_model::blank_attack_skill("firebolt", "Firebolt"));
+        app.insert_resource(crate::rules_model::EditedRules::from_skill(skill, rules_path));
     }
 }
 
@@ -77,5 +83,13 @@ mod tests {
             reg.lookup(CustomModeId(SKILL_MODE_ID)).is_some(),
             "Skill mode should be registered under CustomModeId(\"skill\")"
         );
+    }
+
+    #[test]
+    fn plugin_seeds_edited_rules_with_the_real_firebolt() {
+        let skill = crate::io::load_skill_rules(&crate::io::default_rules_path("firebolt"))
+            .expect("real firebolt.toml parses");
+        assert_eq!(skill.id, "firebolt");
+        assert!((skill.mana_cost - 5.0).abs() < f64::EPSILON);
     }
 }

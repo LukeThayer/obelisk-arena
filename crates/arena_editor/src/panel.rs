@@ -32,7 +32,9 @@ use crate::fx_edits::{
 use crate::io::{save_cast_timeline, save_skillfx};
 use crate::model::{derive_vfx_cues, EditedSkill, EditedSkillFx};
 use crate::preview_controller::Playhead;
+use crate::rules_model::EditedRules;
 use crate::timeline_geom::{phase_spans, time_to_x, total_duration, window_span};
+use obelisk_bevy::prelude::SkillRegistry;
 
 const STRIP_H: f32 = 40.0;
 const PHASE_COLORS: [egui::Color32; 3] = [
@@ -68,13 +70,31 @@ fn kind_for(cue: &str) -> CueKind {
     }
 }
 
+/// Effect ids for the pickers, from the live obelisk registry (empty if uninitialized —
+/// minimal test apps don't init it; the windowed editor does via PreviewSimConfigPlugin).
+fn effect_id_list() -> Vec<String> {
+    if stat_core::config::effect_registry_initialized() {
+        let mut ids: Vec<String> = stat_core::config::effect_registry()
+            .all_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        ids.sort();
+        ids
+    } else {
+        Vec::new()
+    }
+}
+
 /// Draw the bottom-dock timeline panel and apply its edits to `EditedSkill`.
 pub fn draw_skill_panel(
     mut contexts: EguiContexts,
     mut edited: ResMut<EditedSkill>,
     mut edited_fx: ResMut<EditedSkillFx>,
+    mut rules: ResMut<EditedRules>,
+    registry: Option<ResMut<SkillRegistry>>,
     mut tab: ResMut<PanelTab>,
-    status: Res<RulesStatus>,
+    mut status: ResMut<RulesStatus>,
     playhead: Res<Playhead>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -106,7 +126,10 @@ pub fn draw_skill_panel(
                     fx_changed |= fc;
                 }
                 PanelTab::Rules => {
-                    ui.label("Rules authoring lands in Task 5.");
+                    let ids = effect_id_list();
+                    if crate::rules_panel::draw_rules_tab(ui, &mut rules.skill, &ids) {
+                        rules.dirty = true;
+                    }
                 }
                 PanelTab::Effects => {
                     ui.label("Effect authoring lands in Stage 3.");
@@ -128,6 +151,22 @@ pub fn draw_skill_panel(
         // Save writes BOTH files: the `.cast.ron` above + the `.skillfx.ron` cosmetic layer here.
         if save_skillfx(&edited_fx.fx, &edited_fx.path).is_ok() {
             edited_fx.dirty = false;
+        }
+        // ...plus the obelisk rules TOML, then hot-reload the live SkillRegistry so the "Play the
+        // real skill" preview casts with the just-saved rules.
+        match crate::io::save_skill_rules(&rules.skill, &rules.path) {
+            Ok(()) => {
+                rules.dirty = false;
+                if let Some(mut reg) = registry {
+                    match crate::io::reload_skill_registry(&mut reg) {
+                        Ok(n) => status.0 = format!("saved; {n} skills reloaded"),
+                        Err(e) => status.0 = format!("saved, but skill reload failed: {e}"),
+                    }
+                } else {
+                    status.0 = "saved (no SkillRegistry to reload)".into();
+                }
+            }
+            Err(e) => status.0 = format!("rules save failed: {e}"),
         }
     }
 }

@@ -19,6 +19,7 @@ pub mod io;
 pub mod model;
 pub mod rules_edits;
 pub mod rules_model;
+pub mod rules_panel;
 pub mod panel;
 pub mod preview_controller;
 pub mod preview_cosmetics;
