@@ -14,11 +14,14 @@ checkout under `~/.cargo/git/checkouts/bevy-obelisk-*/`):
   Emitter), edge kinds (`At`, `OnEnd`, `OnHit`, `OnTick`, `Retarget`), and the **gap map** of
   what is expressible today vs. spec'd vs. missing.
 - `docs/superpowers/specs/2026-07-02-event-driven-skill-phases.md` — the end-event + chaining
-  increment (check whether it has landed before authoring `on_end` reactions).
+  increment (SHIPPED 2026-07-02, obelisk-bevy 6afa6ba): every hitbox ends with
+  `EndReason { HitEntity, HitWorld, Fuse }` + a world position; `on_end` reactions chain
+  `Chained` windows at that position; `on_end_{wid}` cues fire there.
 
 **Never promise a mechanic without checking the gap map.** If the concept needs an
-unimplemented edge/node (beams, retarget hops, emitters), say so and either scope the design
-to what ships today or propose the sim increment first.
+unimplemented edge/node (authored acquisition/hitscan, beams, retarget hops, `OnTick`
+emitters), say so and either scope the design to what ships today or propose the sim
+increment first.
 
 ## 1. Decompose the concept (do this in conversation before touching files)
 
@@ -31,8 +34,9 @@ Fill in this skeleton with the user:
   free-aim from the eye.)
 - **Volumes/edges**: for each hit region — shape, motion (Static / Linear{speed} /
   Ballistic{speed, gravity}), lifetime (= fuse), hit_filter, hit_mode (FirstOnly = projectile,
-  OncePerTarget = sweep/AoE, EveryTick+rehit_interval = damage field), and what its ending
-  causes (chain a blast? nothing?).
+  OncePerTarget = sweep/AoE, EveryTick+rehit_interval = damage field), and what its ENDING
+  causes per reason (enemy hit / world hit / fuse — chain a blast window? nothing?). Chained
+  windows spawn at the parent's end position with the original caster/aim/charge.
 - **Rules**: damage types/amounts, crit, effects applied (burn/chill — `config/effects/`),
   triggers (on-crit/on-kill secondary skills).
 - **Presentation per moment**: cast (muzzle + anim), flight (trail preset), each window open,
@@ -58,8 +62,9 @@ base_damages = [{ damage_type = "Fire", min = 18.0, max = 22.0 }]
 base_crit_chance = 0.05
 ```
 
-**Behavior — `assets/skills/<id>.cast.ron`** (obelisk `CastTimeline`). Ballistic-lob template
-(current firebolt shape):
+**Behavior — `assets/skills/<id>.cast.ron`** (obelisk `CastTimeline`). Ballistic
+lob-and-explode template (current firebolt v2 shape — projectile chains a blast at wherever
+it ends):
 ```ron
 (
   skill_id: "<id>",
@@ -67,7 +72,12 @@ base_crit_chance = 0.05
   collision_windows: [
     ( id: "bolt", spawn_phase: Active, spawn_offset: 0.0, active_duration: 2.0,
       shape: Sphere( radius: 0.5 ), motion: Ballistic( speed: 20.0, gravity: 9.8 ),
-      hit_filter: Enemies, hit_mode: FirstOnly ),
+      hit_filter: Enemies, hit_mode: FirstOnly,
+      on_end: ( hit: Some(Chain("blast")), world: Some(Chain("blast")), fuse: Some(Chain("blast")) ) ),
+    // Chained: never scheduled — spawns only via a parent's on_end, AT the end position.
+    ( id: "blast", spawn_phase: Chained, spawn_offset: 0.0, active_duration: 0.05,
+      shape: Sphere( radius: 1.5 ), motion: Static,
+      hit_filter: Enemies, hit_mode: OncePerTarget ),
   ],
   targeting: SingleEntity( range: 15.0 ),
   delivery: Projectile( speed: 20.0 ),
@@ -76,10 +86,16 @@ base_crit_chance = 0.05
 ```
 Motion picker: `Static` (melee/nova/field), `Linear(speed)` (straight bolt),
 `Ballistic(speed, gravity)` (lob; gravity NOT charge-scaled — charged shots fly flatter).
-Projectile hitboxes ground-stop at the floor plane (y = 0).
+Projectile hitboxes hitting the floor plane (y = 0) end with `HitWorld` at the impact point.
+`on_end` is per-reason (`hit`/`world`/`fuse`, each `Option<Chain("id")>`) — the fuse IS
+`active_duration`, so "explode after N seconds wherever it is" = `active_duration: N` +
+`fuse: Some(Chain(...))`. The loader validates chains: targets must exist, must be
+`Chained`, and the graph must be acyclic (Save fails otherwise). In the designer, the
+`end→<window>` combo on a window row sets all three reasons to one target.
 
 **Presentation — `assets/skills/<id>.skillfx.ron`** — lanes keyed by the derived cue VALUES
-(`<id>_cast`, `<id>_window_<wid>`, `<id>_impact`):
+(`<id>_cast`, `<id>_window_<wid>` at open, `<id>_end_<wid>` at the END POSITION, `<id>_impact`
+victim-anchored):
 ```ron
 (
   skill_id: "<id>",
@@ -88,17 +104,27 @@ Projectile hitboxes ground-stop at the floor plane (y = 0).
       particle: Some(( count: 12, lifetime: 0.4, color: (1.0, 0.5, 0.1), speed: 4.0,
         effect: Some("Fire") )),
       projectile: Some(( speed: 20.0, gravity: 9.8, color: (1.0, 0.4, 0.05), radius: 0.2,
-        effect: Some("<id>_trail") )),
+        effect: Some("<id>_trail"), end_cue: Some("<id>_end_bolt") )),
       anim: Some(( state: "cast_release" )) ),
-    "<id>_impact": ( lane_id: "<id>_impact", kind: OnHit,
+    // The BIG payoff renders at the end position — enemy, ground, or mid-air fuse.
+    "<id>_end_bolt": ( lane_id: "<id>_blast", kind: OnEnd,
       particle: Some(( count: 20, lifetime: 0.5, color: (1.0, 0.3, 0.05), speed: 5.0,
         effect: Some("Explosion") )) ),
+    // Optional small victim-anchored flash on the direct hit.
+    "<id>_impact": ( lane_id: "<id>_impact", kind: OnHit,
+      particle: Some(( count: 8, lifetime: 0.3, color: (1.0, 0.6, 0.2), speed: 3.0 )) ),
   },
 )
 ```
 Hard rules:
 - `projectile.speed`/`gravity` MUST equal the window's motion values (the cosmetic traces the
-  authoritative hitbox).
+  authoritative hitbox), and `end_cue:` MUST name the window's end-cue value
+  (`<id>_end_<wid>`) — the sim's end cue is what terminates the flight, on every peer, so the
+  visual can't outfly or undershoot the hitbox.
+- Anchoring by cue kind: `OnCast`/`OnWindow` lanes are caster/socket-anchored; `OnHit` renders
+  at the victim; `OnEnd` renders at the carried world position. Put area payoffs (explosions,
+  ground fields) on `OnEnd`, never `OnHit` — an `OnHit` explosion silently vanishes when the
+  bolt hits the ground or fuses out.
 - `effect:` names are **case-sensitive `VfxLibrary` keys**: built-ins are capitalized
   (`"Fire"`, `"Explosion"`, `"Sparks"`, …); workspace-authored presets load from
   `assets/skills/<name>.vfx.ron` and `assets/vfx/` by file stem (both the game and the
@@ -125,10 +151,16 @@ Hard rules:
 
 ## Pitfalls checklist
 
-- Cue lane keys are the cue VALUES (`firebolt_cast`), not the slot names (`on_cast`).
-- `FirstOnly` stops the whole hitbox after one victim; `OncePerTarget` keeps sweeping.
+- Cue lane keys are the cue VALUES (`firebolt_cast`, `firebolt_end_bolt`), not the slot names
+  (`on_cast`, `on_end_bolt`).
+- `FirstOnly` stops the whole hitbox after one victim AND ends it immediately (`HitEntity`);
+  `OncePerTarget` keeps sweeping until the fuse.
 - A window's `active_duration` IS its fuse; it can far exceed the phase total (the editor
-  strip extends to the latest window close).
+  strip extends to the latest window close, chained windows drawn after their parent's close).
+- Chained windows are never scheduled: a `Chained` window nobody chains to simply never
+  spawns (the loader doesn't reject orphans — check the `end→` combos).
+- Chained damage keeps the ORIGINAL caster + charge — a blast is the same skill's damage roll
+  hitting again; budget totals accordingly (direct + splash on the same victim).
 - bevy_vfx presets default to looping-forever — preview bounds them with lane `lifetime`
   (min 0.5 s); keep authored one-shot presets' visual length under the lane lifetime.
 - Charge: `None`/tap ≈ 1.0×; the byte scales projectile speed AND damage. Don't double-dip by
