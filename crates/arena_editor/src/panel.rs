@@ -1,13 +1,24 @@
-//! The bottom-dock phase-timeline egui panel — the skill designer's main authoring surface.
+//! The bottom-dock egui panel — the skill designer's main authoring surface, dispatched by the
+//! editor's `dispatch_custom_panel` while in Skill mode.
 //!
-//! `draw_skill_panel` is dispatched by the editor's `dispatch_custom_panel` while in Skill mode. It
-//! is an egui shell over the pure helpers (`timeline_geom` / `edits` / `enum_ui` / `model` / `io`):
-//!   - a header row: skill id + targeting/delivery ComboBoxes + Save;
-//!   - windup/active/recovery `DragValue`s;
-//!   - a painted strip: phase bands (top half) + collision-window bars (bottom half) + a live
-//!     playhead line driven by `Playhead`;
-//!   - a hit-windows list (id/shape/motion/filter/mode/phase/offset/duration + select) + Add-Window.
-//! All edits flip `dirty`; Save derives the locked vfx cues and writes the `.cast.ron`.
+//! A shared header row (skill id, an open/new-skill switcher, the Timeline|Rules|Effects tab
+//! strip, Save, and a status line) sits above whichever per-tab surface is active:
+//!   - Timeline: the M2/M3 phase strip — targeting/delivery ComboBoxes, windup/active/recovery
+//!     `DragValue`s, a painted phase-band + collision-window strip with a live playhead, the
+//!     hit-windows list — plus the cosmetic lanes (anim clip / vfx effect / socket / param
+//!     bindings). Edits flip `EditedSkill`/`EditedSkillFx` dirty.
+//!   - Rules: the obelisk `Skill` form (M4), editing `EditedRules`.
+//!   - Effects: the `EffectConfig` form (M4 stage 3), editing `EditedEffect`.
+//!
+//! Save is unified across all three surfaces: it always writes the `.cast.ron` (after deriving
+//! the locked vfx cues) and the `.skillfx.ron` — both editor-owned files with no external
+//! validation to fail. It writes the obelisk rules TOML only when `rules.dirty` and every
+//! `trigger_skill` ref resolves (the obelisk loader ERRORS on unknown refs), then hot-reloads the
+//! live `SkillRegistry`. It writes the effect TOML only when `effect.dirty`, then hot-swaps the
+//! process-global effect registry. Gating the rules/effect writes on their own dirty flags matters
+//! because `open_skill`/opening an effect is load-or-blank: a file the parser can't read opens as
+//! a blank seed with `dirty == false`, and an ungated Save would silently overwrite the real
+//! game-shared TOML with that blank.
 //!
 //! Runs only windowed (needs a real egui context); `cargo build` is the compile gate and the boot
 //! test asserts the resource/registration wiring. The pure helpers it calls are unit-tested in their
@@ -29,7 +40,7 @@ use crate::fx_edits::{
     add_param_binding, cue_keys_for, ensure_lane, set_anim_clip, set_particle_effect,
     set_particle_socket,
 };
-use crate::effect_model::EditedEffect;
+use crate::effect_model::{sanitize_id, EditedEffect};
 use crate::io::{save_cast_timeline, save_skillfx};
 use crate::model::{derive_vfx_cues, EditedSkill, EditedSkillFx};
 use crate::preview_controller::Playhead;
@@ -100,6 +111,7 @@ pub fn draw_skill_panel(
     playhead: Res<Playhead>,
     mut new_id: Local<String>,
     mut stat_query: Local<String>,
+    mut new_effect_id: Local<String>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -144,15 +156,18 @@ pub fn draw_skill_panel(
                         crate::rules_model::blank_spell_skill as fn(&str, &str) -> stat_core::Skill,
                     ),
                 ] {
-                    if ui.button(lab).clicked() && !new_id.is_empty() {
-                        let id = new_id.clone();
-                        let (mut c, mut f, mut r) = crate::rules_model::open_skill(&id);
-                        r.skill = seed(&id, &id);
-                        c.dirty = true;
-                        f.dirty = true;
-                        r.dirty = true;
-                        switch_to = Some((c, f, r));
-                        new_id.clear();
+                    if ui.button(lab).clicked() {
+                        // Sanitize before seeding: the id becomes a filesystem path stem
+                        // (config/skills/<id>.toml) and, downstream, a bare TOML string.
+                        if let Some(id) = sanitize_id(&new_id) {
+                            let (mut c, mut f, mut r) = crate::rules_model::open_skill(&id);
+                            r.skill = seed(&id, &id);
+                            c.dirty = true;
+                            f.dirty = true;
+                            r.dirty = true;
+                            switch_to = Some((c, f, r));
+                            new_id.clear();
+                        }
                     }
                 }
                 if !status.0.is_empty() {
@@ -179,12 +194,12 @@ pub fn draw_skill_panel(
                         &mut effect,
                         &known,
                         &mut stat_query,
+                        &mut new_effect_id,
                     );
                     if c {
                         effect.dirty = true;
                     }
                     if let Some(id) = open {
-                        let id = if id.is_empty() { "new_effect".to_string() } else { id };
                         let path = crate::io::default_effect_path(&id);
                         let cfg = crate::io::load_effect_config(&path)
                             .unwrap_or_else(|_| crate::effect_model::blank_effect(&id));
@@ -218,28 +233,36 @@ pub fn draw_skill_panel(
         // ...plus the obelisk rules TOML, then hot-reload the live SkillRegistry so the "Play the
         // real skill" preview casts with the just-saved rules.
         //
-        // Referential-integrity gate: the obelisk loader ERRORS on unknown trigger_skill refs
-        // (config/skills.rs:77), so Save must refuse to write the rules file when any exist —
-        // the `.cast.ron`/`.skillfx.ron` writes above are independent surfaces and still happen.
-        let known: std::collections::HashSet<String> =
-            crate::io::list_skill_ids().into_iter().collect();
-        let bad = crate::trigger_ui::invalid_trigger_refs(&rules.skill, &known);
-        if !bad.is_empty() {
-            status.0 = format!("rules save blocked: unknown trigger_skill {bad:?}");
-        } else {
-            match crate::io::save_skill_rules(&rules.skill, &rules.path) {
-                Ok(()) => {
-                    rules.dirty = false;
-                    if let Some(mut reg) = registry {
-                        match crate::io::reload_skill_registry(&mut reg) {
-                            Ok(n) => status.0 = format!("saved; {n} skills reloaded"),
-                            Err(e) => status.0 = format!("saved, but skill reload failed: {e}"),
+        // Gated on rules.dirty: `open_skill` is load-or-blank, so a rules file the single-skill
+        // parser can't read (or one that was simply never opened this session) opens/starts as a
+        // blank seed with dirty == false. An ungated write here would silently overwrite the real
+        // game-shared TOML with that blank seed on every Save — a data-destruction vector. The
+        // `.cast.ron`/`.skillfx.ron` writes above are independent, editor-owned surfaces and stay
+        // unconditional.
+        if rules.dirty {
+            // Referential-integrity gate: the obelisk loader ERRORS on unknown trigger_skill refs
+            // (config/skills.rs:77), so Save must refuse to write the rules file when any exist —
+            // the `.cast.ron`/`.skillfx.ron` writes above are independent surfaces and still happen.
+            let known: std::collections::HashSet<String> =
+                crate::io::list_skill_ids().into_iter().collect();
+            let bad = crate::trigger_ui::invalid_trigger_refs(&rules.skill, &known);
+            if !bad.is_empty() {
+                status.0 = format!("rules save blocked: unknown trigger_skill {bad:?}");
+            } else {
+                match crate::io::save_skill_rules(&rules.skill, &rules.path) {
+                    Ok(()) => {
+                        rules.dirty = false;
+                        if let Some(mut reg) = registry {
+                            match crate::io::reload_skill_registry(&mut reg) {
+                                Ok(n) => status.0 = format!("saved; {n} skills reloaded"),
+                                Err(e) => status.0 = format!("saved, but skill reload failed: {e}"),
+                            }
+                        } else {
+                            status.0 = "saved (no SkillRegistry to reload)".into();
                         }
-                    } else {
-                        status.0 = "saved (no SkillRegistry to reload)".into();
                     }
+                    Err(e) => status.0 = format!("rules save failed: {e}"),
                 }
-                Err(e) => status.0 = format!("rules save failed: {e}"),
             }
         }
         if effect.dirty {

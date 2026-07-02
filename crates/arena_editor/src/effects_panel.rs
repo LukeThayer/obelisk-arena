@@ -10,7 +10,7 @@ use stat_core::config::{ChargeConfig, EffectModConfig, StatusApplication};
 use stat_core::types::{ChargeConsumption, StackingBehavior};
 use stat_core::{EffectCondition, EffectTrigger};
 
-use crate::effect_model::EditedEffect;
+use crate::effect_model::{sanitize_id, EditedEffect};
 use crate::io::list_effect_ids_on_disk;
 use crate::stat_ui::{filter_stats, stat_choices};
 
@@ -34,12 +34,14 @@ fn effect_trigger_label(t: &EffectTrigger) -> &'static str {
 }
 
 /// Draw the Effects form. Returns (changed, open-request): `open` is `Some(id)` when the user
-/// picked a different effect (or typed a new id) — the caller swaps the `EditedEffect` resource.
+/// picked a different effect from the dropdown, or typed a new id in the adjacent field and it
+/// passed [`sanitize_id`] — the caller swaps the `EditedEffect` resource.
 pub fn draw_effects_tab(
     ui: &mut egui::Ui,
     edited: &mut EditedEffect,
     known_skill_ids: &[String],
     stat_query: &mut String,
+    new_effect_id: &mut String,
 ) -> (bool, Option<String>) {
     let mut changed = false;
     let mut open: Option<String> = None;
@@ -57,8 +59,18 @@ pub fn draw_effects_tab(
                     }
                 }
             });
+        ui.add(
+            egui::TextEdit::singleline(new_effect_id)
+                .hint_text("new id")
+                .desired_width(80.0),
+        );
         if ui.button("+ New").clicked() {
-            open = Some(String::new()); // caller treats empty id as "new blank"
+            // Reject anything sanitize_id won't accept (empty, or chars outside [a-z0-9_-]); the
+            // status line isn't reachable from here, so an invalid id is just a silent no-op.
+            if let Some(id) = sanitize_id(new_effect_id) {
+                open = Some(id);
+                new_effect_id.clear();
+            }
         }
     });
 

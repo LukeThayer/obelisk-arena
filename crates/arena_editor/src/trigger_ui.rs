@@ -1,6 +1,9 @@
 //! The TriggerCondition catalog: one default-payload prototype per variant, grouped by pipeline
 //! phase, so the Rules panel can drive a single ComboBox over all 34 variants (`TriggerCondition`
-//! has no EnumVariants impl — it carries payloads). Labels come from the enum's own `Display`.
+//! has no EnumVariants impl — it carries payloads). ENTRY labels (the individual conditions) come
+//! from the variant's own `Display` impl, via `.to_string()` in the picker (rules_panel.rs); GROUP
+//! labels (the pipeline-phase headers, e.g. "Pre-calculation") are hand-written strings here — the
+//! enum has no notion of them.
 //! Also referential-integrity validation for `SkillCondition.trigger_skill` — the obelisk loader
 //! ERRORS on unknown refs (config/skills.rs:77), so Save must block them.
 
