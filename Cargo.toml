@@ -31,15 +31,15 @@ lightyear = { version = "0.26.4", features = ["netcode", "udp", "avian3d", "inte
 # ticks (the avian_3d_character example pattern). Pulled in transitively by lightyear's `prediction`
 # feature; named directly here so `FrameInterpolationPlugin`/`FrameInterpolate` are importable.
 lightyear_frame_interpolation = "0.26.4"
-obelisk-bevy = { path = "../obelisk-bevy" }
+obelisk-bevy = { git = "https://github.com/LukeThayer/bevy-obelisk", branch = "main" }
 # The pure-Rust stat library obelisk-bevy wraps; arena_game names `StatBlock` directly when
 # building combatants (obelisk-bevy doesn't re-export it). Same path the plugin uses.
-stat_core = { path = "../obelisk/stat_core" }
+stat_core = { git = "ssh://git@github.com/vothuul/obelisk.git", branch = "master" }
 # bevy_vfx (the editor's GPU particle engine) — the live-game particle upgrade: replaces the M1
 # emissive-billboard stand-in so authored `.skillfx.ron` effects render in-game as they do in the
 # skill-designer preview. Windowed-client-only at runtime (VfxPlugin is added only in the windowed
 # build); the headless server/observer compile it but never add the plugin. Same crate the editor +
 # arena_editor use (Bevy 0.18).
-bevy_vfx = { path = "../bevy_modal_editor/crates/bevy_vfx" }
+bevy_vfx = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }
 arena_skills = { path = "crates/arena_skills" }
 arena_sim = { path = "crates/arena_sim" }

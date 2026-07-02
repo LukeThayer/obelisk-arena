@@ -1966,6 +1966,7 @@ dependencies = [
 [[package]]
 name = "bevy_vfx"
 version = "0.1.0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#4113492692b9dcbf04ab42d6183de79299e01010"
 dependencies = [
  "avian3d",
  "bevy",
@@ -5036,6 +5037,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 [[package]]
 name = "loot_core"
 version = "0.1.0"
+source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#54d0837bef10ea97491c3e928b7c6ff3ad0934fc"
 dependencies = [
  "rand 0.8.6",
  "rand_chacha 0.3.1",
@@ -5531,6 +5533,7 @@ dependencies = [
 [[package]]
 name = "obelisk-bevy"
 version = "0.1.0"
+source = "git+https://github.com/LukeThayer/bevy-obelisk?branch=main#264b4c39a65fe6e29cfd85fb651500fa04583052"
 dependencies = [
  "avian3d",
  "bevy",
@@ -7052,6 +7055,7 @@ checksum = "0c6f73aeb92d671e0cc4dca167e59b2deb6387c375391bc99ee743f326994a2b"
 [[package]]
 name = "skill_tree"
 version = "0.1.0"
+source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#54d0837bef10ea97491c3e928b7c6ff3ad0934fc"
 dependencies = [
  "loot_core",
  "rand 0.8.6",
@@ -7242,6 +7246,7 @@ dependencies = [
 [[package]]
 name = "stat_core"
 version = "0.1.0"
+source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#54d0837bef10ea97491c3e928b7c6ff3ad0934fc"
 dependencies = [
  "loot_core",
  "rand 0.8.6",
@@ -7358,6 +7363,7 @@ dependencies = [
 [[package]]
 name = "tables_core"
 version = "0.1.0"
+source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#54d0837bef10ea97491c3e928b7c6ff3ad0934fc"
 dependencies = [
  "rand 0.8.6",
  "serde",
