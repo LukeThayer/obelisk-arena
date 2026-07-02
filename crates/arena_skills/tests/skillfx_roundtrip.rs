@@ -79,7 +79,9 @@ fn existing_firebolt_asset_still_parses_with_defaults() {
         .as_ref()
         .unwrap();
     assert_eq!(p.count, 12);
-    assert!(p.effect.is_none());
+    // The live-cosmetics milestone authored `effect: "fire"` on this lane; the fields the
+    // asset does NOT set must still parse as defaults.
+    assert_eq!(p.effect.as_deref(), Some("fire"));
     assert!(p.param_bindings.is_empty());
     assert_eq!(p.offset, Vec3::ZERO);
 }
