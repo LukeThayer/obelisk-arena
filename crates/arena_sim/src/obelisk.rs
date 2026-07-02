@@ -92,9 +92,14 @@ pub fn add_obelisk_sim(app: &mut App, resolve_hits: bool) {
     if resolve_hits {
         // Hit detection is server-only. Adding `detect_overlaps` on the client would draw
         // `CombatRng` and desync (Stage-A) — it stays out of the client's `ResolveHits` set.
+        // `resolve_beam_hits` is the beam counterpart (strikes the designated target directly).
         app.add_systems(
             FixedUpdate,
-            spatial::detect::detect_overlaps.in_set(ObeliskSet::ResolveHits),
+            (
+                spatial::detect::detect_overlaps,
+                spatial::detect::resolve_beam_hits,
+            )
+                .in_set(ObeliskSet::ResolveHits),
         );
     }
 

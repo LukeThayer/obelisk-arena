@@ -468,6 +468,8 @@ fn draw_timeline_tab(
                             changed = true;
                         }
                     }
+                    // Beam: instantaneous strike on the designated target — no motion params.
+                    obelisk_bevy::assets::VolumeMotion::Beam => {}
                 }
                 let f = &mut edited.timeline.collision_windows[idx].hit_filter;
                 egui::ComboBox::from_id_salt("filter")
@@ -538,10 +540,12 @@ fn draw_timeline_tab(
                 {
                     changed = true;
                 }
-                // The window's on_end chain: what its termination spawns at the end position.
-                // v1 UI sets ALL THREE reasons (hit/world/fuse) to the same target — the schema
-                // stays per-reason for later per-reason authoring.
-                let all_ids: Vec<String> = edited
+                // The window's on_end reaction: what its termination spawns at the end position
+                // — chain a window there, or RETARGET (seek the nearest un-struck enemy and
+                // beam the window onto it; hit-reason only, hop-bounded). v1 UI sets the chain
+                // on ALL THREE reasons and retarget on hit — the schema stays per-reason.
+                use obelisk_bevy::assets::{EndReaction, OnEnd};
+                let other_ids: Vec<String> = edited
                     .timeline
                     .collision_windows
                     .iter()
@@ -549,9 +553,11 @@ fn draw_timeline_tab(
                     .filter(|(i, _)| *i != idx)
                     .map(|(_, w)| w.id.clone())
                     .collect();
+                let self_id = edited.timeline.collision_windows[idx].id.clone();
                 let w = &mut edited.timeline.collision_windows[idx];
                 let current = match &w.on_end.hit {
-                    Some(obelisk_bevy::assets::EndReaction::Chain(id)) => id.clone(),
+                    Some(EndReaction::Chain(id)) => format!("chain {id}"),
+                    Some(EndReaction::Retarget { window, .. }) => format!("hop {window}"),
                     None => "(none)".to_string(),
                 };
                 egui::ComboBox::from_id_salt("on_end")
@@ -561,11 +567,11 @@ fn draw_timeline_tab(
                             w.on_end = Default::default();
                             changed = true;
                         }
-                        for id in &all_ids {
-                            if ui.selectable_label(&current == id, id).clicked() {
-                                let chain =
-                                    Some(obelisk_bevy::assets::EndReaction::Chain(id.clone()));
-                                w.on_end = obelisk_bevy::assets::OnEnd {
+                        for id in &other_ids {
+                            let label = format!("chain {id}");
+                            if ui.selectable_label(current == label, &label).clicked() {
+                                let chain = Some(EndReaction::Chain(id.clone()));
+                                w.on_end = OnEnd {
                                     hit: chain.clone(),
                                     world: chain.clone(),
                                     fuse: chain,
@@ -573,7 +579,43 @@ fn draw_timeline_tab(
                                 changed = true;
                             }
                         }
+                        // Retarget may target any window INCLUDING this one (self-hop, the
+                        // chain-lightning shape) — the hop counter bounds the cycle.
+                        for id in other_ids.iter().chain([&self_id]) {
+                            let label = format!("hop {id}");
+                            if ui.selectable_label(current == label, &label).clicked() {
+                                w.on_end = OnEnd {
+                                    hit: Some(EndReaction::Retarget {
+                                        window: id.clone(),
+                                        radius: 6.0,
+                                        max_hops: 3,
+                                    }),
+                                    world: None,
+                                    fuse: None,
+                                };
+                                changed = true;
+                            }
+                        }
                     });
+                if let Some(EndReaction::Retarget {
+                    radius, max_hops, ..
+                }) = &mut w.on_end.hit
+                {
+                    if ui
+                        .add(egui::DragValue::new(radius).speed(0.1).range(0.5..=30.0).prefix("r "))
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    let mut hops = *max_hops as u32;
+                    if ui
+                        .add(egui::DragValue::new(&mut hops).range(1..=16).prefix("hops "))
+                        .changed()
+                    {
+                        *max_hops = hops as u8;
+                        changed = true;
+                    }
+                }
             });
         });
     }

@@ -37,6 +37,7 @@ fn impact_only_fx() -> SkillFx {
             param_bindings: Vec::new(),
         }),
         projectile: None,
+        beam: None,
         anim: None,
     };
     SkillFx {

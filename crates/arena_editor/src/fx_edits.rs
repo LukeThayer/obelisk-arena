@@ -22,6 +22,7 @@ pub fn ensure_lane<'a>(fx: &'a mut SkillFx, cue_id: &str, kind: CueKind) -> &'a 
             kind,
             particle: None,
             projectile: None,
+            beam: None,
             anim: None,
         })
 }

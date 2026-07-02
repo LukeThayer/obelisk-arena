@@ -43,7 +43,7 @@ pub fn trajectory_points(
     dir: Vec3,
 ) -> Vec<Vec3> {
     let (speed, gravity) = match *motion {
-        VolumeMotion::Static => return Vec::new(),
+        VolumeMotion::Static | VolumeMotion::Beam => return Vec::new(),
         VolumeMotion::Linear { speed } => (speed, 0.0),
         VolumeMotion::Ballistic { speed, gravity } => (speed, gravity),
     };
@@ -98,6 +98,20 @@ pub fn draw_window_gizmo(
     let path = trajectory_points(&window.motion, window.active_duration, origin, dir);
     if path.len() > 1 {
         gizmos.linestrip(path, Color::srgb(1.0, 0.8, 0.2));
+    }
+    // Beam windows: the arc line to the staged victim, plus the retarget hop radius around it.
+    if matches!(window.motion, VolumeMotion::Beam) {
+        let beam_c = Color::srgb(0.5, 0.8, 1.0);
+        gizmos.line(origin + Vec3::Y * 1.2, target, beam_c);
+        if let Some(obelisk_bevy::assets::EndReaction::Retarget { radius, .. }) =
+            &window.on_end.hit
+        {
+            gizmos.circle(
+                Isometry3d::new(target, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+                *radius,
+                beam_c,
+            );
+        }
     }
     match gizmo_shape(&window.shape) {
         GizmoShape::Sphere { radius } => {

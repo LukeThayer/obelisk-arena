@@ -302,6 +302,54 @@ pub fn spawn_cue_cosmetics(
                 }
             }
 
+            // 1b) Two-anchor beam arc: `segments` bursts sampled along the cue's
+            // position_from→position segment (a beam window's open cue carries both anchors).
+            // No second anchor = nothing to draw (an authoring mismatch, not a crash).
+            if let (Some(b), Some(from)) = (&lane.beam, m.position_from) {
+                let to = m.position;
+                let n = b.segments.max(2) as usize;
+                for i in 0..n {
+                    let t = i as f32 / (n - 1) as f32;
+                    let p = from.lerp(to, t);
+                    let spawned_vfx = spawn_lane_vfx(
+                        &mut commands,
+                        library,
+                        b.effect.as_deref(),
+                        p,
+                        Vec3::ZERO,
+                        &[],
+                        charge,
+                        b.lifetime,
+                        None,
+                    );
+                    if !spawned_vfx {
+                        let c = LinearRgba::rgb(b.color[0], b.color[1], b.color[2]);
+                        let material = assets
+                            .particle_mats
+                            .entry(color_key(b.color))
+                            .or_insert_with(|| {
+                                materials.add(StandardMaterial {
+                                    emissive: c * 3.0,
+                                    base_color: Color::from(c),
+                                    alpha_mode: AlphaMode::Blend,
+                                    unlit: true,
+                                    ..default()
+                                })
+                            })
+                            .clone();
+                        commands.spawn((
+                            Mesh3d(assets.quad.clone()),
+                            MeshMaterial3d(material),
+                            Transform::from_translation(p).with_scale(Vec3::splat(0.35)),
+                            ParticleLifetime {
+                                elapsed: 0.0,
+                                duration: b.lifetime,
+                            },
+                        ));
+                    }
+                }
+            }
+
             // 2) Cosmetic flying projectile (OnCast lane only, for firebolt).
             if let Some(proj) = &lane.projectile {
                 // Direction (Bug 1b): prefer the cue's OWN aim_dir (carried over the wire from the

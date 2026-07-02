@@ -26,6 +26,7 @@ fn zap_fx() -> SkillFx {
                 param_bindings: Vec::new(),
             }),
             projectile: None,
+            beam: None,
             anim: Some(AnimLayer {
                 state: String::new(),
                 clip: Some("casting_idle".into()),

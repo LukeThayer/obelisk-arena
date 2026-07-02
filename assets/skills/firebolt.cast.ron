@@ -16,7 +16,9 @@
       shape: Sphere( radius: 1.5 ), motion: Static,
       hit_filter: Enemies, hit_mode: OncePerTarget ),
   ],
-  targeting: SingleEntity( range: 15.0 ),
+  // Direction = free-aim (the server casts along the crosshair ray, loft and all).
+  // SingleEntity would opt into server hitscan acquisition — that's for beam skills.
+  targeting: Direction( range: 15.0 ),
   delivery: Projectile( speed: 20.0 ),
   vfx_cues: { "on_cast": "firebolt_cast", "on_hit": "firebolt_impact",
               "on_window_bolt": "firebolt_window_bolt",

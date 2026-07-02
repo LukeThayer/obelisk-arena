@@ -32,6 +32,7 @@ fn extended_lane() -> LaneEvent {
             socket: Some("wand_tip".into()),
             end_cue: Some("x_end_bolt".into()),
         }),
+        beam: None,
         anim: Some(AnimLayer {
             state: String::new(),
             clip: Some("casting_idle".into()),

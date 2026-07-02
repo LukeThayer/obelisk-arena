@@ -74,6 +74,7 @@ fn capture_cue_event(
         source_id,
         cue.position,
         aim,
+        cue.position_from,
         cue.kind.into(),
     ));
 }
@@ -296,6 +297,7 @@ fn predicted_local_cast(
                 // Bug 1b: carry the predicted cast's aim so the local predicted bolt flies the
                 // right way (and so the cue's own aim_dir is the single source of truth).
                 aim_dir: cast.aim_dir,
+                position_from: None,
                 kind: arena_skills::CueKind::OnCast,
             },
         ));

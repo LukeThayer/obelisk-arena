@@ -34,6 +34,7 @@ fn firebolt_cast_fx() -> SkillFx {
             param_bindings: Vec::new(),
         }),
         projectile: None,
+        beam: None,
         anim: Some(AnimLayer {
             state: "cast_release".into(),
             clip: Some("casting_idle".into()),
@@ -55,6 +56,7 @@ fn firebolt_cast_fx() -> SkillFx {
             param_bindings: Vec::new(),
         }),
         projectile: None,
+        beam: None,
         anim: None,
     };
     let mut lanes = HashMap::new();
@@ -89,6 +91,7 @@ fn cue_spawns_one_preview_cosmetic_child_for_the_bound_lane() {
         cue_id: "firebolt_cast".into(),
         source: caster,
         position: Vec3::new(0.0, 1.0, 0.0),
+        position_from: None,
         kind: ObeliskCueKind::OnCast,
     });
     app.world_mut().flush();
@@ -139,6 +142,7 @@ fn cast_cue_projectile_lane_flies_the_authored_arc() {
         cue_id: "firebolt_cast".into(),
         source: caster,
         position: cast_pos,
+        position_from: None,
         kind: ObeliskCueKind::OnCast,
     });
     app.world_mut().flush();
@@ -175,6 +179,7 @@ fn on_hit_cue_spawns_the_impact_at_the_cue_world_position_unparented() {
         cue_id: "firebolt_impact".into(),
         source: caster,
         position: hit_pos,
+        position_from: None,
         kind: ObeliskCueKind::OnHit,
     });
     app.world_mut().flush();
@@ -204,6 +209,7 @@ fn cue_with_no_bound_lane_spawns_nothing() {
         cue_id: "unbound_cue".into(),
         source: caster,
         position: Vec3::ZERO,
+        position_from: None,
         kind: ObeliskCueKind::OnCast,
     });
     app.world_mut().flush();

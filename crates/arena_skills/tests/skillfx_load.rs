@@ -40,13 +40,15 @@ fn firebolt_skillfx_ron_round_trips() {
         fx.lanes.keys().collect::<Vec<_>>()
     );
 
-    // The OnCast lane carries the cosmetic projectile; the OnHit impact lane does not.
+    // The cast lane is muzzle + anim only; the cosmetic projectile lives on the WINDOW-OPEN
+    // lane (the moment the authoritative hitbox spawns — flight-timing fix), terminated by
+    // the bolt's end cue.
     let cast = &fx.lanes["firebolt_cast"];
     assert_eq!(cast.lane_id, "firebolt_muzzle");
     assert_eq!(cast.kind, CueKind::OnCast);
     assert!(
-        cast.projectile.is_some(),
-        "firebolt_cast lane should declare a cosmetic projectile"
+        cast.projectile.is_none(),
+        "the projectile moved to the window lane"
     );
     assert!(
         cast.particle.is_some(),
@@ -56,6 +58,13 @@ fn firebolt_skillfx_ron_round_trips() {
         cast.anim.is_some(),
         "firebolt_cast lane has a cast_release anim"
     );
+    let flight = &fx.lanes["firebolt_window_bolt"];
+    assert_eq!(flight.kind, CueKind::OnWindow);
+    let proj = flight
+        .projectile
+        .as_ref()
+        .expect("window lane carries the cosmetic projectile");
+    assert_eq!(proj.end_cue.as_deref(), Some("firebolt_end_bolt"));
 
     let impact = &fx.lanes["firebolt_impact"];
     assert_eq!(impact.kind, CueKind::OnHit);

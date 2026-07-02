@@ -1,0 +1,28 @@
+(
+  skill_id: "chain_lightning",
+  phase_durations: ( windup: 0.25, active: 0.05, recovery: 0.2 ),
+  collision_windows: [
+    // The initial arc: a BEAM onto the hitscan-acquired target (the entity the caster was
+    // looking at — the server resolves it; a miss casts by direction and the un-targeted beam
+    // fuses out: the paid fizzle). On hit it RETARGETS: nearest un-struck enemy within 6 m.
+    ( id: "arc", spawn_phase: Active, spawn_offset: 0.0, active_duration: 0.15,
+      shape: Sphere( radius: 0.3 ), motion: Beam,
+      hit_filter: Enemies, hit_mode: FirstOnly,
+      on_end: ( hit: Some(Retarget( window: "hop", radius: 6.0, max_hops: 3 )) ) ),
+    // Each hop: the same beam, self-retargeting — the hop counter (max 3) bounds the cycle,
+    // and the chain's visited set means it never strikes the same enemy twice.
+    ( id: "hop", spawn_phase: Chained, spawn_offset: 0.0, active_duration: 0.15,
+      shape: Sphere( radius: 0.3 ), motion: Beam,
+      hit_filter: Enemies, hit_mode: FirstOnly,
+      on_end: ( hit: Some(Retarget( window: "hop", radius: 6.0, max_hops: 3 )) ) ),
+  ],
+  // SingleEntity = the server hitscan-acquires the looked-at target for this skill.
+  targeting: SingleEntity( range: 15.0 ),
+  delivery: Instant,
+  vfx_cues: { "on_cast": "chain_lightning_cast",
+              "on_window_arc": "chain_lightning_window_arc",
+              "on_window_hop": "chain_lightning_window_hop",
+              "on_end_arc": "chain_lightning_end_arc",
+              "on_end_hop": "chain_lightning_end_hop",
+              "on_hit": "chain_lightning_impact" },
+)

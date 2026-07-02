@@ -10,7 +10,9 @@
 use bevy::prelude::*;
 use lightyear::prelude::server::ClientOf;
 use lightyear::prelude::{MessageReceiver, RemoteId};
+use obelisk_bevy::assets::CastTargeting;
 use obelisk_bevy::prelude::*;
+use obelisk_bevy::timeline::cast::{CastAim, PendingCast};
 use serde_json::json;
 
 use crate::net::protocol::{CastRequestMessage, NetworkedPlayer};
@@ -24,11 +26,17 @@ use super::spawn::{peer_to_u64, ClientPlayerMap};
 /// camera forward vector). No server-side target re-acquisition — the bolt goes where the client
 /// aimed (free aim). Skips a caster already mid-cast (`AlreadyCasting` avoidance). The caster
 /// entity must exist in the `ClientPlayerMap`; otherwise the request is silently dropped.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn drain_cast_requests(
     mut receivers: Query<(&RemoteId, &mut MessageReceiver<CastRequestMessage>), With<ClientOf>>,
     client_map: Res<ClientPlayerMap>,
     casters: Query<&ObeliskId, With<NetworkedPlayer>>,
     active: Query<(), With<ActiveCast>>,
+    handles: Res<CastTimelineHandles>,
+    timelines: Res<Assets<CastTimeline>>,
+    transforms: Query<&bevy::prelude::Transform>,
+    hurtboxes: Query<(Entity, &Hurtbox)>,
+    spatial: avian3d::prelude::SpatialQuery,
     mut commands: Commands,
 ) {
     for (RemoteId(peer_id), mut receiver) in &mut receivers {
@@ -65,12 +73,58 @@ pub(crate) fn drain_cast_requests(
             // opponent lands (Bug 1). Without the offset the bolt spawns at the feet (Y=1.0) and
             // undershoots a crosshair-aimed shot.
             let muzzle_offset = Vec3::Y * crate::net::ARENA_EYE_HEIGHT;
-            commands.entity(caster).cast_skill_dir_charged_from(
-                req.skill_id.clone(),
-                dir,
-                req.charge,
-                muzzle_offset,
-            );
+
+            // HITSCAN ACQUISITION for entity-targeted skills: when the skill's timeline declares
+            // `CastTargeting::SingleEntity`, the server resolves "what is the client looking at"
+            // — a ray along the aim from the eye, first hurtbox hit (excluding the caster's own)
+            // within the targeting range → entity-aimed cast (obelisk then validates range/LOS
+            // and the beam window strikes that entity). A MISS still casts by direction: the
+            // beam window has no designated target, so the skill fizzles AFTER paying mana +
+            // cooldown — the authored miss cost.
+            let acquired = timelines
+                .get(handles.0.get(&req.skill_id).map(|h| h.id()).unwrap_or_default())
+                .and_then(|tl| match tl.targeting {
+                    CastTargeting::SingleEntity { range } => Some(range),
+                    _ => None,
+                })
+                .and_then(|range| {
+                    let origin = transforms.get(caster).ok()?.translation + muzzle_offset;
+                    let own: Vec<Entity> = hurtboxes
+                        .iter()
+                        .filter(|(_, h)| h.owner == caster)
+                        .map(|(e, _)| e)
+                        .chain([caster])
+                        .collect();
+                    let filter =
+                        avian3d::prelude::SpatialQueryFilter::default().with_excluded_entities(own);
+                    let hit = spatial.cast_ray(origin, dir, range, true, &filter)?;
+                    // The ray can meet the target's HURTBOX child (owner) or its BODY collider
+                    // (a combatant entity) — accept both.
+                    hurtboxes
+                        .get(hit.entity)
+                        .map(|(_, h)| h.owner)
+                        .ok()
+                        .or_else(|| casters.get(hit.entity).is_ok().then_some(hit.entity))
+                });
+            if let Some(target) = acquired {
+                trace::event(
+                    "cast_hitscan_acquired",
+                    json!({ "caster": caster_id.0, "skill_id": req.skill_id }),
+                );
+                commands.entity(caster).insert(PendingCast {
+                    skill_id: req.skill_id.clone(),
+                    aim: CastAim::Entity(target),
+                    charge: Some(req.charge),
+                    muzzle_offset,
+                });
+            } else {
+                commands.entity(caster).cast_skill_dir_charged_from(
+                    req.skill_id.clone(),
+                    dir,
+                    req.charge,
+                    muzzle_offset,
+                );
+            }
         }
     }
 }

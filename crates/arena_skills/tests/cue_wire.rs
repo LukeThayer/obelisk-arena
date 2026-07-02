@@ -13,6 +13,7 @@ fn cue_message_round_trips_through_serde() {
         source_id: "player".into(),
         position: Vec3::new(1.0, 2.0, 3.0),
         aim_dir: Vec3::new(0.0, 0.0, 1.0),
+        position_from: None,
         kind: CueKind::OnCast,
     };
     let json = serde_json::to_string(&m).unwrap();

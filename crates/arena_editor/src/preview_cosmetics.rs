@@ -171,6 +171,24 @@ pub fn on_preview_cue(
                 p.lifetime.max(0.5),
             );
         }
+        // Two-anchor beam arc: bursts sampled along position_from→position (a beam window's
+        // open cue carries both anchors) — the same v1 rendering the game client uses.
+        if let (Some(b), Some(from)) = (&lane.beam, ev.position_from) {
+            let n = b.segments.max(2) as usize;
+            for i in 0..n {
+                let t = i as f32 / (n - 1) as f32;
+                spawn_effect(
+                    &mut commands,
+                    &library,
+                    b.effect.as_deref(),
+                    from.lerp(ev.position, t),
+                    &[],
+                    charge.0,
+                    None,
+                    b.lifetime.max(0.25),
+                );
+            }
+        }
         if let Some(pr) = &lane.projectile {
             // The cosmetic projectile FLIES (world-space, never socket-parented) at the authored
             // speed/gravity, tracing the same arc as the authoritative hitbox: launched from the

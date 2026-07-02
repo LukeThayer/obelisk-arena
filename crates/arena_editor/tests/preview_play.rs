@@ -19,6 +19,10 @@ use obelisk_bevy::testkit::{init_test_obelisk, EventRecorder, EventRecorderPlugi
 use std::time::Duration;
 
 fn run(seed: u64, ticks: usize) -> App {
+    run_skill(seed, ticks, "firebolt")
+}
+
+fn run_skill(seed: u64, ticks: usize, skill: &str) -> App {
     init_test_obelisk();
     let root = editor_root();
     let mut app = App::new();
@@ -48,11 +52,9 @@ fn run(seed: u64, ticks: usize) -> App {
         .add_plugins(arena_editor::preview_rig::PreviewRigPlugin);
     app.add_obelisk_skills(SkillSource::Dir(root.join("config/skills")));
     app.seed_combat_rng(seed);
-    let tl = load_cast_timeline(&root.join("assets/skills/firebolt.cast.ron")).expect("firebolt");
-    app.insert_resource(EditedSkill::from_timeline(
-        tl,
-        root.join("assets/skills/firebolt.cast.ron"),
-    ));
+    let path = root.join(format!("assets/skills/{skill}.cast.ron"));
+    let tl = load_cast_timeline(&path).expect("timeline parses");
+    app.insert_resource(EditedSkill::from_timeline(tl, path));
     app.finish();
     app.cleanup();
     app.world_mut().write_message(GameStartedEvent);
@@ -200,6 +202,41 @@ fn play_chains_the_blast_where_the_bolt_ends() {
         obelisk_bevy::events::EndReason::HitEntity,
         "aimed preview cast ends on the dummy"
     );
+}
+
+/// Increment 2 end-to-end on the REAL chain_lightning asset: the preview casts ENTITY-AIMED at
+/// the first dummy (hitscan-acquired in the game), the arc beam strikes it, and the retarget
+/// hop beams onto the second dummy (spawned automatically for retargeting skills) — two
+/// victims, both attributed to the caster, with two-anchor beam cues.
+#[test]
+fn play_chain_lightning_hops_to_the_second_dummy() {
+    let mut app = run_skill(31, 90, "chain_lightning");
+    let rec = app.world().resource::<EventRecorder>();
+    let arc_hits = rec
+        .hit_confirmed
+        .iter()
+        .filter(|h| h.window_id == "arc")
+        .count();
+    let hop_hits = rec
+        .hit_confirmed
+        .iter()
+        .filter(|h| h.window_id == "hop")
+        .count();
+    assert_eq!(arc_hits, 1, "the acquired target is struck");
+    assert_eq!(hop_hits, 1, "the chain hops to the second dummy");
+    assert_eq!(rec.damage_resolved.len(), 2, "full damage each strike");
+    let beam_cues = rec
+        .cues
+        .iter()
+        .filter(|c| c.position_from.is_some())
+        .count();
+    assert_eq!(beam_cues, 2, "each beam window cue carries both anchors");
+    let dummies = app
+        .world_mut()
+        .query_filtered::<Entity, With<arena_sim::preview::PreviewDummy>>()
+        .iter(app.world())
+        .count();
+    assert_eq!(dummies, 2, "retargeting skills stage a second dummy");
 }
 
 #[test]

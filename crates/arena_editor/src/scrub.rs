@@ -41,13 +41,15 @@ pub struct ScrubState {
 }
 
 /// One cue's staged scrub preview: its timeline moment, the cue id VALUE the lanes bind to, the
-/// obelisk kind, and the world position to stage the vfx at.
+/// obelisk kind, and the world position(s) to stage the vfx at (`position_from` for two-anchor
+/// beam cues).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CueMoment {
     pub t: f32,
     pub cue_id: String,
     pub kind: ObeliskCueKind,
     pub position: Vec3,
+    pub position_from: Option<Vec3>,
 }
 
 /// The scrub-preview cue schedule for `tl`, sorted by time. See the module doc for the timing and
@@ -63,6 +65,7 @@ pub fn cue_moments(tl: &CastTimeline) -> Vec<CueMoment> {
             cue_id: id.clone(),
             kind: ObeliskCueKind::OnCast,
             position: SPAWN_MARKERS[0] + MUZZLE_OFFSET,
+            position_from: None,
         });
     }
     let mut first_window_close: Option<f32> = None;
@@ -70,18 +73,28 @@ pub fn cue_moments(tl: &CastTimeline) -> Vec<CueMoment> {
         let (open, close) = resolved_window_span(tl, w);
         first_window_close = Some(first_window_close.map_or(close, |c: f32| c.min(close)));
         let chained = w.spawn_phase == obelisk_bevy::assets::WindowPhase::Chained;
+        let beam = matches!(w.motion, obelisk_bevy::assets::VolumeMotion::Beam);
         if let Some(id) = cues.get(&format!("on_window_{}", w.id)) {
             moments.push(CueMoment {
                 t: open,
                 cue_id: id.clone(),
                 kind: ObeliskCueKind::OnWindow,
                 // Chained windows open where their parent ended (the target area); scheduled
-                // ones open in front of the caster.
-                position: if chained {
+                // ones open in front of the caster; a beam's cue lands ON its victim.
+                position: if chained || beam {
                     SPAWN_MARKERS[1]
                 } else {
                     SPAWN_MARKERS[0] + WINDOW_FORWARD
                 },
+                // Beam cues are two-anchor: stage the arc caster→dummy (a chained hop stages
+                // from the first dummy's spot instead).
+                position_from: beam.then(|| {
+                    if chained {
+                        SPAWN_MARKERS[1] + Vec3::new(0.0, 0.0, -1.5)
+                    } else {
+                        SPAWN_MARKERS[0] + MUZZLE_OFFSET
+                    }
+                }),
             });
         }
         if let Some(id) = cues.get(&format!("on_end_{}", w.id)) {
@@ -90,6 +103,7 @@ pub fn cue_moments(tl: &CastTimeline) -> Vec<CueMoment> {
                 cue_id: id.clone(),
                 kind: ObeliskCueKind::OnEnd,
                 position: SPAWN_MARKERS[1],
+                position_from: None,
             });
         }
     }
@@ -100,6 +114,7 @@ pub fn cue_moments(tl: &CastTimeline) -> Vec<CueMoment> {
             cue_id: id.clone(),
             kind: ObeliskCueKind::OnHit,
             position: SPAWN_MARKERS[1],
+            position_from: None,
         });
     }
     moments.sort_by(|a, b| a.t.total_cmp(&b.t));
@@ -157,6 +172,7 @@ pub fn fire_scrub_cues(
             cue_id: m.cue_id.clone(),
             source: Entity::PLACEHOLDER,
             position: m.position,
+            position_from: m.position_from,
             kind: m.kind,
         });
     }

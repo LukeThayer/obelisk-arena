@@ -170,7 +170,7 @@ fn casting_firebolt_emits_serde_cue_messages() {
     let msgs: Vec<CueMessage> = raw
         .into_iter()
         .map(|(src, cue_id, pos, kind)| {
-            cue_event_to_message(&cue_id, &id_of(src), pos, bevy::math::Vec3::ZERO, kind)
+            cue_event_to_message(&cue_id, &id_of(src), pos, bevy::math::Vec3::ZERO, None, kind)
         })
         .collect();
 

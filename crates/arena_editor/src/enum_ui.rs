@@ -64,12 +64,13 @@ pub fn shape_variant(i: usize) -> CollisionShape {
     }
 }
 
-pub const MOTION_LABELS: [&str; 3] = ["Static", "Linear", "Ballistic"];
+pub const MOTION_LABELS: [&str; 4] = ["Static", "Linear", "Ballistic", "Beam"];
 pub fn motion_index(m: &VolumeMotion) -> usize {
     match m {
         VolumeMotion::Static => 0,
         VolumeMotion::Linear { .. } => 1,
         VolumeMotion::Ballistic { .. } => 2,
+        VolumeMotion::Beam => 3,
     }
 }
 pub fn motion_variant(i: usize) -> VolumeMotion {
@@ -79,6 +80,7 @@ pub fn motion_variant(i: usize) -> VolumeMotion {
             speed: 20.0,
             gravity: 9.8,
         },
+        3 => VolumeMotion::Beam,
         _ => VolumeMotion::Static,
     }
 }

@@ -18,9 +18,16 @@ checkout under `~/.cargo/git/checkouts/bevy-obelisk-*/`):
   `EndReason { HitEntity, HitWorld, Fuse }` + a world position; `on_end` reactions chain
   `Chained` windows at that position; `on_end_{wid}` cues fire there.
 
+- `docs/superpowers/specs/2026-07-02-beam-retarget-hitscan.md` — increment 2 (SHIPPED
+  2026-07-02): `VolumeMotion::Beam` strikes its designated target directly;
+  `EndReaction::Retarget { window, radius, max_hops }` hops to the nearest un-struck enemy
+  (self-hop legal, hop-bounded); server hitscan acquisition keys on `SingleEntity` targeting
+  (miss = paid fizzle); two-anchor beam cues + `beam:` lanes. Chain lightning is the proving
+  case — copy its triad for beam skills.
+
 **Never promise a mechanic without checking the gap map.** If the concept needs an
-unimplemented edge/node (authored acquisition/hitscan, beams, retarget hops, `OnTick`
-emitters), say so and either scope the design to what ships today or propose the sim
+unimplemented edge/node (`OnTick` emitters, ground-point acquisition, per-hop damage
+falloff), say so and either scope the design to what ships today or propose the sim
 increment first.
 
 ## 1. Decompose the concept (do this in conversation before touching files)
@@ -29,9 +36,10 @@ Fill in this skeleton with the user:
 - **Fantasy + role**: one sentence. Burst? zoning? poke? finisher?
 - **Cast node**: mana cost, cooldown, windup/active/recovery seconds, charged or tap?
   (charge byte scales projectile speed AND damage 0.5–2.0×).
-- **Acquisition**: how aim resolves — free direction (current game default), entity target,
-  ground point. (Authored acquisition/fallback is not yet data-driven — the game casts
-  free-aim from the eye.)
+- **Acquisition**: how aim resolves. `targeting: Direction` = free aim along the crosshair
+  (firebolt). `targeting: SingleEntity` = the server HITSCANS the looked-at enemy and casts
+  entity-aimed (chain lightning); a miss still pays mana + cooldown and fizzles. Ground-point
+  acquisition is not yet data-driven.
 - **Volumes/edges**: for each hit region — shape, motion (Static / Linear{speed} /
   Ballistic{speed, gravity}), lifetime (= fuse), hit_filter, hit_mode (FirstOnly = projectile,
   OncePerTarget = sweep/AoE, EveryTick+rehit_interval = damage field), and what its ENDING
@@ -84,8 +92,23 @@ it ends):
   vfx_cues: {},   // Save in the designer derives the locked cue map
 )
 ```
+Beam/chain template (chain lightning shape — hitscan target, then N hops):
+```ron
+    ( id: "arc", spawn_phase: Active, spawn_offset: 0.0, active_duration: 0.15,
+      shape: Sphere( radius: 0.3 ), motion: Beam,
+      hit_filter: Enemies, hit_mode: FirstOnly,
+      on_end: ( hit: Some(Retarget( window: "hop", radius: 6.0, max_hops: 3 )) ) ),
+    ( id: "hop", spawn_phase: Chained, spawn_offset: 0.0, active_duration: 0.15,
+      shape: Sphere( radius: 0.3 ), motion: Beam,
+      hit_filter: Enemies, hit_mode: FirstOnly,
+      on_end: ( hit: Some(Retarget( window: "hop", radius: 6.0, max_hops: 3 )) ) ),
+    // targeting: SingleEntity( range: 15.0 ) — opts into server hitscan acquisition.
+```
 Motion picker: `Static` (melee/nova/field), `Linear(speed)` (straight bolt),
-`Ballistic(speed, gravity)` (lob; gravity NOT charge-scaled — charged shots fly flatter).
+`Ballistic(speed, gravity)` (lob; gravity NOT charge-scaled — charged shots fly flatter),
+`Beam` (instant strike on the designated target; no target = paid fizzle). `Retarget` may
+self-reference (hop→hop) — the hop counter bounds it; the chain never strikes the same enemy
+twice; hops keep the original caster + charge at FULL damage.
 Projectile hitboxes hitting the floor plane (y = 0) end with `HitWorld` at the impact point.
 `on_end` is per-reason (`hit`/`world`/`fuse`, each `Option<Chain("id")>`) — the fuse IS
 `active_duration`, so "explode after N seconds wherever it is" = `active_duration: N` +
@@ -118,6 +141,12 @@ victim-anchored):
       particle: Some(( count: 8, lifetime: 0.3, color: (1.0, 0.6, 0.2), speed: 3.0 )) ),
   },
 )
+```
+Beam lanes (chain lightning): bind a `beam:` spec to each beam window's OPEN cue — the cue
+carries BOTH anchors (origin→victim) and the lane renders sampled bursts along the arc:
+```ron
+    "<id>_window_arc": ( lane_id: "<id>_arc", kind: OnWindow,
+      beam: Some(( effect: Some("Sparks"), color: (0.5, 0.7, 1.0), segments: 10, lifetime: 0.25 )) ),
 ```
 Hard rules:
 - `projectile.speed`/`gravity` MUST equal the window's motion values (the cosmetic traces the

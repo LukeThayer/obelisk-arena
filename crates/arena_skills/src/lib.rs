@@ -79,9 +79,37 @@ pub struct LaneEvent {
     /// Cosmetic (non-authoritative) projectile to spawn for OnCast/OnWindow lanes.
     #[serde(default)]
     pub projectile: Option<ProjectileCosmetic>,
+    /// Two-point arc rendered between the cue's `position_from` and `position` (a beam window's
+    /// open cue carries both). No-ops on cues without a second anchor.
+    #[serde(default)]
+    pub beam: Option<BeamSpec>,
     /// Animation layer to drive on the source rig (e.g. "cast_release").
     #[serde(default)]
     pub anim: Option<AnimLayer>,
+}
+
+/// A two-anchor beam cosmetic: `segments` bursts of the named `bevy_vfx` effect (or emissive
+/// billboards) sampled along the from→to segment, each living `lifetime` seconds — the v1
+/// lightning-arc rendering (a dedicated stretched-beam renderer can replace it later without
+/// touching the authoring format).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeamSpec {
+    /// Named `bevy_vfx` effect spawned at each sample point. `None` = emissive billboards.
+    #[serde(default)]
+    pub effect: Option<String>,
+    #[serde(default)]
+    pub color: [f32; 3],
+    /// Sample points along the segment (endpoints included).
+    #[serde(default = "default_beam_segments")]
+    pub segments: u8,
+    #[serde(default = "default_beam_lifetime")]
+    pub lifetime: f32,
+}
+fn default_beam_segments() -> u8 {
+    8
+}
+fn default_beam_lifetime() -> f32 {
+    0.25
 }
 
 /// Arena's OWN mirror of obelisk's `CueKind` so `.skillfx.ron` can declare which moment a lane
@@ -251,6 +279,10 @@ pub struct CueMessage {
     /// (always-forward). `Vec3::ZERO` means "no direction supplied" (the consumer then falls back
     /// to its local `AimDirs` lookup). Serdes via bevy's `serialize` feature, like `position`.
     pub aim_dir: Vec3,
+    /// Second anchor for TWO-POINT cues (a beam window's open cue: origin of the arc; `position`
+    /// is the victim). Serde-defaulted `None` for wire back-compat with single-point cues.
+    #[serde(default)]
+    pub position_from: Option<Vec3>,
     /// Which timeline moment fired the cue.
     pub kind: CueKind,
 }
@@ -267,6 +299,7 @@ pub fn cue_event_to_message(
     source_id: &str,
     position: Vec3,
     aim_dir: Vec3,
+    position_from: Option<Vec3>,
     kind: CueKind,
 ) -> CueMessage {
     CueMessage {
@@ -274,6 +307,7 @@ pub fn cue_event_to_message(
         source_id: source_id.into(),
         position,
         aim_dir,
+        position_from,
         kind,
     }
 }

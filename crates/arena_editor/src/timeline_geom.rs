@@ -54,12 +54,16 @@ pub fn window_span(w: &CollisionWindow, d: &PhaseDurations) -> (f32, f32) {
     (start, start + w.active_duration.max(0.0))
 }
 
-/// The window ids `w`'s `on_end` reactions chain to.
+/// The window ids `w`'s `on_end` reactions spawn (Chain targets AND Retarget hops — both open
+/// the target window after this one ends, which is what strip placement cares about).
 fn chain_targets(w: &CollisionWindow) -> impl Iterator<Item = &str> {
     [&w.on_end.hit, &w.on_end.world, &w.on_end.fuse]
         .into_iter()
         .flatten()
-        .map(|obelisk_bevy::assets::EndReaction::Chain(id)| id.as_str())
+        .map(|r| match r {
+            obelisk_bevy::assets::EndReaction::Chain(id) => id.as_str(),
+            obelisk_bevy::assets::EndReaction::Retarget { window, .. } => window.as_str(),
+        })
 }
 
 /// Absolute `(start, end)` of a window on the STRIP axis, resolving `Chained` windows to start

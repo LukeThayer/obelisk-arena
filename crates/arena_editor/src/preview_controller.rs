@@ -96,41 +96,70 @@ pub fn start_preview(
         // the rig silently doesn't render).
         .insert((PreviewCaster, GameEntity, Visibility::default()))
         .grant_skill(skill_id.clone());
-    let dummy = make_arena_combatant(
-        &mut commands,
-        "preview_dummy",
-        Faction::Enemy,
-        SPAWN_MARKERS[1],
-    );
-    commands
-        .entity(dummy)
-        .insert((PreviewDummy, GameEntity, Visibility::default()));
-    // Windowed, make the (rig-less) dummy visible so there's something to shoot at; headless test
-    // apps have no `StandardMaterial` assets and skip it. The caster is rendered by its glb rig
-    // (`preview_rig`), so its capsule stays mesh-less like the game's proxy bodies.
-    if let (Some(mut meshes), Some(mut materials)) = (meshes, materials) {
-        commands.entity(dummy).insert((
-            Mesh3d(meshes.add(Capsule3d::new(
-                arena_sim::tuning::PLAYER_CAPSULE_RADIUS,
-                arena_sim::tuning::PLAYER_CAPSULE_LENGTH,
-            ))),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(0.7, 0.25, 0.2),
-                ..default()
-            })),
-        ));
+    let mut meshmat = meshes.zip(materials);
+    let mut spawn_dummy = |commands: &mut Commands,
+                           id: &str,
+                           pos: Vec3,
+                           meshmat: &mut Option<(
+        ResMut<Assets<Mesh>>,
+        ResMut<Assets<StandardMaterial>>,
+    )>| {
+        let dummy = make_arena_combatant(commands, id, Faction::Enemy, pos);
+        commands
+            .entity(dummy)
+            .insert((PreviewDummy, GameEntity, Visibility::default()));
+        // Windowed, make the (rig-less) dummy visible so there's something to shoot at;
+        // headless test apps have no `StandardMaterial` assets and skip it. The caster is
+        // rendered by its glb rig (`preview_rig`), so its capsule stays mesh-less.
+        if let Some((meshes, materials)) = meshmat.as_mut() {
+            commands.entity(dummy).insert((
+                Mesh3d(meshes.add(Capsule3d::new(
+                    arena_sim::tuning::PLAYER_CAPSULE_RADIUS,
+                    arena_sim::tuning::PLAYER_CAPSULE_LENGTH,
+                ))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.7, 0.25, 0.2),
+                    ..default()
+                })),
+            ));
+        }
+        dummy
+    };
+    let dummy = spawn_dummy(&mut commands, "preview_dummy", SPAWN_MARKERS[1], &mut meshmat);
+    // A retargeting skill (chain lightning) needs someone to hop TO: stage a second dummy
+    // beside the first, inside typical hop radii.
+    let retargets = edited.timeline.collision_windows.iter().any(|w| {
+        [&w.on_end.hit, &w.on_end.world, &w.on_end.fuse]
+            .into_iter()
+            .flatten()
+            .any(|r| matches!(r, obelisk_bevy::assets::EndReaction::Retarget { .. }))
+    });
+    if retargets {
+        spawn_dummy(
+            &mut commands,
+            "preview_dummy_2",
+            SPAWN_MARKERS[1] + Vec3::new(0.0, 0.0, 2.5),
+            &mut meshmat,
+        );
     }
 
-    // Cast by DIRECTION (caster→dummy), NOT `cast_skill_at(dummy)`: obelisk's entity-aim LOS raycast
-    // excludes only the caster body entity, not its CHILD `Hurtbox` sensor, so an arena combatant
-    // self-blocks the ray (`NoLineOfSight`). The live game sidesteps this identically with free-aim
-    // direction casts (see arena_sim `preview_smoke`), so the preview matches what the game plays.
-    //
-    // For a BALLISTIC window, loft the aim like a free-looking player would: solve the launch
-    // pitch that lands the arc ON the dummy (level aim would ground the bolt short of it).
-    let aim = preview_aim(&edited.timeline, SPAWN_MARKERS[0], SPAWN_MARKERS[1]);
-    let dir = Dir3::new(aim).unwrap_or(Dir3::X);
-    commands.entity(caster).cast_skill_dir(skill_id, dir);
+    // Beam skills (SingleEntity targeting / Beam windows) cast ENTITY-AIMED at the dummy —
+    // hitscan acquisition already resolved in the real game, and obelisk's LOS raycast now
+    // excludes the caster's own hurtbox. Everything else casts by DIRECTION, matching the
+    // game's free aim; for a BALLISTIC window the aim is lofted (solve the launch pitch that
+    // lands the arc ON the dummy — level aim would ground the bolt short of it).
+    let is_beam_skill = edited
+        .timeline
+        .collision_windows
+        .iter()
+        .any(|w| matches!(w.motion, obelisk_bevy::assets::VolumeMotion::Beam));
+    if is_beam_skill {
+        commands.entity(caster).cast_skill_at(skill_id, dummy);
+    } else {
+        let aim = preview_aim(&edited.timeline, SPAWN_MARKERS[0], SPAWN_MARKERS[1]);
+        let dir = Dir3::new(aim).unwrap_or(Dir3::X);
+        commands.entity(caster).cast_skill_dir(skill_id, dir);
+    }
 }
 
 /// The preview's cast direction from `from` toward `to`: straight for non-ballistic skills, the
