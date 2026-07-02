@@ -17,6 +17,7 @@ pub mod fx_edits;
 pub mod gizmo;
 pub mod io;
 pub mod model;
+pub mod rules_edits;
 pub mod rules_model;
 pub mod panel;
 pub mod preview_controller;
