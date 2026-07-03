@@ -2185,7 +2185,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.11.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -4562,7 +4562,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 [[package]]
 name = "loot_core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#54d0837bef10ea97491c3e928b7c6ff3ad0934fc"
+source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#bf9f02611691da3ff509bef982077ea67218c578"
 dependencies = [
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -5034,7 +5034,7 @@ dependencies = [
 [[package]]
 name = "obelisk-bevy"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy-obelisk?branch=main#6afa6bad5e20c2c82e1c9fa9c5b060155fafd59d"
+source = "git+https://github.com/LukeThayer/bevy-obelisk?branch=main#68618a8cf700be4906d566a27d8534cdb94cf5b6"
 dependencies = [
  "avian3d",
  "bevy",
@@ -6425,7 +6425,7 @@ dependencies = [
 [[package]]
 name = "skill_tree"
 version = "0.1.0"
-source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#54d0837bef10ea97491c3e928b7c6ff3ad0934fc"
+source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#bf9f02611691da3ff509bef982077ea67218c578"
 dependencies = [
  "loot_core",
  "rand 0.8.5",
@@ -6577,7 +6577,7 @@ dependencies = [
 [[package]]
 name = "stat_core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#54d0837bef10ea97491c3e928b7c6ff3ad0934fc"
+source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#bf9f02611691da3ff509bef982077ea67218c578"
 dependencies = [
  "loot_core",
  "rand 0.8.5",
@@ -6681,7 +6681,7 @@ dependencies = [
 [[package]]
 name = "tables_core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#54d0837bef10ea97491c3e928b7c6ff3ad0934fc"
+source = "git+ssh://git@github.com/vothuul/obelisk.git?branch=master#bf9f02611691da3ff509bef982077ea67218c578"
 dependencies = [
  "rand 0.8.5",
  "serde",
