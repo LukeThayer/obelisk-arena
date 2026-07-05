@@ -123,6 +123,9 @@ pub enum CueKind {
     /// A window ended (hit an entity, hit the world, or its fuse ran out) — the cue carries the
     /// world position where it happened; lanes bound to it render THERE.
     OnEnd,
+    /// An emitter instantiated a `Template` window — fires AT the emitted instance's spawn
+    /// position, INSTEAD OF `OnWindow`. Mirrors obelisk's `CueKind::OnEmit` 1:1.
+    OnEmit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -382,6 +385,7 @@ impl From<ObeliskCueKind> for CueKind {
             ObeliskCueKind::OnWindow => CueKind::OnWindow,
             ObeliskCueKind::OnHit => CueKind::OnHit,
             ObeliskCueKind::OnEnd => CueKind::OnEnd,
+            ObeliskCueKind::OnEmit => CueKind::OnEmit,
         }
     }
 }
