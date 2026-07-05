@@ -33,6 +33,9 @@ stat_core.workspace = true
 arena_sim.workspace = true
 # GPU particle engine for authored skill cosmetics (windowed client only at runtime).
 bevy_vfx.workspace = true
+# GPU effect sequencer (C3): resolved BEFORE bevy_vfx for a cue's named effect (windowed client only
+# at runtime — see client/cosmetics.rs).
+bevy_effect.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ron.workspace = true

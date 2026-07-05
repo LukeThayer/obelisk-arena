@@ -45,4 +45,10 @@ stat_core = { git = "ssh://git@github.com/vothuul/obelisk.git", rev = "bf9f026" 
 # build); the headless server/observer compile it but never add the plugin. Same crate the editor +
 # arena_editor use (Bevy 0.18).
 bevy_vfx = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }
+# bevy_effect (the editor's GPU effect-sequencer crate, same repo/branch as bevy_vfx — a sibling
+# workspace member there) — resolves a `CueBinding.effect` name FIRST (before falling back to
+# `bevy_vfx::VfxLibrary`), restoring real client cue rendering (C3) via obelisk's `CueBinding`.
+# Windowed-client-only at runtime (`EffectPlugin` is added only in the windowed build), same as
+# `bevy_vfx` above.
+bevy_effect = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }
 arena_sim = { path = "crates/arena_sim" }

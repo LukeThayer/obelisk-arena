@@ -15,8 +15,8 @@ use obelisk_bevy::prelude::*;
 use super::app_headless::autocast;
 use super::controller::{self, ArenaControllerPlugin};
 use super::cosmetics::{
-    age_lifetimes, fly_cosmetic_projectiles, init_cosmetic_assets, init_vfx_library,
-    spawn_cue_cosmetics, AimDirs,
+    age_lifetimes, fly_cosmetic_projectiles, init_cosmetic_assets, init_effect_library,
+    init_vfx_library, spawn_cue_cosmetics, AimDirs,
 };
 use super::harness::{
     add_frame_interpolation_to_predicted, screenshot_system, smoke_exit_after_frames,
@@ -71,11 +71,13 @@ pub fn run_windowed_client() {
     // irrelevant client-side (no client resolve).
     app.seed_combat_rng(1);
 
-    // GPU particle engine (windowed only — the headless server/observer never add this, so their
-    // net-test path is untouched). `VfxLibrary` is seeded at Startup by `init_vfx_library`; nothing
-    // resolves a cue into one of its effects yet — cue rendering is stubbed pending C3 (which adds
-    // `bevy_effect` + obelisk's `CueBinding`).
+    // GPU particle + effect engines (windowed only — the headless server/observer never add
+    // these, so their net-test path is untouched). `VfxLibrary`/`EffectLibrary` are seeded at
+    // Startup by `init_vfx_library`/`init_effect_library`; `spawn_cue_cosmetics` (`cosmetics.rs`)
+    // resolves each fired cue's `CueBinding` and spawns the named effect, `EffectLibrary` first
+    // then `VfxLibrary` (C3).
     app.add_plugins(bevy_vfx::VfxPlugin);
+    app.add_plugins(bevy_effect::EffectPlugin);
     // Third-person camera + mouse-look + spine-pitch aim lean (NET-aware: follows the local
     // predicted player, no longer moves a Transform — prediction owns the body).
     app.add_plugins(ArenaControllerPlugin);
@@ -93,6 +95,7 @@ pub fn run_windowed_client() {
             crate::cast_assets::load_cast_timelines,
             init_cosmetic_assets,
             init_vfx_library,
+            init_effect_library,
         ),
     );
 

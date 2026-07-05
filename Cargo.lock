@@ -301,6 +301,7 @@ dependencies = [
  "arena_sim",
  "avian3d",
  "bevy",
+ "bevy_effect",
  "bevy_vfx",
  "lightyear",
  "lightyear_frame_interpolation",
@@ -982,6 +983,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "bevy_effect"
+version = "0.1.0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#1cc6e7d9b62d2a9a70ac9c335468dc28bd8b497b"
+dependencies = [
+ "avian3d",
+ "bevy",
+ "bevy_vfx",
+ "ron 0.8.1",
+ "serde",
 ]
 
 [[package]]
@@ -1952,7 +1965,7 @@ dependencies = [
 [[package]]
 name = "bevy_vfx"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#d8c153d7886c99adf8dd84d065e187d5be649c28"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#1cc6e7d9b62d2a9a70ac9c335468dc28bd8b497b"
 dependencies = [
  "avian3d",
  "bevy",
