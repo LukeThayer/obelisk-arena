@@ -66,7 +66,9 @@ pub(crate) fn peer_to_u64(peer: &PeerId) -> Option<u64> {
 }
 
 /// Each player is a full obelisk combatant: `make_combatant(StatBlock::with_id(...))` +
-/// `Faction::Player` + `grant_skill("firebolt")` + a CHILD hurtbox + the replicated networked
+/// `Faction::Player` + all three reference skills (`grant_skill("firebolt")` +
+/// `grant_skill("chain_lightning")` + `grant_skill("blizzard")`; the windowed client picks which one
+/// to cast via number-key `SelectedSkill`, see `client/net.rs`) + a CHILD hurtbox + the replicated networked
 /// component set (`NetworkedPlayer`/`NetworkOwner`/`NetworkedId`/`ObeliskNetId`/`NetworkedHealth`/
 /// `NetworkedCastState`/`PlayerCustomization`) + a Dynamic avian body driven by the shared force
 /// controller. Replicated with `Replicate::to_clients(NetworkTarget::All)` +
@@ -180,7 +182,9 @@ pub(crate) fn spawn_player_on_connect(
                 lifetime: Default::default(),
             },
         ))
-        .grant_skill("firebolt");
+        .grant_skill("firebolt")
+        .grant_skill("chain_lightning")
+        .grant_skill("blizzard");
 
     client_map.0.insert(client_id, player);
 }

@@ -50,6 +50,16 @@ pub struct LocalInput {
 #[derive(Resource, Default)]
 pub struct CastIntent(pub Option<String>);
 
+/// The skill the windowed player will cast next (number keys 1/2/3 select it). Default firebolt.
+/// Windowed-only: the headless autocast path sets `CastIntent` directly and never reads this.
+#[derive(Resource)]
+pub struct SelectedSkill(pub String);
+impl Default for SelectedSkill {
+    fn default() -> Self {
+        Self("firebolt".into())
+    }
+}
+
 /// Maximum hold time for the charge mechanic. A full hold of this duration maps to charge=255
 /// (2.0× multiplier); an instant tap maps to charge=[`TAP_CHARGE_BYTE`] (≈1.0×).
 pub const MAX_CHARGE_SECS: f32 = 1.5;

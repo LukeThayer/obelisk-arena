@@ -85,6 +85,9 @@ pub fn run_windowed_client() {
     app.init_resource::<AimDirs>();
     // Cast-timeline loading uses the SAME shared `crate::cast_assets` helpers as the headless server.
     app.init_resource::<crate::cast_assets::PendingCastTimelines>();
+    // Windowed-only skill-select state (number keys 1/2/3, see `select_skill` below). The headless
+    // client never inits this — its autocast path sets `CastIntent` directly.
+    app.init_resource::<net::SelectedSkill>();
 
     // Scene (camera + light + ground) + rig assets + cast timelines. NO co-located combatants.
     app.add_systems(
@@ -180,6 +183,9 @@ pub fn run_windowed_client() {
             // Runs before the input bridge so a focus-loss frame clears stuck keys first.
             release_keys_on_focus_loss,
             bridge_windowed_input_to_local_input,
+            // Number-key skill-select runs before the cast-hold bridge so a same-frame
+            // select-then-click picks up the new selection immediately.
+            select_skill,
             bridge_windowed_cast_hold,
         )
             .chain(),
@@ -188,14 +194,36 @@ pub fn run_windowed_client() {
     app.run();
 }
 
+/// Map a number key to a grantable skill id (windowed skill-select). `None` for other keys.
+fn skill_for_key(key: KeyCode) -> Option<&'static str> {
+    match key {
+        KeyCode::Digit1 => Some("firebolt"),
+        KeyCode::Digit2 => Some("chain_lightning"),
+        KeyCode::Digit3 => Some("blizzard"),
+        _ => None,
+    }
+}
+
+/// Windowed skill-select: number keys 1/2/3 choose which granted skill `bridge_windowed_cast_hold`
+/// casts next (`net::SelectedSkill`). Headless-never: this system is registered only by
+/// `run_windowed_client`, and the headless autocast path sets `CastIntent` directly without ever
+/// reading `SelectedSkill`.
+fn select_skill(keys: Res<ButtonInput<KeyCode>>, mut selected: ResMut<net::SelectedSkill>) {
+    for key in keys.get_just_pressed() {
+        if let Some(id) = skill_for_key(*key) {
+            selected.0 = id.to_string();
+        }
+    }
+}
+
 /// Hold-to-charge cast input: replaces the old press-to-cast `bridge_windowed_cast_to_intent`.
 ///
 /// While the cast button (Space or LMB) is held, `ChargeState.secs` accumulates (clamped to
 /// `MAX_CHARGE_SECS`). On release, the accumulated hold time maps to a charge byte via:
 ///   `frac = secs / MAX_CHARGE_SECS`
 ///   `charge = (85 + frac * 170).round()` — 85 ≈ instant tap (≈1.0×), 255 = full hold (2.0×)
-/// The charge is locked into `ChargeState.pending_charge` and `CastIntent` is set so
-/// `send_cast_requests` ships a `CastRequestMessage { charge }` on the wire.
+/// The charge is locked into `ChargeState.pending_charge` and `CastIntent` is set to whichever
+/// skill is currently selected (`net::SelectedSkill`, see `select_skill`).
 ///
 /// The autocast path (`autocast`) bypasses this and sets `CastIntent` directly;
 /// `send_cast_requests` uses the `pending_charge` tap-default (85) for those.
@@ -204,6 +232,7 @@ fn bridge_windowed_cast_hold(
     time: Res<Time>,
     mut intent: ResMut<net::CastIntent>,
     mut charge: ResMut<net::ChargeState>,
+    selected: Res<net::SelectedSkill>,
     customization: Option<Res<customization::CustomizationOpen>>,
 ) {
     // While the customizer is open, LMB clicks the panel buttons — don't charge/cast.
@@ -225,7 +254,7 @@ fn bridge_windowed_cast_hold(
             let frac = charge.frac();
             charge.pending_charge = net::charge_byte_from_frac(frac);
             if intent.0.is_none() {
-                intent.0 = Some("firebolt".to_string());
+                intent.0 = Some(selected.0.clone());
             }
         }
         // Reset regardless — keeps state consistent when button is not held.
@@ -297,4 +326,20 @@ fn bridge_windowed_input_to_local_input(
     // SPACE jumps: the server controller (and the local prediction) apply manual gravity + a ground
     // clamp, so a grounded player holding Space launches up (JUMP_SPEED) and falls back to GROUND_Y.
     local_input.jump = keys.pressed(KeyCode::Space);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the number-key → skill-id mapping `select_skill` relies on: 1/2/3 map to the three
+    /// granted reference skills (`server/spawn.rs`'s `grant_skill` chain), any other key selects
+    /// nothing.
+    #[test]
+    fn number_keys_map_to_the_three_skills() {
+        assert_eq!(skill_for_key(KeyCode::Digit1), Some("firebolt"));
+        assert_eq!(skill_for_key(KeyCode::Digit2), Some("chain_lightning"));
+        assert_eq!(skill_for_key(KeyCode::Digit3), Some("blizzard"));
+        assert_eq!(skill_for_key(KeyCode::KeyW), None);
+    }
 }
