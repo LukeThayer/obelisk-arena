@@ -26,13 +26,26 @@ use bevy::prelude::*;
 ///   `DamageResolved`. The `ResolveHits` set is still CONFIGURED in the chain (so anything ordering
 ///   against it resolves) but no system runs in it.
 ///
-/// This reproduces `ObeliskSimPlugin::build` VERBATIM (obelisk-bevy `src/lib.rs:107-139`) minus the
-/// `ObeliskSpatialPlugin` line (and, for the client, minus combat), so the host's physics is the
-/// sole `PhysicsPlugins` registrant. The `ObeliskSet` chain `configure_sets` + the
-/// timeline/projectile/detect `add_systems` live in `ObeliskSimPlugin::build` itself (not in a
-/// sub-plugin), so they MUST be re-added here — omitting them would silently break all
-/// casting/hit-detection. All referenced items (`ObeliskSet`, `timeline::advance::*`,
-/// `spatial::{projectile,detect}::*`) are `pub`.
+/// This re-syncs with the post-trigger-reform `ObeliskSimPlugin::build` (obelisk-bevy
+/// `src/lib.rs:107-197`) — including the reform's `timeline::advance::tick_emitters` (live
+/// hitboxes' emitters) and `timeline::triggered::advance_triggered_execs` (the executor for a
+/// rules trigger's spawned `TriggeredExec`, e.g. firebolt's on-impact explosion) in the `Advance`
+/// set, in the same order/chaining as upstream — minus the `ObeliskSpatialPlugin` line (and, for
+/// the client, minus combat), so the host's physics is the sole `PhysicsPlugins` registrant. The
+/// `ObeliskSet` chain `configure_sets` + the timeline/projectile/detect `add_systems` live in
+/// `ObeliskSimPlugin::build` itself (not in a sub-plugin), so they MUST be re-added here —
+/// omitting them would silently break all casting/hit-detection. All referenced items
+/// (`ObeliskSet`, `timeline::advance::*`, `timeline::triggered::*`, `spatial::{projectile,detect}::*`)
+/// are `pub`.
+///
+/// One INTENTIONAL divergence: `ObeliskSimPlugin::build` also pins `FixedUpdate` to the
+/// single-threaded executor (obelisk-bevy `src/lib.rs:129-131`) because its standalone sim owns
+/// `FixedUpdate` outright and wants structural (not convention-based) determinism. The arena does
+/// NOT pin it here — `FixedUpdate` is shared with lightyear's prediction/rollback and avian's
+/// physics step, and forcing single-threaded would serialize their systems too, well beyond this
+/// module's remit. Damage determinism does not depend on it: the reference content uses fixed
+/// min==max damages, and the `chain_ignore_deferred()` ordering above is preserved exactly to
+/// close the specific `Advance`-set race the upstream comment calls out.
 ///
 /// Keep this in sync with `ObeliskSimPlugin::build` if obelisk-bevy's sim composition changes.
 pub fn add_obelisk_sim(app: &mut App, resolve_hits: bool) {
@@ -74,7 +87,21 @@ pub fn add_obelisk_sim(app: &mut App, resolve_hits: bool) {
             timeline::advance::validate_casts.in_set(ObeliskSet::Validate),
             (
                 timeline::advance::advance_casts,
-                timeline::advance::end_hitboxes,
+                // Re-synced with obelisk-bevy `ObeliskSimPlugin::build` (post trigger-reform):
+                // `end_hitboxes` BEFORE `tick_emitters` (both `&mut Hitbox`), joined with
+                // `chain_ignore_deferred()` — NOT `chain()` — so the ordering holds for the query
+                // conflict without inserting a mid-`Advance` `ApplyDeferred` that would flush the
+                // unordered systems' command buffers and make hitbox visibility thread-dependent
+                // (a lockstep-sim divergence source). See lib.rs:149-185 for the full rationale.
+                (
+                    timeline::advance::end_hitboxes,
+                    timeline::advance::tick_emitters,
+                )
+                    .chain_ignore_deferred(),
+                // The trigger executor: ticks the `TriggeredExec` that a rules trigger's
+                // `execute_skill_timeline` spawns, so e.g. firebolt_explosion actually runs its
+                // timeline at the impact. Absent here pre-reform => triggered skills silently no-op.
+                timeline::triggered::advance_triggered_execs,
             )
                 .in_set(ObeliskSet::Advance),
             (
