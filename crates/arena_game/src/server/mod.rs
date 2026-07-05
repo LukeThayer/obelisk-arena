@@ -75,11 +75,12 @@ impl Plugin for ArenaServerPlugin {
                     // HP mirror: mirror each player's obelisk life → replicated
                     // NetworkedHealth so the client HUD reads server-authoritative hp.
                     sync_networked_health,
-                    // Cast pipeline: drain client cast_requests → free-aim
-                    // `cast_skill_dir_charged_from` (fires along the client's `aim_dir`, no
-                    // re-acquire) → obelisk's validate_casts gates the rest. The ClientPlayerMap is
-                    // populated by `spawn_player_on_connect`; ordered after the lib's Update spatial
-                    // refresh (in add_obelisk_sim_headless) so spatial reads see a fresh pipeline.
+                    // Cast pipeline: drain client cast_requests → resolve a candidate `CastAim`
+                    // from the skill's authored `Acquisition` (`resolve_cast_aim`) → insert a
+                    // `PendingCast` → obelisk's validate_casts does the authoritative check. The
+                    // ClientPlayerMap is populated by `spawn_player_on_connect`; ordered after the
+                    // lib's Update spatial refresh (in add_obelisk_sim_headless) so the acquisition
+                    // raycasts see a fresh spatial pipeline.
                     drain_cast_requests,
                     // Appearance pipeline (D6): drain client CustomizeMessage → update that
                     // player's PlayerCustomization + broadcast CustomizeBroadcast to all clients

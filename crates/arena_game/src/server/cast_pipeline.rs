@@ -1,11 +1,14 @@
-//! Cast pipeline: client cast_request → server fire along aim_dir.
+//! Cast pipeline: client cast_request → server-resolved `CastAim` → obelisk cast.
 //!
-//! The client sends a `CastRequestMessage` on the reliable `CastChannel` (it NEVER validates or
-//! resolves — Stage A). The server maps the sender's `RemoteId` → caster entity via the
-//! `ClientPlayerMap` and fires along the client's `aim_dir` (camera forward, full 3D) via
-//! `cast_skill_dir` — free aim, no auto-acquire. obelisk's `validate_casts` (FixedUpdate) gates
-//! mana/cooldown/already-casting and emits `CastBegan` or `CastRejected`. The projectile can miss
-//! if the client was not aimed at the target — this is intentional (free-aim design).
+//! The client sends a `CastRequestMessage` (camera-forward `aim_dir` + charge) on the reliable
+//! `CastChannel`; it NEVER validates or resolves (Stage A). The server maps the sender's `RemoteId`
+//! → caster via `ClientPlayerMap`, then resolves a CANDIDATE `CastAim` from the skill timeline's
+//! authored `Acquisition` (`resolve_cast_aim`): a `HitscanEntity` skill raycasts the aim ray for a
+//! target entity, a `GroundPoint` skill raycasts for a ground point, and `Aim`/`SelfPoint` cast by
+//! direction. It inserts a `PendingCast`; obelisk's `validate_casts` → `resolve_acquisition`
+//! (FixedUpdate) does the AUTHORITATIVE range/filter/fallback walk against that candidate and gates
+//! mana/cooldown/already-casting, emitting `CastBegan` or `CastRejected`. A direction cast that hits
+//! nothing lets the authored fallback fizzle — intentional.
 
 use bevy::prelude::*;
 use lightyear::prelude::server::ClientOf;
@@ -50,12 +53,13 @@ fn resolve_cast_aim(
     }
 }
 
-/// Drain `CastRequestMessage`s from each connected client and fire along the client's aim direction.
+/// Drain `CastRequestMessage`s from each connected client and cast the caster's skill.
 ///
-/// Fires the caster's skill via `cast_skill_dir` with the `aim_dir` from the message (the client's
-/// camera forward vector). No server-side target re-acquisition — the bolt goes where the client
-/// aimed (free aim). Skips a caster already mid-cast (`AlreadyCasting` avoidance). The caster
-/// entity must exist in the `ClientPlayerMap`; otherwise the request is silently dropped.
+/// Resolves a candidate `CastAim` from the skill timeline's authored `Acquisition` via
+/// [`resolve_cast_aim`] (host raycasts along the client's `aim_dir` for `HitscanEntity`/`GroundPoint`;
+/// direction otherwise), then inserts a `PendingCast` for obelisk's `validate_casts` to check + gate.
+/// Skips a caster already mid-cast (`AlreadyCasting` avoidance). The caster entity must exist in the
+/// `ClientPlayerMap`; otherwise the request is silently dropped.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn drain_cast_requests(
     mut receivers: Query<(&RemoteId, &mut MessageReceiver<CastRequestMessage>), With<ClientOf>>,

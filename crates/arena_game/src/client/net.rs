@@ -311,10 +311,10 @@ fn materialize_interpolated_players(
 }
 
 /// Send a `CastRequestMessage` on the reliable `CastChannel` when [`CastIntent`] is set.
-/// `aim_dir` is the camera forward vector built from [`CameraYaw`] + [`AimPitch`] (free aim — the
-/// projectile flies exactly where the camera looks, pitch included; it can miss). The server fires
-/// along this direction via `cast_skill_dir_charged` — no auto-acquire. The client NEVER validates
-/// or resolves. Clears the intent after sending (one cast per intent). `Single` sender
+/// `aim_dir` is the camera forward vector built from [`CameraYaw`] + [`AimPitch`] (the projectile
+/// flies where the camera looks, pitch included; it can miss). The SERVER resolves the actual
+/// `CastAim` from the skill's `Acquisition` (the client just supplies the ray). The client NEVER
+/// validates or resolves. Clears the intent after sending (one cast per intent). `Single` sender
 /// (multiple would panic — guide §1.2); no-op until the sender exists + we own a local player.
 ///
 /// Reads [`ChargeState::pending_charge`], which is set by `bridge_windowed_cast_hold` on button

@@ -136,10 +136,11 @@ pub struct EventChannel;
 // Messages
 // ---------------------------------------------------------------------------------------------
 
-/// Cast request — replaces M1's direct `cast_skill_at` on the local entity (spec §5.2). The server
-/// fires along `aim_dir` (the client's camera forward vector) via `cast_skill_dir_charged` — free
-/// aim, no auto-acquire. The server re-validates caster validity + already-casting; obelisk's
-/// `validate_casts` gates mana/cooldown/already-casting.
+/// Cast request — replaces M1's direct `cast_skill_at` on the local entity (spec §5.2). The client
+/// sends its camera-forward `aim_dir` + charge; the SERVER resolves a candidate `CastAim` from the
+/// skill's authored `Acquisition` (hitscan-entity / ground-point raycast, else direction) and
+/// obelisk's `validate_casts` gates mana/cooldown/already-casting + does the authoritative
+/// range/filter/fallback.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CastRequestMessage {
     pub skill_id: String,
