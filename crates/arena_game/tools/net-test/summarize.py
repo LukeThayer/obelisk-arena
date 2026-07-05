@@ -116,6 +116,30 @@ def main() -> int:
                     f"{name} echoed damage {echoed} != server's authoritative "
                     f"{server_dmg_value}")
 
+    # --- (5) server DamageResolved(skill=firebolt_explosion) — firebolt's on-impact trigger fired
+    #         end-to-end (a SEPARATE triggered sub-cast, distinct from the bolt's direct hit). ---
+    server_expl = [e for e in server
+                   if e.get("kind") == "server_net_damage_resolved"
+                   and e.get("skill_id") == "firebolt_explosion"
+                   and e.get("caster") == caster_id
+                   and e.get("target") == target_id]
+    if not server_expl:
+        failures.append(
+            f"server emitted no DamageResolved(caster={caster_id}, target={target_id}, "
+            f"skill=firebolt_explosion) — firebolt's on-impact trigger did not fire")
+
+    # --- (6) BOTH observers received the triggered explosion damage ---
+    for name, evs in (("observer-0", obs0), ("observer-1", obs1)):
+        got_expl = [e for e in evs
+                    if e.get("kind") == "client_net_damage_resolved"
+                    and e.get("skill_id") == "firebolt_explosion"
+                    and e.get("caster") == caster_id
+                    and e.get("target") == target_id]
+        if not got_expl:
+            failures.append(
+                f"{name} received no DamageResolved(caster={caster_id}, "
+                f"target={target_id}, skill=firebolt_explosion)")
+
     # --- verdict ---
     print()
     print("M2 gate assertions:")
@@ -124,6 +148,7 @@ def main() -> int:
     print(f"  server CastBegan firebolt by caster:        {len(server_casts)} event(s)")
     print(f"  server DamageResolved caster->target:       {len(server_dmgs)} event(s)")
     print(f"  server authoritative damage value:          {server_dmg_value}")
+    print(f"  server DamageResolved firebolt_explosion (trigger):  {len(server_expl)} event(s)")
     for name, evs in (("observer-0", obs0), ("observer-1", obs1)):
         n_cast = sum(1 for e in evs if e.get("kind") == "client_net_cast_began"
                      and e.get("caster") == caster_id)
