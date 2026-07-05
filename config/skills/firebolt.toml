@@ -14,3 +14,22 @@ conversions = { fire = 0.5 }
 
 [damage]
 base_damages = [{ type = "fire", min = 20.0, max = 20.0 }]
+
+# Trigger firebolt_explosion however the bolt ends. Exactly one fires per ending:
+#   HitEntity -> always ; HitWorld -> on_impact ; Fuse -> on_expire.
+# additional = true is REQUIRED for a timeline-target condition (else it is flagged invalid) and
+# fires the explosion IN ADDITION to firebolt's own direct hit.
+[[conditions]]
+trigger_skill = "firebolt_explosion"
+type = "always"
+additional = true
+
+[[conditions]]
+trigger_skill = "firebolt_explosion"
+type = "on_impact"
+additional = true
+
+[[conditions]]
+trigger_skill = "firebolt_explosion"
+type = "on_expire"
+additional = true

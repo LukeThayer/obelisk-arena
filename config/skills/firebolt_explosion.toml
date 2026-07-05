@@ -1,0 +1,11 @@
+id = "firebolt_explosion"
+name = "Firebolt Explosion"
+tags = ["spell", "fire"]
+targeting = "single_enemy"
+delivery = "projectile"
+mana_cost = 0.0
+
+# Triggered-only (never cast directly): reached via firebolt's always/on_impact/on_expire
+# conditions. Its own AoE damage, separate from the bolt's direct fire 20.
+[damage]
+base_damages = [{ type = "fire", min = 15.0, max = 15.0 }]

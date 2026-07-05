@@ -1,26 +1,27 @@
+// Firebolt (v2): a ballistic fire bolt. Causality is rules-side now (config/skills/firebolt.toml):
+// however the bolt ends (enemy hit / world impact / fuse) it triggers firebolt_explosion's OWN
+// timeline at that position. No inline chained blast window (that was v1). The explosion's VISUAL
+// lives on firebolt_explosion (on_window_blast), so this skill only authors cast/trail/hit cues.
 (
   skill_id: "firebolt",
   phase_durations: ( windup: 0.3, active: 0.1, recovery: 0.2 ),
   collision_windows: [
-    // Ballistic: launched along the free-look aim at 20 u/s, arcing down at 9.8 u/s² — a level
-    // shot drops ~0.8 m over the 8 m duel gap (still torso/leg height), aim up to lob further.
-    // HOWEVER it ends, the bolt chains the blast at its end position: on an enemy (direct hit
-    // + splash), on the ground (area denial where it landed), or mid-air when the 2 s fuse runs
-    // out.
-    ( id: "bolt", spawn_phase: Active, spawn_offset: 0.0, active_duration: 2.0,
+    ( id: "bolt", spawn: Scheduled( phase: Active, offset: 0.0 ), active_duration: 2.0,
       shape: Sphere( radius: 0.5 ), motion: Ballistic( speed: 20.0, gravity: 9.8 ),
-      hit_filter: Enemies, hit_mode: FirstOnly,
-      on_end: ( hit: Some(Chain("blast")), world: Some(Chain("blast")), fuse: Some(Chain("blast")) ) ),
-    // The explosion: spawned ONLY by the bolt's ending, at that position (never scheduled).
-    ( id: "blast", spawn_phase: Chained, spawn_offset: 0.0, active_duration: 0.05,
-      shape: Sphere( radius: 1.5 ), motion: Static,
-      hit_filter: Enemies, hit_mode: OncePerTarget ),
+      hit_filter: Enemies, hit_mode: FirstOnly ),
   ],
-  // Direction = free-aim (the server casts along the crosshair ray, loft and all).
-  // SingleEntity would opt into server hitscan acquisition — that's for beam skills.
-  targeting: Direction( range: 15.0 ),
-  delivery: Projectile( speed: 20.0 ),
-  vfx_cues: { "on_cast": "firebolt_cast", "on_hit": "firebolt_impact",
-              "on_window_bolt": "firebolt_window_bolt",
-              "on_end_bolt": "firebolt_end_bolt", "on_end_blast": "firebolt_end_blast" },
+  acquisition: Aim,
+  chargeable: true,
+  max_hold: 1.5,
+  vfx_cues: {
+    "on_cast": "on_cast",
+    "on_window_bolt": "on_window_bolt",
+    "on_hit": "on_hit",
+  },
+  cues: {
+    "on_cast": ( effect: Some("Fire"), attach: World, anim: None,
+      params: [ ( param: "scale", source: Charge ) ] ),
+    "on_window_bolt": ( effect: Some("firebolt_trail"), attach: Follow, anim: None, params: [] ),
+    "on_hit": ( effect: Some("Sparks"), attach: World, anim: None, params: [] ),
+  },
 )

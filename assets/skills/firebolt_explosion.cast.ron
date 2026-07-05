@@ -1,0 +1,17 @@
+// The triggered explosion: a brief static AoE sphere at the trigger position (the bolt's end
+// point). anchor: CastPoint -> for a triggered execution the cast point IS the trigger's payload
+// position, so the blast lands where the bolt actually stopped. Owns the explosion VISUAL.
+(
+  skill_id: "firebolt_explosion",
+  phase_durations: ( windup: 0.0, active: 0.05, recovery: 0.0 ),
+  collision_windows: [
+    ( id: "blast", spawn: Scheduled( phase: Active, offset: 0.0 ), anchor: CastPoint,
+      active_duration: 0.05, shape: Sphere( radius: 1.5 ), motion: Static,
+      hit_filter: Enemies, hit_mode: OncePerTarget ),
+  ],
+  acquisition: SelfPoint,
+  vfx_cues: { "on_window_blast": "on_window_blast" },
+  cues: {
+    "on_window_blast": ( effect: Some("Explosion"), attach: World, anim: None, params: [] ),
+  },
+)
