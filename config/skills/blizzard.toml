@@ -1,0 +1,14 @@
+id = "blizzard"
+name = "Blizzard"
+tags = ["spell", "cold"]
+targeting = "single_enemy"
+delivery = "projectile"
+mana_cost = 12.0
+cooldown = 6.0
+
+# Per-shard hit damage (many shards land per cast, so keep it low). The rules `targeting`/`delivery`
+# are descriptive only — the ACTUAL ground-targeting is the timeline's GroundPoint acquisition.
+# (`Targeting` has no "ground" and `Delivery` no "area" variant; single_enemy/projectile is what the
+# shipped obelisk blizzard.toml uses too.)
+[damage]
+base_damages = [{ type = "cold", min = 6.0, max = 10.0 }]

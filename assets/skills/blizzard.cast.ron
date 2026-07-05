@@ -1,0 +1,24 @@
+// Blizzard: a ground-targeted storm. A non-striking carrier cloud hangs 8 units above the cast
+// point and rains falling `shard` Template instances on the emitter clock (SpawnRng, never
+// CombatRng); each shard strikes. GroundPoint acquisition falls back to SelfPoint (storm over the
+// caster's own head) when no ground point was aimed. Adapted from obelisk-bevy's shipped blizzard.
+(
+  skill_id: "blizzard",
+  phase_durations: ( windup: 0.4, active: 0.1, recovery: 0.3 ),
+  collision_windows: [
+    ( id: "storm", spawn: Scheduled( phase: Active, offset: 0.0 ), anchor: CastPoint,
+      anchor_offset: (0.0, 8.0, 0.0), strikes: false, active_duration: 4.0,
+      shape: Sphere( radius: 3.0 ), motion: Static,
+      hit_filter: Enemies, hit_mode: OncePerTarget,
+      emitter: Some(( rate: 6.0, jitter: 3.0, window: "shard" )) ),
+    ( id: "shard", spawn: Template, active_duration: 2.0,
+      shape: Sphere( radius: 0.5 ), motion: Linear( speed: 12.0 ), motion_direction: Down,
+      hit_filter: Enemies, hit_mode: OncePerTarget ),
+  ],
+  acquisition: GroundPoint( range: 30.0, fallback: Then(SelfPoint) ),
+  vfx_cues: { "emit_shard": "emit_shard", "on_hit": "on_hit" },
+  cues: {
+    "emit_shard": ( effect: Some("Snow"), attach: World, anim: None, params: [] ),
+    "on_hit": ( effect: Some("Sparks"), attach: World, anim: None, params: [] ),
+  },
+)
