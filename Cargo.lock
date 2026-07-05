@@ -1952,7 +1952,7 @@ dependencies = [
 [[package]]
 name = "bevy_vfx"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#4113492692b9dcbf04ab42d6183de79299e01010"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#d8c153d7886c99adf8dd84d065e187d5be649c28"
 dependencies = [
  "avian3d",
  "bevy",
