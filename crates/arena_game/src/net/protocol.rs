@@ -109,7 +109,7 @@ impl Plugin for ProtocolPlugin {
         app.register_message::<NetEventMessage>()
             .add_direction(NetworkDirection::ServerToClient); // wraps obelisk NetEvent (§5)
         app.register_message::<CueWireMessage>()
-            .add_direction(NetworkDirection::ServerToClient); // wraps arena_skills CueMessage (§4)
+            .add_direction(NetworkDirection::ServerToClient); // wraps crate::net::cue::CueMessage (§4)
         app.register_message::<RoundStateMessage>()
             .add_direction(NetworkDirection::ServerToClient); // best-of-3 round flow (§7)
 
@@ -158,10 +158,10 @@ pub struct CastRequestMessage {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NetEventMessage(pub obelisk_bevy::net::NetEvent);
 
-/// Cosmetic cue on the wire — wraps `arena_skills::CueMessage` (the serde wire type). The
-/// client consumer re-looks-up the `LaneEvent`s via the `SkillFxRegistry` (§4.3).
+/// Cosmetic cue on the wire — wraps `crate::net::cue::CueMessage` (the serde wire type). Client
+/// cue rendering is stubbed for now (C3 restores it via `bevy_effect`'s `CueBinding`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CueWireMessage(pub arena_skills::CueMessage);
+pub struct CueWireMessage(pub crate::net::cue::CueMessage);
 
 /// Live appearance change, client→server, reliable (`CastChannel`). Sent when the local player
 /// finishes editing their costume (panel close). The server applies it to that player's

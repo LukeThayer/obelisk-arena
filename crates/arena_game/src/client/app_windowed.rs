@@ -22,7 +22,7 @@ use super::harness::{
     add_frame_interpolation_to_predicted, screenshot_system, smoke_exit_after_frames,
     ScreenshotConfig, SmokeExit,
 };
-use super::scene::{load_rig, load_skillfx_registry, log_registered_skills_once, setup_scene};
+use super::scene::{load_rig, log_registered_skills_once, setup_scene};
 use super::{customization, hud, net, parts, present, rig};
 
 use crate::{add_avian_with_lightyear, add_obelisk_sim_client, arena_root};
@@ -71,18 +71,15 @@ pub fn run_windowed_client() {
     // irrelevant client-side (no client resolve).
     app.seed_combat_rng(1);
 
-    // The arena cosmetic-binding layer: registers the SkillFx asset + its `.skillfx.ron` loader.
-    app.add_plugins(arena_skills::ArenaSkillsPlugin);
     // GPU particle engine (windowed only — the headless server/observer never add this, so their
-    // net-test path is untouched). Authored `.skillfx.ron` effects render via bevy_vfx; `VfxLibrary`
-    // is seeded at Startup by `init_vfx_library`.
+    // net-test path is untouched). `VfxLibrary` is seeded at Startup by `init_vfx_library`; nothing
+    // resolves a cue into one of its effects yet — cue rendering is stubbed pending C3 (which adds
+    // `bevy_effect` + obelisk's `CueBinding`).
     app.add_plugins(bevy_vfx::VfxPlugin);
     // Third-person camera + mouse-look + spine-pitch aim lean (NET-aware: follows the local
     // predicted player, no longer moves a Transform — prediction owns the body).
     app.add_plugins(ArenaControllerPlugin);
 
-    // Load the SkillFx registry (cue_id → lanes) for the cosmetics consumer.
-    load_skillfx_registry(&mut app, &root);
     app.init_resource::<AimDirs>();
     // Cast-timeline loading uses the SAME shared `crate::cast_assets` helpers as the headless server.
     app.init_resource::<crate::cast_assets::PendingCastTimelines>();

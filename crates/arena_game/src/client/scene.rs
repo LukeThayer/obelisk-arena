@@ -1,43 +1,18 @@
 //! Scene + asset setup shared by the windowed + headless clients: the minimal 3D scene
-//! ([`setup_scene`]), the player rig load ([`load_rig`]), the cosmetic [`SkillFxRegistry`] load
-//! ([`load_skillfx_registry`]), and the one-shot registered-skills/cast-timeline log
-//! ([`log_registered_skills_once`]). Cast-timeline loading itself rides the shared
-//! `crate::cast_assets` helpers; this module just owns the scene/rig/registry scaffolding the
+//! ([`setup_scene`]), the player rig load ([`load_rig`]), and the one-shot registered-skills/
+//! cast-timeline log ([`log_registered_skills_once`]). Cast-timeline loading itself rides the shared
+//! `crate::cast_assets` helpers; this module just owns the scene/rig scaffolding the
 //! app-composition roots call into.
+//!
+//! NOTE: cue cosmetic *rendering* (formerly this module's cosmetic-binding registry load) is
+//! stubbed pending C3 (which restores it via obelisk's `CueBinding` + `bevy_effect`); there is
+//! nothing for this module to load for that path right now.
 
-use arena_skills::SkillFxRegistry;
 use bevy::prelude::*;
 use obelisk_bevy::prelude::*;
 
 use super::controller::FollowCamera;
 use super::rig;
-
-/// Load the [`SkillFxRegistry`] (cue_id → lanes) from `assets/skills` so the cosmetics consumer
-/// (`cosmetics::spawn_cue_cosmetics`) can re-look-up lanes by `cue_id` from a replicated/predicted
-/// `CueMessage`. (`register_client_cue_binding` adds the `LocalCue` channel; this just supplies the
-/// registry resource.)
-///
-/// NOTE: the NETWORKED windowed client does NOT install a local obelisk `CueEvent`
-/// egress observer — it spawns no obelisk combatants of its own, so it fires
-/// no local cues. Its cosmetics come entirely from (a) the server's replicated `CueWireMessage`
-/// (drained by `skills::register_client_cue_binding`) and (b) the predicted own-cast `LocalCue`
-/// (emitted by `skills::register_predicted_sim`). Both feed `spawn_cue_cosmetics` via the `LocalCue`
-/// channel, which needs this registry to resolve lanes.
-///
-/// A missing/empty `assets/skills` dir yields an empty registry (cues then no-op) rather than
-/// panicking the binary.
-pub(super) fn load_skillfx_registry(app: &mut App, root: &std::path::Path) {
-    let skills_dir = root.join("assets/skills");
-    let registry = SkillFxRegistry::load_dir(&skills_dir);
-    let mut bound: Vec<String> = registry.by_cue.keys().cloned().collect();
-    bound.sort();
-    app.insert_resource(registry);
-    info!(
-        "skillfx registry loaded from {} (bound cues: {:?})",
-        skills_dir.display(),
-        bound
-    );
-}
 
 /// Spawn a minimal 3D scene: a camera looking at the origin, a directional
 /// light, and a green ground plane.

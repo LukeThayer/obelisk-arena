@@ -27,7 +27,6 @@ pub mod parts;
 pub mod present;
 pub mod rig;
 mod scene;
-mod vfx_bind;
 
 pub use app_headless::run_headless_client;
 pub use app_windowed::run_windowed_client;

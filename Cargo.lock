@@ -299,7 +299,6 @@ name = "arena_game"
 version = "0.1.0"
 dependencies = [
  "arena_sim",
- "arena_skills",
  "avian3d",
  "bevy",
  "bevy_vfx",
@@ -321,19 +320,6 @@ dependencies = [
  "obelisk-bevy",
  "serde",
  "stat_core",
-]
-
-[[package]]
-name = "arena_skills"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "obelisk-bevy",
- "ron 0.8.1",
- "serde",
- "serde_json",
- "stat_core",
- "thiserror 1.0.69",
 ]
 
 [[package]]

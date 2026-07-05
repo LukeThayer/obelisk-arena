@@ -1,49 +1,48 @@
-//! Cue cosmetics — turn `CueMessage`s (dispatched by `arena_skills`' cue-binding layer) into
-//! visible, **non-authoritative** effects: an emissive particle burst per particle lane and a
-//! flying emissive sphere per projectile lane.
+//! Cue cosmetics — the client-side consumer of dispatched [`LocalCue`]s.
 //!
-//! This is the guide §5 "simple emissive-billboard stand-in" — pure Bevy, no GPU compute, works
-//! under `DefaultPlugins`. The `ParticleSpec` fields map 1:1 onto a future `bevy_vfx::SpawnModule`
-//! upgrade with no change to the `LaneEvent` contract. The authoritative hit stays in obelisk's
-//! `Hitbox`/`Projectile`; these cosmetics only react to the cues it fires.
+//! Cue **rendering** is stubbed here: the reform replaced the old cosmetic-binding crate's
+//! lane-binding format with obelisk's own `CueBinding`, which needs `bevy_effect` (not yet
+//! available) to resolve into GPU particles — that lands in a later task (C3). Until then, this
+//! module only (a) despawns a flying [`CosmeticProjectile`] when its bound `OnEnd` cue arrives (the
+//! sim's authoritative "the bolt stopped HERE" signal) and (b) traces every dispatched cue
+//! (`cue_dispatch`) so the wire keeps flowing observably. The authoritative hit stays in obelisk's
+//! `Hitbox`/`Projectile`; these cosmetics only ever react to the cues it fires, never resolve them.
 
-use crate::client::vfx_bind::bake_bindings;
 use crate::trace;
-use arena_skills::{
-    resolve_cue, CueKind, CueMessage, SkillFxRegistry, VfxBindSource, VfxParamBinding,
-};
 use bevy::prelude::*;
 use bevy_vfx::VfxLibrary;
 use serde_json::json;
 use std::collections::HashMap;
 
-/// `arena_game`-local bevy `Message` wrapping the engine-neutral serde [`CueMessage`].
+/// `arena_game`-local bevy `Message` wrapping the engine-neutral serde
+/// [`crate::net::cue::CueMessage`].
 ///
-/// `arena_skills::CueMessage` is a plain serde wire type (no bevy `Message` derive) so `arena_skills`
-/// stays lightyear-free. `LocalCue` is the in-process Bevy channel that carries cues into the
-/// cosmetics consumer ([`spawn_cue_cosmetics`], which needs `Res` access). It is fed from two sides:
-/// `skills::consume_replicated_cues` forwards each survivor of the replicated `CueWireMessage` drain,
-/// and `skills::predicted_local_cast` emits the local player's own on-cast cue immediately (so the
-/// caster sees zero-latency cosmetics without waiting for the server round-trip).
+/// `crate::net::cue::CueMessage` is a plain serde wire type (no bevy `Message` derive), so it stays
+/// lightyear-free. `LocalCue` is the in-process Bevy channel that carries cues into the cosmetics
+/// consumer ([`spawn_cue_cosmetics`]). It is fed from two sides: `skills::consume_replicated_cues`
+/// forwards each survivor of the replicated `CueWireMessage` drain, and `skills::predicted_local_cast`
+/// emits the local player's own on-cast cue immediately — though until C3 restores rendering, the
+/// only observable effect of either path is the `cue_dispatch` trace + the `OnEnd` despawn below.
 #[derive(Message, Clone, Debug)]
-pub struct LocalCue(pub CueMessage);
+pub struct LocalCue(pub crate::net::cue::CueMessage);
 
 /// Chest/wand-height lift applied to the **OnCast** lane only. The OnCast cue's `position` is the
 /// caster's origin (= the body CENTER, world y≈0.59), so the muzzle particle + projectile would spawn
 /// inside the torso. Raising them ~1.2m reads the muzzle at hand height and flies the projectile from
 /// chest height. The OnHit/impact lane keeps the target's actual hit position (no lift).
 ///
-/// This fixed offset is a stand-in; a real `wand_tip` socket on the rig is later polish.
+/// This fixed offset is a stand-in; a real `wand_tip` socket on the rig is later polish. Currently
+/// unread by the stubbed [`spawn_cue_cosmetics`] — C3 reuses it when it restores rendering.
 const MUZZLE_HEIGHT_OFFSET: Vec3 = Vec3::new(0.0, 1.2, 0.0);
 
 /// Per-caster aim direction (normalized), recorded when a cast is issued, keyed by the caster's
 /// stable `ObeliskId` string.
 ///
-/// This is the FALLBACK aim source: a `CueMessage` now carries its own `aim_dir` (the wire cue is the
-/// single source of truth — see [`spawn_cue_cosmetics`]), but for the local predicted cast,
+/// This is the FALLBACK aim source: a `CueMessage` carries its own `aim_dir` (the wire cue is meant
+/// to be the single source of truth once rendering resumes), but for the local predicted cast,
 /// `skills::predicted_local_cast` also stashes the camera-forward `aim_dir` here keyed by the caster's
-/// `ObeliskId`, so `spawn_cue_cosmetics` has a direction even before the wire cue arrives. Looked up
-/// by `msg.source_id` (the caster for an `OnCast` lane); absent ⇒ default `Vec3::Z`.
+/// `ObeliskId`. Currently unread by the stubbed [`spawn_cue_cosmetics`] — C3 reuses this lookup when
+/// it restores the flying cosmetic projectile.
 ///
 /// Keyed by the stable `ObeliskId` (not `Entity`) because replicated entity ids differ per process;
 /// `ObeliskId` is the only key both ends agree on, matching the serde `CueMessage.source_id`.
@@ -57,7 +56,9 @@ pub struct AimDirs(pub HashMap<String, Vec3>);
 /// scaled to the projectile radius via `Transform`), built once in [`init_cosmetic_assets`] at
 /// startup. The material maps are keyed by quantized color BITS (the cue colors are a tiny fixed
 /// palette) and lane kind, since particle vs projectile materials differ (emissive multiplier +
-/// alpha/blend), so repeated casts of the same spell hit the cache instead of allocating.
+/// alpha/blend), so repeated casts of the same spell hit the cache instead of allocating. Currently
+/// unpopulated by the stubbed [`spawn_cue_cosmetics`] — C3 resumes writing into these caches when it
+/// restores rendering.
 #[derive(Resource)]
 pub struct CosmeticAssets {
     /// Unit particle billboard quad (`Rectangle::new(0.25, 0.25)`).
@@ -71,7 +72,7 @@ pub struct CosmeticAssets {
 }
 
 /// Quantize an `[f32; 3]` color to its raw bit pattern so it can key a `HashMap` (floats aren't
-/// `Eq`/`Hash`). The cue colors come from a fixed `.skillfx.ron` palette, so equal colors share bits.
+/// `Eq`/`Hash`). The cue colors come from a small fixed palette, so equal colors share bits.
 fn color_key(c: [f32; 3]) -> [u32; 3] {
     [c[0].to_bits(), c[1].to_bits(), c[2].to_bits()]
 }
@@ -89,9 +90,8 @@ pub fn init_cosmetic_assets(mut commands: Commands, mut meshes: ResMut<Assets<Me
 
 /// PreStartup (windowed client only): seed the `bevy_vfx` [`VfxLibrary`] with the built-in presets
 /// (`fire`/`explosion`/`sparks`/… — the same set the skill designer offers) + any authored overrides
-/// in `assets/vfx/` or `assets/skills/*.vfx.ron`. A `.skillfx.ron` particle/projectile lane whose
-/// `effect` names one of these renders the real GPU effect in-game; lanes with no `effect` keep the
-/// emissive-billboard stand-in. Mirrors the editor's `init_vfx_library` so authored → in-game is 1:1.
+/// in `assets/vfx/` or `assets/skills/*.vfx.ron`, so a later cue-binding consumer (C3) can spawn a
+/// named effect by key. Mirrors the editor's `init_vfx_library` so authored → in-game stays 1:1.
 pub fn init_vfx_library(mut library: ResMut<VfxLibrary>) {
     for (name, system) in bevy_vfx::presets::default_presets() {
         library.effects.entry(name.to_string()).or_insert(system);
@@ -124,48 +124,6 @@ fn load_vfx_presets_from_dir(library: &mut VfxLibrary, dir: &str) {
     }
 }
 
-/// Try to spawn an authored `bevy_vfx` effect for a cosmetic lane. Returns `true` if it spawned the
-/// real GPU effect (caller then skips the billboard stand-in), `false` to fall back. Clones the named
-/// `VfxLibrary` preset, CPU-bakes its `VfxParamBinding`s from the live `charge` (stat sources → 0.0,
-/// the math is proven in `arena_skills`), and spawns it at `pos` + a `ParticleLifetime` so it despawns.
-/// `extra` lets the caller attach a `CosmeticProjectile` so a projectile effect flies.
-#[allow(clippy::too_many_arguments)]
-fn spawn_lane_vfx(
-    commands: &mut Commands,
-    library: Option<&VfxLibrary>,
-    effect: Option<&str>,
-    pos: Vec3,
-    offset: Vec3,
-    bindings: &[VfxParamBinding],
-    charge: f32,
-    duration: f32,
-    extra: Option<CosmeticProjectile>,
-) -> bool {
-    let Some(mut system) = effect
-        .zip(library)
-        .and_then(|(name, lib)| lib.effects.get(name).cloned())
-    else {
-        return false;
-    };
-    bake_bindings(&mut system, bindings, |b| match &b.source {
-        VfxBindSource::Charge => charge,
-        VfxBindSource::Stat { .. } => 0.0,
-    });
-    let mut e = commands.spawn((
-        system,
-        Transform::from_translation(pos + offset),
-        Visibility::default(),
-        ParticleLifetime {
-            elapsed: 0.0,
-            duration: duration.max(0.5),
-        },
-    ));
-    if let Some(proj) = extra {
-        e.insert(proj);
-    }
-    true
-}
-
 /// A short-lived cosmetic entity (particle billboard or cosmetic projectile). Despawned by
 /// `age_lifetimes` once `elapsed >= duration`.
 #[derive(Component)]
@@ -188,40 +146,22 @@ pub struct CosmeticProjectile {
     pub end_cue: Option<String>,
 }
 
-/// Read every [`LocalCue`] dispatched this frame, resolve its lanes from the [`SkillFxRegistry`]
-/// (`resolve_cue` re-looks-up by `cue_id` — the serde `CueMessage` carries no embedded lane), and
-/// spawn each lane's cosmetics:
-/// - if the lane has a `particle`, an emissive `Rectangle` billboard at `position`;
-/// - if the lane has a `projectile`, an emissive `Sphere` at `position` flown along the caster's
-///   stashed aim direction (`AimDirs`, keyed by `source_id`, defaulting to `Vec3::Z`).
-///
-/// Emits one `lane_event` trace line per resolved lane (guide §6) so the cue dispatch is observable
-/// headlessly — the M1 regression gate greps the trace for these.
-#[allow(clippy::too_many_arguments)]
+/// Read every [`LocalCue`] dispatched this frame. **Stubbed** (C3 restores real rendering via
+/// obelisk's `CueBinding` + `bevy_effect`): the only behavior kept here is (a) an `OnEnd` cue
+/// despawning any [`CosmeticProjectile`] bound to it via `end_cue` (the sim's authoritative
+/// "the bolt stopped HERE" signal — the visual can't outfly or undershoot the real hitbox even
+/// with no lane rendering) and (b) a `cue_dispatch` trace line per cue so the wire stays observable
+/// headlessly. No particles, beams, or projectiles are spawned by this stub.
 pub fn spawn_cue_cosmetics(
     mut msgs: MessageReader<LocalCue>,
-    registry: Res<SkillFxRegistry>,
     mut commands: Commands,
-    mut assets: ResMut<CosmeticAssets>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    aim: Res<AimDirs>,
-    // Present only in the windowed client (the headless path never adds `bevy_vfx::VfxPlugin`, so
-    // this is `None` there and every lane falls back to the billboard — keeping the headless net-test
-    // path free of any GPU-particle dependency).
-    vfx_library: Option<Res<VfxLibrary>>,
     flying: Query<(Entity, &CosmeticProjectile)>,
 ) {
-    // Charge fraction used to bake `VfxBindSource::Charge` params. The `LocalCue` doesn't carry the
-    // cast's charge, so bake at full strength for now (stat-driven params fall back to 0.0). Threading
-    // the real per-cast charge is a later refinement.
-    let charge = 1.0;
-    let library = vfx_library.as_deref();
     for LocalCue(m) in msgs.read() {
         // An END cue is the sim saying "the bolt stopped HERE" — terminate every cosmetic
-        // projectile bound to it (its lanes below then render the ending, e.g. the explosion,
-        // at the cue position). This closes the visual/sim loop: the cosmetic can't outfly or
-        // undershoot the authoritative hitbox.
-        if m.kind == CueKind::OnEnd {
+        // projectile bound to it. This closes the visual/sim loop even without lane rendering: the
+        // cosmetic can't outfly or undershoot the authoritative hitbox.
+        if m.kind == crate::net::cue::CueKind::OnEnd {
             for (e, proj) in &flying {
                 if proj.end_cue.as_deref() == Some(m.cue_id.as_str()) {
                     commands.entity(e).try_despawn();
@@ -229,191 +169,13 @@ pub fn spawn_cue_cosmetics(
             }
         }
 
-        // Re-look-up the lanes bound to this cue id (an unbound cue resolves to an empty slice and
-        // no-ops — spec §12: never crash on missing content).
-        let lanes = resolve_cue(&registry, m);
-
-        // Spawn position: raise the OnCast lane (muzzle + projectile) to wand/chest height so it
-        // clears the robe; leave OnHit (impact) and any other lane at the cue's reported position.
-        let spawn_pos = if m.kind == CueKind::OnCast {
-            m.position + MUZZLE_HEIGHT_OFFSET
-        } else {
-            m.position
-        };
-
-        for lane in lanes {
-            // Observability: one trace line per dispatched lane (guide §6 sample). The cue kind is
-            // emitted as `cue_kind` rather than `kind` so it doesn't clobber the trace harness's own
-            // top-level `"kind":"lane_event"` (the harness merges `extra` over the base object).
-            trace::event(
-                "lane_event",
-                json!({
-                    "lane_id": lane.lane_id,
-                    "cue_id": m.cue_id,
-                    "cue_kind": format!("{:?}", m.kind),
-                    "source_id": m.source_id,
-                    "pos_x": m.position.x,
-                    "pos_y": m.position.y,
-                    "pos_z": m.position.z,
-                    "has_particle": lane.particle.is_some(),
-                    "has_projectile": lane.projectile.is_some(),
-                }),
-            );
-
-            // 1) Particle burst. Prefer the authored `bevy_vfx` effect (real GPU particles, as in the
-            // designer preview); fall back to the emissive-billboard stand-in when the lane names no
-            // effect / it's missing from the library / the headless path has no VfxLibrary.
-            if let Some(p) = &lane.particle {
-                let spawned_vfx = spawn_lane_vfx(
-                    &mut commands,
-                    library,
-                    p.effect.as_deref(),
-                    spawn_pos,
-                    p.offset,
-                    &p.param_bindings,
-                    charge,
-                    p.lifetime,
-                    None,
-                );
-                if !spawned_vfx {
-                    let c = LinearRgba::rgb(p.color[0], p.color[1], p.color[2]);
-                    let material = assets
-                        .particle_mats
-                        .entry(color_key(p.color))
-                        .or_insert_with(|| {
-                            materials.add(StandardMaterial {
-                                emissive: c * 2.0,
-                                base_color: Color::from(c),
-                                alpha_mode: AlphaMode::Blend,
-                                unlit: true,
-                                ..default()
-                            })
-                        })
-                        .clone();
-                    commands.spawn((
-                        Mesh3d(assets.quad.clone()),
-                        MeshMaterial3d(material),
-                        Transform::from_translation(spawn_pos),
-                        ParticleLifetime {
-                            elapsed: 0.0,
-                            duration: p.lifetime,
-                        },
-                    ));
-                }
-            }
-
-            // 1b) Two-anchor beam arc: `segments` bursts sampled along the cue's
-            // position_from→position segment (a beam window's open cue carries both anchors).
-            // No second anchor = nothing to draw (an authoring mismatch, not a crash).
-            if let (Some(b), Some(from)) = (&lane.beam, m.position_from) {
-                let to = m.position;
-                let n = b.segments.max(2) as usize;
-                for i in 0..n {
-                    let t = i as f32 / (n - 1) as f32;
-                    let p = from.lerp(to, t);
-                    let spawned_vfx = spawn_lane_vfx(
-                        &mut commands,
-                        library,
-                        b.effect.as_deref(),
-                        p,
-                        Vec3::ZERO,
-                        &[],
-                        charge,
-                        b.lifetime,
-                        None,
-                    );
-                    if !spawned_vfx {
-                        let c = LinearRgba::rgb(b.color[0], b.color[1], b.color[2]);
-                        let material = assets
-                            .particle_mats
-                            .entry(color_key(b.color))
-                            .or_insert_with(|| {
-                                materials.add(StandardMaterial {
-                                    emissive: c * 3.0,
-                                    base_color: Color::from(c),
-                                    alpha_mode: AlphaMode::Blend,
-                                    unlit: true,
-                                    ..default()
-                                })
-                            })
-                            .clone();
-                        commands.spawn((
-                            Mesh3d(assets.quad.clone()),
-                            MeshMaterial3d(material),
-                            Transform::from_translation(p).with_scale(Vec3::splat(0.35)),
-                            ParticleLifetime {
-                                elapsed: 0.0,
-                                duration: b.lifetime,
-                            },
-                        ));
-                    }
-                }
-            }
-
-            // 2) Cosmetic flying projectile (OnCast lane only, for firebolt).
-            if let Some(proj) = &lane.projectile {
-                // Direction (Bug 1b): prefer the cue's OWN aim_dir (carried over the wire from the
-                // server, so an OBSERVER flies the bolt the right way). Fall back to the local
-                // `AimDirs` lookup (the local-prediction path stashes it keyed by `ObeliskId` — the
-                // OnCast cue's `source_id` IS the caster), then to +Z.
-                let dir = if m.aim_dir != Vec3::ZERO {
-                    m.aim_dir
-                } else {
-                    aim.0.get(&m.source_id).copied().unwrap_or(Vec3::Z)
-                };
-                let velocity = dir * proj.speed;
-                let gravity = proj.gravity;
-                let end_cue = proj.end_cue.clone();
-                // Prefer an authored `bevy_vfx` trail effect flown along `velocity`; else the emissive
-                // sphere stand-in. Both carry `CosmeticProjectile` so they track the obelisk hitbox.
-                let spawned_vfx = spawn_lane_vfx(
-                    &mut commands,
-                    library,
-                    proj.effect.as_deref(),
-                    spawn_pos,
-                    Vec3::ZERO,
-                    &[],
-                    charge,
-                    2.0,
-                    Some(CosmeticProjectile {
-                        velocity,
-                        gravity,
-                        end_cue: end_cue.clone(),
-                    }),
-                );
-                if !spawned_vfx {
-                    let c = LinearRgba::rgb(proj.color[0], proj.color[1], proj.color[2]);
-                    // Reuse the cached unit sphere (scaled to `proj.radius` via Transform) + a
-                    // color-keyed material so each cast reuses handles instead of growing the stores.
-                    let material = assets
-                        .projectile_mats
-                        .entry(color_key(proj.color))
-                        .or_insert_with(|| {
-                            materials.add(StandardMaterial {
-                                emissive: c * 3.0,
-                                base_color: Color::from(c),
-                                unlit: true,
-                                ..default()
-                            })
-                        })
-                        .clone();
-                    commands.spawn((
-                        Mesh3d(assets.sphere.clone()),
-                        MeshMaterial3d(material),
-                        Transform::from_translation(spawn_pos).with_scale(Vec3::splat(proj.radius)),
-                        CosmeticProjectile {
-                            velocity,
-                            gravity,
-                            end_cue,
-                        },
-                        ParticleLifetime {
-                            elapsed: 0.0,
-                            duration: 2.0, // matches the .cast.ron window active_duration
-                        },
-                    ));
-                }
-            }
-        }
+        // Observability: one trace line per dispatched cue, even though no cosmetics spawn yet.
+        // `cue_kind` not `kind` — avoid clobbering the trace harness's own top-level event kind.
+        trace::event(
+            "cue_dispatch",
+            json!({ "cue_id": m.cue_id, "skill_id": m.skill_id,
+                "cue_kind": format!("{:?}", m.kind), "source_id": m.source_id }),
+        );
     }
 }
 

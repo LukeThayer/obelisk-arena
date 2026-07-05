@@ -1,19 +1,21 @@
 //! Server cue/event egress + client cue binding.
 //!
-//! The cue binding is split into a pure egress helper (`arena_skills::cue_event_to_message`) and a
-//! pure consumer (`arena_skills::resolve_cue`). This module wires both halves to the lightyear wire:
+//! The cue binding is split into a pure egress helper (`crate::net::cue::cue_event_to_message`) and,
+//! in a later task (C3), a pure consumer that resolves a `CueBinding`. This module wires the egress
+//! half to the lightyear wire:
 //!
 //!   - [`register_server_cue_egress`] (server): converts obelisk `CueEvent`s into serde `CueMessage`s
 //!     (resolving `CueEvent.source` Entity → stable `ObeliskId` via obelisk's `ObeliskEntityIndex`)
 //!     and broadcasts them as [`CueWireMessage`] on the reliable `EventChannel` to every connected
 //!     client. It ALSO drives [`egress_net_events`], which broadcasts obelisk's authoritative
 //!     `NetEvent` stream (CastBegan / DamageResolved / …) as [`NetEventMessage`].
-//!   - [`register_client_cue_binding`] (client): consumes the replicated `CueWireMessage`s →
-//!     `resolve_cue` → cosmetics (in `client/cosmetics.rs`).
+//!   - [`register_client_cue_binding`] (client): consumes the replicated `CueWireMessage`s and
+//!     forwards survivors to cosmetics (in `client/cosmetics.rs`) — rendering itself is stubbed
+//!     until C3 (which adds `bevy_effect`).
 //!
 //! The server NEVER spawns cosmetics (it has no presentation); it only converts + broadcasts. The
 //! client NEVER resolves combat (Stage A); it only plays cosmetics from the replicated cues +
-//! events. `arena_skills` stays lightyear-free — this `arena_game` glue owns the lightyear wrappers.
+//! events. `crate::net::cue` stays lightyear-free — this module owns the lightyear wrappers.
 
 use bevy::prelude::*;
 use lightyear::prelude::server::ClientOf;
@@ -41,7 +43,7 @@ pub fn register_server_cue_egress(app: &mut App) {
 
 /// Cues captured this frame by [`capture_cue_event`], drained + broadcast by [`broadcast_cues`].
 #[derive(Resource, Default)]
-struct PendingCues(Vec<arena_skills::CueMessage>);
+struct PendingCues(Vec<crate::net::cue::CueMessage>);
 
 /// Observer: obelisk `CueEvent { cue_id, source: Entity, position, kind }` → serde `CueMessage`
 /// (with `source_id` resolved to the stable `ObeliskId`), buffered for broadcast. If the cue's
@@ -69,14 +71,9 @@ fn capture_cue_event(
         .get(cue.source)
         .map(|c| c.aim_dir)
         .unwrap_or(Vec3::ZERO);
-    pending.0.push(arena_skills::cue_event_to_message(
-        &cue.cue_id,
-        source_id,
-        cue.position,
-        aim,
-        cue.position_from,
-        cue.kind.into(),
-    ));
+    pending
+        .0
+        .push(crate::net::cue::cue_event_to_message(cue, source_id, aim));
 }
 
 /// Broadcast every buffered `CueMessage` as a `CueWireMessage` on the reliable `EventChannel` to all
@@ -227,7 +224,7 @@ fn consume_replicated_cues(
             // De-dup: skip a replicated predicted-kind cue for our own player (already played
             // locally by the predicted sim). OnHit/impact always plays (server-authoritative).
             let is_own = local_id.as_deref() == Some(m.source_id.as_str());
-            let is_predicted_kind = m.kind == arena_skills::CueKind::OnCast;
+            let is_predicted_kind = m.kind == crate::net::cue::CueKind::OnCast;
             if is_own && is_predicted_kind {
                 crate::trace::event(
                     "cue_deduped",
@@ -290,15 +287,21 @@ fn predicted_local_cast(
             serde_json::json!({ "cue_id": cue_id, "source_id": cast.source_id }),
         );
         out.write(crate::client::cosmetics::LocalCue(
-            arena_skills::CueMessage {
+            crate::net::cue::CueMessage {
                 cue_id,
+                skill_id: cast.skill_id.clone(),
                 source_id: cast.source_id.clone(),
                 position: cast.position,
                 // Bug 1b: carry the predicted cast's aim so the local predicted bolt flies the
                 // right way (and so the cue's own aim_dir is the single source of truth).
                 aim_dir: cast.aim_dir,
                 position_from: None,
-                kind: arena_skills::CueKind::OnCast,
+                // `PredictedCast` carries no charge byte (see `client/net.rs`) — the predicted
+                // local cue's charge only affects a cosmetic scale that isn't rendered until C3,
+                // so there is nothing to thread yet.
+                charge: None,
+                end_reason: None,
+                kind: crate::net::cue::CueKind::OnCast,
             },
         ));
     }

@@ -8,7 +8,7 @@
 
 - `crates/arena_game/src/` — the shared lib (`lib.rs` re-exports `client`, `net`, `server`, `shared_controller`, `skills`, `trace`).
 - `crates/arena_game/src/bin/` — `arena-server` (headless authority), `arena-client` (windowed by default; `ARENA_HEADLESS=1` → headless), `arena-observer` (thin alias to `client::run_headless_client`).
-- `crates/arena_skills/src/lib.rs` — the lightyear-free `.skillfx.ron` cosmetic-binding format + registry (`SkillFx`, `SkillFxRegistry`, serde `CueMessage`, pure `cue_event_to_message`/`resolve_cue`, `ArenaSkillsPlugin`). `arena_game` owns every lightyear wrapper around it.
+- `crates/arena_game/src/net/cue.rs` — the engine-neutral cue wire type (`CueMessage`, `CueKind`, `EndReasonWire`, pure `cue_event_to_message`). The old cosmetic-binding crate this replaces is gone entirely — client cue *rendering* is stubbed pending a later task (C3), which restores it via obelisk's own `CueBinding` + `bevy_effect`.
 
 ## Load-bearing plugin composition order
 
@@ -19,7 +19,7 @@ Identical on server (`bin/server.rs`) and windowed client (`run_windowed_client`
 3. `add_avian_with_lightyear(&mut app)` **after** the net stack — the *sole* avian `PhysicsPlugins` registrant (`lib.rs:54`).
 4. obelisk sim: `add_obelisk_sim_headless` (server) / `add_obelisk_sim_client` (client) — both **omit `ObeliskSpatialPlugin`** (else the physics group double-adds and panics). The client variant additionally omits `ObeliskCombatPlugin` + `detect_overlaps` (Stage A).
 5. obelisk config/effects/skills + `seed_combat_rng(session_seed())` (server) / `seed_combat_rng(1)` (client, never drawn).
-6. Server: `skills::register_server_cue_egress` + `ArenaServerPlugin`. Client: `ArenaSkillsPlugin`, controller/present/parts/customization/hud plugins, `ClientNetPlayerPlugin`, frame-interpolation, cue-binding + predicted-cast + event-trace, input bridges.
+6. Server: `skills::register_server_cue_egress` + `ArenaServerPlugin`. Client: `bevy_vfx::VfxPlugin`, controller/present/parts/customization/hud plugins, `ClientNetPlayerPlugin`, frame-interpolation, cue-binding + predicted-cast + event-trace, input bridges.
 
 ## Module responsibility table
 
@@ -50,14 +50,14 @@ Identical on server (`bin/server.rs`) and windowed client (`run_windowed_client`
 | `mod.rs` | Submodule wiring ONLY: the `mod`/`pub mod` declarations + the `run_windowed_client`/`run_headless_client` re-exports. No systems live here. |
 | `app_windowed.rs` | `run_windowed_client` (the windowed app-composition root) + the windowed input bridges (`bridge_windowed_input_to_local_input`, `bridge_windowed_cast_hold`, `release_keys_on_focus_loss`). |
 | `app_headless.rs` | `run_headless_client` (the headless app-composition root, the `arena-observer`/net-test vehicle) + the headless `[H]` hooks/traces (`automove_input`, `headless_customize_once`/`HeadlessCustomize`, `trace_replicated_players`/`_health`/`_round_state`) + the shared `autocast` system and the `LocalPlayerFilter`/`RemotePlayerFilter` aliases (used by `app_windowed` too). |
-| `scene.rs` | Scene/asset setup shared by both roots: `setup_scene`, `load_rig`, `load_skillfx_registry`, `log_registered_skills_once` (cast-timeline loading rides `crate::cast_assets`). |
+| `scene.rs` | Scene/asset setup shared by both roots: `setup_scene`, `load_rig`, `log_registered_skills_once` (cast-timeline loading rides `crate::cast_assets`; cue cosmetic rendering setup is stubbed pending C3). |
 | `harness.rs` | Test/verification scaffolds: `SmokeExit`/`smoke_exit_after_frames`, `ScreenshotConfig`/`screenshot_system`, `add_frame_interpolation_to_predicted`, and `EnvConfig` — the SINGLE parser for `ARENA_CAM_YAW`/`ARENA_TEST_PITCH` used by both `controller.rs` and `app_headless.rs`. ~15 `ARENA_*` env hooks live across these client modules. |
 | `net.rs` | `ClientNetPlayerPlugin`: `materialize_predicted_players` (local Dynamic body + `InputMarker`/`ActionState` + `LocalNetPlayer`) vs `materialize_interpolated_players` (no body, waits for `Position`+`Rotation`); `buffer_arena_input` (FixedPreUpdate `WriteClientInputs`); predicted `client_apply_yaw`/`client_apply_movement` (`With<Predicted>`); `send_cast_requests` (+`PredictedCast`); `send_customization`; `drain_customize_broadcasts`; remote pose/cast-phase traces. Resources: `LocalInput`, `CastIntent`, `ChargeState` (`MAX_CHARGE_SECS=1.5`, `pending_charge` default 85), `CustomizeDirty`. |
 | `controller.rs` | `ArenaControllerPlugin`: mouse-look → `CameraYaw`/`AimPitch` (`MOUSE_SENSITIVITY=0.0035`, `PITCH_LIMIT=85°`); `follow_local_net_player` (first-person camera at `EYE_HEIGHT = ARENA_EYE_HEIGHT` on the `LocalNetPlayer`); `apply_aim_pitch_to_local_spine` (REMOTE-only `chest_joint` lean). **It no longer moves a Transform** — prediction owns the body. |
 | `present.rs` | `attach_rig_to_players`: hang the `character.glb` `ArenaBody` rig under each materialized player (`RIG_FOOT_OFFSET = -0.62`, π gltf-yaw) + insert `LocalAnimBlend`; tag the local body `LocalPlayerBody` + `Visibility::Hidden`; `hide_local_player_body` enforces it. |
 | `rig.rs` | `RigAssets` + `build_graph_when_loaded` (one `AnimationGraph` from named glb clips) + `attach_animation_graph`; per-player `drive_animation` (locomotion from `LinearVelocity`+`Rotation` for remotes / camera-yaw+zero-vel for the hidden local; casting from `NetworkedCastState.cast_phase`, local pre-empts on charge). `LOCOMOTION_REF_SPEED=3.5`, `WALK_MIN_SPEED=0.2`. |
 | `parts.rs` | `PartSelection` (7 `u8` slots) + variant tables; `apply_arena_part_visibility` toggles per-mesh `Visibility` (local rig reads the local `PartSelection` resource, each remote rig reads its replicated `PlayerCustomization`); `PartMesh` cache + `refresh_arena_part_visibility_on_change`. |
-| `cosmetics.rs` | `LocalCue` → emissive billboards + flying `CosmeticProjectile` (NON-authoritative); `AimDirs`; `MUZZLE_HEIGHT_OFFSET=Vec3(0,1.2,0)`; `fly_cosmetic_projectiles` + `age_lifetimes`. |
+| `cosmetics.rs` | `LocalCue` consumer — STUBBED pending C3 (no particles/beams/projectiles spawn yet): `spawn_cue_cosmetics` only despawns an `OnEnd`-bound `CosmeticProjectile` (NON-authoritative) + traces `cue_dispatch`; `fly_cosmetic_projectiles` + `age_lifetimes` still age/move any that exist. `AimDirs`, `MUZZLE_HEIGHT_OFFSET=Vec3(0,1.2,0)`, `CosmeticAssets`/`init_cosmetic_assets` are kept unused for C3 to resume writing into. |
 | `customization.rs` | `K`-toggled customizer panel + third-person orbit preview (`CustomizationOpen`, `ORBIT_SPEED=2.2`); sets `CustomizeDirty` on close. |
 | `hud.rs` | HP bars (from `NetworkedHealth`), floating damage + hit flash (from `DamageResolved`), round banner (from `RoundStateMessage`), charge bar (from `ChargeState`), crosshair. Windowed-only. |
 
@@ -78,7 +78,7 @@ Identical on server (`bin/server.rs`) and windowed client (`run_windowed_client`
 
 ### Channels + messages (`net/protocol.rs:87-120`)
 - `CastChannel` (C→S, reliable): `CastRequestMessage { skill_id, aim_dir:[f32;3], charge:u8 }`, `CustomizeMessage { parts }`.
-- `EventChannel` (S→C, reliable): `NetEventMessage` (wraps obelisk `NetEvent`), `CueWireMessage` (wraps `arena_skills::CueMessage`), `RoundStateMessage`, `CustomizeBroadcast { player, parts }`.
+- `EventChannel` (S→C, reliable): `NetEventMessage` (wraps obelisk `NetEvent`), `CueWireMessage` (wraps `crate::net::cue::CueMessage`), `RoundStateMessage`, `CustomizeBroadcast { player, parts }`.
 
 ### Rollback (`net/protocol.rs:260-274`)
 Per-component `*_should_rollback` with 0.01 epsilons (matches the canonical `avian_3d_character` example). Not reflexive — comparing a value to itself returns false, so only a real `>= 0.01` divergence triggers a rollback.
@@ -103,7 +103,7 @@ Combat is 100% server-authoritative (obelisk). The client only *requests* casts 
 3. `drain_cast_requests` (`server/cast_pipeline.rs:27`): resolves sender `RemoteId` → caster via `ClientPlayerMap`, skips a caster mid-`ActiveCast`, and fires `cast_skill_dir_charged_from(skill, dir, charge, Vec3::Y*ARENA_EYE_HEIGHT)`. Free aim from the eye, no auto-acquire — it can miss.
 4. obelisk FixedUpdate sets resolve the rest: `validate_casts` (mana/cooldown/already-casting gate) → `advance_casts` → `move_projectiles` → `detect_overlaps` (hit → `DamageResolved`). Only the server runs `ObeliskSet::ResolveHits`.
 5. Egress (`skills.rs`): `capture_cue_event` buffers obelisk `CueEvent`s (resolving `source` Entity → `ObeliskId`, stamping the caster `aim_dir`), `broadcast_cues` ships them as `CueWireMessage`; `egress_net_events` broadcasts `NetEvent` as `NetEventMessage`.
-6. Client consume: `consume_replicated_cues` (`skills.rs:199`) is the SINGLE `CueWireMessage` drain — it de-dups the local player's own `OnCast` cue and forwards survivors as `LocalCue`. `predicted_local_cast` (`skills.rs:259`) plays the local on_cast windup + cosmetic projectile immediately (never a `Hitbox`, never `CombatRng`). `spawn_cue_cosmetics` (`cosmetics.rs:76`) turns each `LocalCue` into billboards + a flying `CosmeticProjectile`. Damage numbers come from the replicated `DamageResolved` in `hud.rs`.
+6. Client consume: `consume_replicated_cues` (`skills.rs:199`) is the SINGLE `CueWireMessage` drain — it de-dups the local player's own `OnCast` cue and forwards survivors as `LocalCue`. `predicted_local_cast` (`skills.rs:259`) emits the local on_cast `LocalCue` immediately (never a `Hitbox`, never `CombatRng`). `spawn_cue_cosmetics` (`cosmetics.rs`) is currently STUBBED (pending C3): it despawns an `OnEnd`-bound `CosmeticProjectile` and traces `cue_dispatch`, but spawns no particles/beams/projectiles of its own yet. Damage numbers come from the replicated `DamageResolved` in `hud.rs`.
 
 ## Rig / animation + customization
 

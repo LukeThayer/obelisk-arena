@@ -21,7 +21,6 @@ bevy = "0.18"
 avian3d = { version = "0.5", features = ["default", "serialize"] }
 obelisk-bevy = { git = "https://github.com/LukeThayer/bevy-obelisk", branch = "main" }
 arena_sim = { path = "../arena_sim" }
-arena_skills = { path = "../arena_skills" }
 bevy_modal_editor = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }
 bevy_editor_game = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }
 bevy_vfx = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }

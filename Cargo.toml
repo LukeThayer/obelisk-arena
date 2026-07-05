@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/arena_skills", "crates/arena_game", "crates/arena_sim"]
+members = ["crates/arena_game", "crates/arena_sim"]
 # arena_editor is its OWN standalone workspace (see crates/arena_editor/Cargo.toml) — kept out of
 # this workspace so the editor's heavy bevy features (dynamic_linking, ...) can't feature-unify onto
 # arena_game / the net-test. Build it from crates/arena_editor directly.
@@ -45,5 +45,4 @@ stat_core = { git = "ssh://git@github.com/vothuul/obelisk.git", rev = "bf9f026" 
 # build); the headless server/observer compile it but never add the plugin. Same crate the editor +
 # arena_editor use (Bevy 0.18).
 bevy_vfx = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }
-arena_skills = { path = "crates/arena_skills" }
 arena_sim = { path = "crates/arena_sim" }
