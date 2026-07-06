@@ -203,6 +203,8 @@ pub fn register_client_cue_binding(app: &mut App) {
     // Ensure the LocalCue channel exists even on the headless client (`add_message` is
     // idempotent-safe via Bevy's dedup if another registration already added it).
     app.add_message::<crate::client::cosmetics::LocalCue>();
+    // The predicted-cue registry the de-dup reads. Empty when the predicted sim isn't registered.
+    app.init_resource::<PredictedCues>();
     app.add_systems(Update, consume_replicated_cues);
 }
 
@@ -210,16 +212,11 @@ pub fn register_client_cue_binding(app: &mut App) {
 #[allow(clippy::type_complexity)]
 fn consume_replicated_cues(
     mut receivers: Query<&mut MessageReceiver<CueWireMessage>>,
-    local: Query<
-        &crate::net::protocol::ObeliskNetId,
-        (
-            With<crate::net::protocol::NetworkedPlayer>,
-            With<crate::client::net::LocalNetPlayer>,
-        ),
-    >,
+    time: Res<Time>,
+    mut registry: ResMut<PredictedCues>,
     mut out: MessageWriter<crate::client::cosmetics::LocalCue>,
 ) {
-    let local_id: Option<String> = local.iter().next().map(|o| o.0.clone());
+    let now = time.elapsed_secs_f64();
     for mut rx in &mut receivers {
         for CueWireMessage(m) in rx.receive() {
             crate::trace::event(
@@ -228,11 +225,16 @@ fn consume_replicated_cues(
                 serde_json::json!({ "cue_id": m.cue_id, "source_id": m.source_id,
                     "cue_kind": format!("{:?}", m.kind) }),
             );
-            // De-dup: skip a replicated predicted-kind cue for our own player (already played
-            // locally by the predicted sim). OnHit/impact always plays (server-authoritative).
-            let is_own = local_id.as_deref() == Some(m.source_id.as_str());
-            let is_predicted_kind = m.kind == crate::net::cue::CueKind::OnCast;
-            if is_own && is_predicted_kind {
+            // De-dup (WS3): skip a replicated cue this client already PLAYED as a prediction.
+            // Registry-based — exact (source_id, cue_id) pairs registered at predict time — so
+            // server-only cues (Template-window shards, OnHit, OnEnd, OnEmit) always play.
+            registry.0.retain(|(expiry, _, _)| *expiry > now);
+            if let Some(i) = registry
+                .0
+                .iter()
+                .position(|(_, src, cue)| *src == m.source_id && *cue == m.cue_id)
+            {
+                registry.0.swap_remove(i);
                 crate::trace::event(
                     "cue_deduped",
                     serde_json::json!({ "cue_id": m.cue_id, "source_id": m.source_id }),
@@ -249,67 +251,231 @@ fn consume_replicated_cues(
     }
 }
 
-/// Register the PREDICTED local-cast presentation (guide §6.4).
+/// Register the PREDICTED local-cast presentation (design WS3).
 ///
-/// Stage-A invariant (guide risk #2): the client predicts the own-cast COSMETICS only — it fires the
-/// local `on_cast` muzzle + cosmetic projectile the instant the cast_request goes out (zero latency),
-/// but it NEVER runs `ObeliskSet::ResolveHits`, NEVER spawns an obelisk `Hitbox`, and NEVER touches
-/// `CombatRng`. Hit resolution + damage stay 100% server-authoritative (they arrive via the
-/// replicated `NetEventMessage(DamageResolved)` a few ms later). This system is the predicted half;
-/// it consumes [`PredictedCast`] (emitted by `client::net::send_cast_requests`), looks up the skill's
-/// `on_cast` cue id from the loaded cast timeline, stashes the aim direction, and emits a `LocalCue`
-/// so `client::cosmetics::spawn_cue_cosmetics` plays the windup + projectile cosmetics immediately.
-///
-/// Only added by the windowed client (the headless client has no cosmetics). The replicated OnCast
-/// cue for this same local player is de-duped by [`consume_replicated_cues`], so the cast plays
-/// exactly once (predicted), not twice.
+/// Stage-A invariant: the client predicts the own-cast COSMETICS only — the `on_cast` muzzle NOW,
+/// plus the skill's `Scheduled` collision-window cues at their AUTHORED offsets (so your own bolt
+/// launches at the authored moment with zero added round-trip) — but it NEVER runs
+/// `ObeliskSet::ResolveHits`, NEVER spawns an obelisk `Hitbox`, and NEVER touches `CombatRng`.
+/// Hit resolution + damage stay 100% server-authoritative. Every predicted cue is recorded in
+/// [`PredictedCues`] so the server's authoritative copies are skipped by
+/// [`consume_replicated_cues`]; a server `CastRejected` cancels the not-yet-fired queue
+/// ([`cancel_rejected_casts`] — the fizzle path).
 pub fn register_predicted_sim(app: &mut App) {
-    app.add_systems(Update, predicted_local_cast);
+    app.init_resource::<PredictedCueQueue>();
+    // AimDirs is normally seeded by the windowed cosmetics init; init here too so the headless
+    // client (which also registers the predicted sim) has it. Idempotent.
+    app.init_resource::<crate::client::cosmetics::AimDirs>();
+    app.add_systems(
+        Update,
+        (predicted_local_cast, tick_predicted_cues, cancel_rejected_casts),
+    );
 }
 
-/// Consume [`PredictedCast`] → play the predicted own-cast cosmetics immediately (no resolution).
-fn predicted_local_cast(
-    mut predicted: MessageReader<crate::client::net::PredictedCast>,
-    handles: Res<CastTimelineHandles>,
-    timelines: Res<Assets<CastTimeline>>,
-    mut aim: ResMut<crate::client::cosmetics::AimDirs>,
+/// Elapsed cast-time at which a window phase begins (obelisk schedules a `Scheduled { phase,
+/// offset }` window at `phase_start(phase) + offset`).
+pub(crate) fn phase_start(
+    d: &obelisk_bevy::assets::PhaseDurations,
+    phase: obelisk_bevy::assets::WindowPhase,
+) -> f32 {
+    use obelisk_bevy::assets::WindowPhase;
+    match phase {
+        WindowPhase::Windup => 0.0,
+        WindowPhase::Active => d.windup,
+        WindowPhase::Recovery => d.windup + d.active,
+    }
+}
+
+/// Registry of cues this client has PREDICTED (played locally) and must therefore skip when the
+/// server's authoritative copy arrives: `(expires_at_secs, source_id, cue_id)`. Entries are
+/// consumed on match (the server sends each fired cue once) and purged past expiry. Design WS3 —
+/// replaces the old "de-dup OnCast by kind" rule so emitter-spawned Template-window cues (e.g.
+/// blizzard shards, which the client does NOT predict) still play.
+#[derive(Resource, Default)]
+pub(crate) struct PredictedCues(Vec<(f64, String, String)>);
+
+/// A predicted cue waiting for its authored fire time.
+struct ScheduledCue {
+    fire_in: Timer,
+    cue: crate::net::cue::CueMessage,
+    /// Cancel keys for fizzle (a rejected cast cancels its not-yet-fired cues).
+    skill_id: String,
+    source_id: String,
+}
+
+/// Predicted cue windows scheduled by `predicted_local_cast`, fired by `tick_predicted_cues`.
+#[derive(Resource, Default)]
+struct PredictedCueQueue(Vec<ScheduledCue>);
+
+/// Fire scheduled predicted cues when their timers elapse, refreshing `position` to the caster's
+/// LIVE predicted pose (they may have moved during the windup).
+fn tick_predicted_cues(
+    time: Res<Time>,
+    mut queue: ResMut<PredictedCueQueue>,
+    local: Query<
+        (&avian3d::prelude::Position, &crate::net::protocol::ObeliskNetId),
+        With<crate::client::net::LocalNetPlayer>,
+    >,
     mut out: MessageWriter<crate::client::cosmetics::LocalCue>,
 ) {
+    if queue.0.is_empty() {
+        return;
+    }
+    let live: Option<(bevy::prelude::Vec3, String)> =
+        local.iter().next().map(|(p, id)| (p.0, id.0.clone()));
+    queue.0.retain_mut(|s| {
+        s.fire_in.tick(time.delta());
+        if !s.fire_in.is_finished() {
+            return true;
+        }
+        let mut cue = s.cue.clone();
+        if let Some((pos, ref id)) = live {
+            if *id == s.source_id {
+                cue.position = pos + bevy::prelude::Vec3::Y * crate::net::ARENA_EYE_HEIGHT;
+            }
+        }
+        crate::trace::event(
+            "predicted_cue",
+            serde_json::json!({ "cue_id": cue.cue_id, "source_id": cue.source_id }),
+        );
+        out.write(crate::client::cosmetics::LocalCue(cue));
+        false
+    });
+}
+
+/// Fizzle (design WS3): the server rejected a cast (cooldown/mana/mid-cast) — cancel its
+/// not-yet-fired predicted cues so no ghost bolt launches. The already-played on_cast muzzle is
+/// acceptable (denied-cast flicker, industry standard). Reads the [`ClientNetEvent`] fan-out.
+fn cancel_rejected_casts(
+    mut events: MessageReader<ClientNetEvent>,
+    local: Query<&crate::net::protocol::ObeliskNetId, With<crate::client::net::LocalNetPlayer>>,
+    mut queue: ResMut<PredictedCueQueue>,
+) {
+    let Some(local_id) = local.iter().next().map(|o| o.0.clone()) else {
+        return;
+    };
+    for ClientNetEvent(ev) in events.read() {
+        if let obelisk_bevy::net::NetEvent::CastRejected {
+            caster, skill_id, ..
+        } = ev
+        {
+            if *caster == local_id {
+                crate::trace::event(
+                    "predicted_fizzle",
+                    serde_json::json!({ "skill_id": skill_id }),
+                );
+                queue
+                    .0
+                    .retain(|s| !(s.source_id == *caster && s.skill_id == *skill_id));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::phase_start;
+    use obelisk_bevy::assets::{PhaseDurations, WindowPhase};
+
+    /// Scheduled-window fire times: Windup-phase windows fire at `offset`, Active at
+    /// `windup + offset`, Recovery at `windup + active + offset` (matches obelisk's scheduler).
+    #[test]
+    fn phase_start_offsets_match_timeline_order() {
+        let d = PhaseDurations {
+            windup: 0.3,
+            active: 0.1,
+            recovery: 0.2,
+        };
+        assert_eq!(phase_start(&d, WindowPhase::Windup), 0.0);
+        assert_eq!(phase_start(&d, WindowPhase::Active), 0.3);
+        assert!((phase_start(&d, WindowPhase::Recovery) - 0.4).abs() < 1e-6);
+    }
+}
+
+/// Consume [`PredictedCast`] → play the `on_cast` cue NOW and schedule the skill's `Scheduled`
+/// collision-window cues at their authored offsets (design WS3), so the local player's bolt
+/// launches at the authored moment with zero added round-trip. Registers every predicted cue in
+/// [`PredictedCues`] so the server's copies are skipped. Template windows (emitter-spawned, e.g.
+/// blizzard shards) are NOT predicted — their server cues play normally. Cosmetic-only (Stage A).
+fn predicted_local_cast(
+    mut predicted: MessageReader<crate::client::net::PredictedCast>,
+    handles: Option<Res<CastTimelineHandles>>,
+    timelines: Option<Res<Assets<CastTimeline>>>,
+    time: Res<Time>,
+    mut aim: ResMut<crate::client::cosmetics::AimDirs>,
+    mut registry: ResMut<PredictedCues>,
+    mut queue: ResMut<PredictedCueQueue>,
+    mut out: MessageWriter<crate::client::cosmetics::LocalCue>,
+) {
+    // Cast-timeline infra is optional (a client mode that never loaded timelines just doesn't
+    // predict cosmetics — no crash).
+    let (Some(handles), Some(timelines)) = (handles, timelines) else {
+        return;
+    };
+    let now = time.elapsed_secs_f64();
     for cast in predicted.read() {
-        // Resolve the skill's `on_cast` cue id from its loaded cast timeline (e.g.
-        // firebolt → "firebolt_cast"). If the timeline isn't loaded, skip (cosmetics-only; no crash).
-        let Some(cue_id) = handles
-            .0
-            .get(&cast.skill_id)
-            .and_then(|h| timelines.get(h))
-            .and_then(|t| t.vfx_cues.get("on_cast").cloned())
-        else {
+        // If the timeline isn't loaded, skip (cosmetics-only; no crash).
+        let Some(tl) = handles.0.get(&cast.skill_id).and_then(|h| timelines.get(h)) else {
             continue;
         };
         // Stash the aim so `spawn_cue_cosmetics` flies the cosmetic projectile the right way
         // (keyed by the caster's ObeliskId — matches the cue's source_id).
         aim.0.insert(cast.source_id.clone(), cast.aim_dir);
-        crate::trace::event(
-            "predicted_cast",
-            serde_json::json!({ "cue_id": cue_id, "source_id": cast.source_id }),
-        );
-        out.write(crate::client::cosmetics::LocalCue(
-            crate::net::cue::CueMessage {
-                cue_id,
+        // on_cast: fires immediately.
+        if let Some(cue_id) = tl.vfx_cues.get("on_cast") {
+            registry
+                .0
+                .push((now + 5.0, cast.source_id.clone(), cue_id.clone()));
+            crate::trace::event(
+                "predicted_cast",
+                serde_json::json!({ "cue_id": cue_id, "source_id": cast.source_id }),
+            );
+            out.write(crate::client::cosmetics::LocalCue(
+                crate::net::cue::CueMessage {
+                    cue_id: cue_id.clone(),
+                    skill_id: cast.skill_id.clone(),
+                    source_id: cast.source_id.clone(),
+                    position: cast.position,
+                    // Carry the predicted cast's aim so the local predicted bolt flies the right
+                    // way (the cue's own aim_dir is the single source of truth).
+                    aim_dir: cast.aim_dir,
+                    position_from: None,
+                    charge: Some(cast.charge),
+                    end_reason: None,
+                    kind: crate::net::cue::CueKind::OnCast,
+                },
+            ));
+        }
+        // Scheduled collision windows: predict their on_window cues at the authored offsets.
+        for w in &tl.collision_windows {
+            let obelisk_bevy::assets::WindowSpawn::Scheduled { phase, offset } = &w.spawn else {
+                continue; // Template windows are emitter-spawned — server-cued only
+            };
+            let Some(cue_id) = tl.vfx_cues.get(&format!("on_window_{}", w.id)) else {
+                continue;
+            };
+            let fire_at = phase_start(&tl.phase_durations, *phase) + offset;
+            registry.0.push((
+                now + fire_at as f64 + 5.0,
+                cast.source_id.clone(),
+                cue_id.clone(),
+            ));
+            queue.0.push(ScheduledCue {
+                fire_in: Timer::from_seconds(fire_at, TimerMode::Once),
+                cue: crate::net::cue::CueMessage {
+                    cue_id: cue_id.clone(),
+                    skill_id: cast.skill_id.clone(),
+                    source_id: cast.source_id.clone(),
+                    position: cast.position, // refreshed to the live caster pose at fire time
+                    aim_dir: cast.aim_dir,
+                    position_from: None,
+                    charge: Some(cast.charge),
+                    end_reason: None,
+                    kind: crate::net::cue::CueKind::OnWindow,
+                },
                 skill_id: cast.skill_id.clone(),
                 source_id: cast.source_id.clone(),
-                position: cast.position,
-                // Bug 1b: carry the predicted cast's aim so the local predicted bolt flies the
-                // right way (and so the cue's own aim_dir is the single source of truth).
-                aim_dir: cast.aim_dir,
-                position_from: None,
-                // `PredictedCast` carries no charge byte (see `client/net.rs`) — the predicted
-                // local cue's charge only affects a cosmetic scale that isn't rendered until C3,
-                // so there is nothing to thread yet.
-                charge: None,
-                end_reason: None,
-                kind: crate::net::cue::CueKind::OnCast,
-            },
-        ));
+            });
+        }
     }
 }

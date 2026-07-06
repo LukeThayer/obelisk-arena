@@ -8,13 +8,14 @@
 //! [`headless_customize_once`]) lean on the same [`LocalPlayerFilter`].
 
 use bevy::prelude::*;
+use obelisk_bevy::prelude::*;
 
 use super::controller;
 use super::harness::EnvConfig;
 use super::net;
 use super::parts;
 
-use crate::{add_avian_with_lightyear, arena_root};
+use crate::{add_avian_with_lightyear, add_obelisk_sim_client, arena_root};
 
 /// Query filter for THIS peer's local (predicted, owned) networked player.
 pub(super) type LocalPlayerFilter = (
@@ -57,6 +58,17 @@ pub fn run_headless_client() {
     crate::net::client::connect_to_configured(&mut app);
     add_avian_with_lightyear(&mut app);
 
+    // The CLIENT obelisk subset — same composition as the windowed client (asset/config infra, NO
+    // ResolveHits/CombatRng — Stage A). Gives the headless observer the SkillRegistry + CastTimeline
+    // asset infra the predicted-cast presentation (WS3) schedules from, so the net-test exercises
+    // the real predicted path.
+    add_obelisk_sim_client(&mut app);
+    app.add_obelisk_config_constants_default();
+    app.add_obelisk_effects(&root.join("config/effects"));
+    app.add_obelisk_skills(SkillSource::Dir(root.join("config/skills")));
+    // Client-side RNG is seeded but NEVER drawn (Stage A) — same as the windowed client.
+    app.seed_combat_rng(1);
+
     // Net-driven player layer: attach a body to each materialized NetworkedPlayer + stage input
     // (lightyear drives prediction + remote interpolation). Also traces replicated/materialized
     // players for the late-joiner check.
@@ -81,6 +93,15 @@ pub fn run_headless_client() {
     // dispatched LocalCues clear harmlessly; the trace lines are what the net-test asserts on.
     crate::skills::register_client_event_trace(&mut app);
     crate::skills::register_client_cue_binding(&mut app);
+    // The predicted own-cast presentation (WS3) — headless has no cosmetics reader, so the
+    // predicted LocalCues clear harmlessly, but the `predicted_cast`/`predicted_cue`/`cue_deduped`
+    // traces + the de-dup registry run exactly as in the windowed client, so the net-test
+    // exercises the real predicted path. The cast timelines it schedules from load here the same
+    // way the (equally headless) server loads them.
+    app.init_resource::<crate::cast_assets::PendingCastTimelines>();
+    app.add_systems(Startup, crate::cast_assets::load_cast_timelines);
+    app.add_systems(Update, crate::cast_assets::poll_cast_timelines);
+    crate::skills::register_predicted_sim(&mut app);
     app.add_systems(
         Update,
         (
