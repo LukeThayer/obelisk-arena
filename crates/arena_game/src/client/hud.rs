@@ -18,7 +18,7 @@ use avian3d::prelude::Position;
 
 use crate::client::controller::FollowCamera;
 use crate::client::net::{ChargeState, LocalNetPlayer, SelectedSkill};
-use crate::net::protocol::{NetEventMessage, NetworkedHealth, NetworkedPlayer, ObeliskNetId};
+use crate::net::protocol::{NetworkedHealth, NetworkedPlayer, ObeliskNetId};
 
 /// Plugin: the windowed HUD. Builds the bar widgets at startup, drives them from `NetworkedHealth`,
 /// spawns floating damage + hit flashes from `DamageResolved`, renders the round/score label, and
@@ -338,18 +338,21 @@ struct HitFlash {
     local: bool,
 }
 
-/// Drain the replicated `DamageResolved` events → spawn a floating "-N" UI number anchored over the
-/// target + a hit flash on the target's hp bar. Target located by its replicated `ObeliskNetId`. The
-/// damage value is the SERVER's authoritative number (echoed, never computed here).
+/// Consume the replicated `DamageResolved` events (via the [`crate::skills::ClientNetEvent`]
+/// fan-out — the receiver itself is drained ONCE in `skills::drain_net_events`, footgun 8) →
+/// spawn a floating "-N" UI number anchored over the target + a hit flash on the target's hp bar.
+/// Target located by its replicated `ObeliskNetId`. The damage value is the SERVER's authoritative
+/// number (echoed, never computed here).
 #[allow(clippy::type_complexity)]
 fn spawn_damage_feedback(
-    mut receivers: Query<&mut MessageReceiver<NetEventMessage>>,
+    mut events: MessageReader<crate::skills::ClientNetEvent>,
     targets: Query<(&ObeliskNetId, &Position, Has<LocalNetPlayer>), With<NetworkedPlayer>>,
     mut commands: Commands,
 ) {
     use obelisk_bevy::net::NetEvent;
-    for mut rx in &mut receivers {
-        for NetEventMessage(ev) in rx.receive() {
+    {
+        for crate::skills::ClientNetEvent(ev) in events.read() {
+            let ev = ev.clone();
             let NetEvent::DamageResolved {
                 target,
                 total_damage,

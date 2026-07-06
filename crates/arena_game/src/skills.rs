@@ -117,24 +117,31 @@ fn egress_net_events(
     }
 }
 
-/// Register the CLIENT-side trace of the replicated combat events (guide §5.5/§8). Drains the
-/// replicated `NetEventMessage` stream (CastBegan / DamageResolved / …) → one trace line per event,
-/// so the headless harness can assert BOTH clients receive the server-authoritative combat events
-/// and that the echoed damage matches the server's.
-///
-/// The CUE stream (`CueWireMessage`) is drained separately by [`register_client_cue_binding`] (the
-/// single drain point — `MessageReceiver::receive()` drains, so only one consumer may read it).
-/// Added by both client modes.
+/// The client-local fan-out of the replicated `NetEventMessage` stream. [`drain_net_events`] is
+/// the SINGLE `MessageReceiver::<NetEventMessage>` drain (`receive()` consumes — footgun 8); every
+/// other consumer (trace, HUD damage numbers, predicted-cast fizzle) reads this Bevy message
+/// instead. (Before this fan-out, the HUD and the trace both drained the receiver and silently
+/// STOLE events from each other on the windowed client — randomly missing damage numbers.)
+#[derive(Message, Clone, Debug)]
+pub struct ClientNetEvent(pub obelisk_bevy::net::NetEvent);
+
+/// Register the client-side NetEvent drain + trace + fan-out. Added by BOTH client modes.
 pub fn register_client_event_trace(app: &mut App) {
-    app.add_systems(Update, trace_received_net_events);
+    app.add_message::<ClientNetEvent>();
+    app.add_systems(Update, drain_net_events);
 }
 
-/// Drain the replicated `NetEventMessage` stream → one trace line per event. The damage value here
-/// is the server's authoritative number echoed verbatim (the client never computes it).
-fn trace_received_net_events(mut receivers: Query<&mut MessageReceiver<NetEventMessage>>) {
+/// THE single `NetEventMessage` drain: trace each event + fan it out as [`ClientNetEvent`]. The
+/// damage value here is the server's authoritative number echoed verbatim (the client never
+/// computes it).
+fn drain_net_events(
+    mut receivers: Query<&mut MessageReceiver<NetEventMessage>>,
+    mut out: MessageWriter<ClientNetEvent>,
+) {
     for mut rx in &mut receivers {
         for NetEventMessage(ev) in rx.receive() {
             trace_net_event("client", &ev);
+            out.write(ClientNetEvent(ev));
         }
     }
 }
