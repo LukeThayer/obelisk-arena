@@ -84,8 +84,10 @@ pub const AIM_PITCH_BONE: &str = "chest_joint";
 /// [`AIM_PITCH_BONE`] whose `ChildOf` chain crosses an [`ArenaBody`] but does NOT carry
 /// [`LocalPlayerBody`] (the hidden local body is never leaned), so the marked set is
 /// exactly the visible opponent torsos.
+/// Carries the owning `NetworkedPlayer` entity (resolved once at stamp time) so the per-frame
+/// lean reads THAT player's replicated input pitch — the opponent leans with THEIR aim, not ours.
 #[derive(Component)]
-pub struct SpinePitchBone;
+pub struct SpinePitchBone(pub Entity);
 
 /// Camera yaw (radians, around +Y) accumulated from mouse-X. The player body is
 /// rotated to this yaw when moving so WASD stays camera-relative.
@@ -150,15 +152,27 @@ impl Plugin for ArenaControllerPlugin {
             .add_systems(
                 Update,
                 (
-                    (cursor_grab, accumulate_mouse_look, follow_local_net_player).chain(),
+                    (cursor_grab, accumulate_mouse_look).chain(),
                     stamp_spine_pitch_bones,
                 ),
             )
             .add_systems(
                 PostUpdate,
-                apply_aim_pitch_to_local_spine
-                    .after(bevy::app::AnimationSystems)
-                    .before(bevy::transform::TransformSystems::Propagate),
+                (
+                    // Camera follow AFTER lightyear's frame-interpolation + rollback correction
+                    // have been written back to Transform (avian `PhysicsSystems::Writeback` —
+                    // the PostUpdate chain lightyear_avian configures: FrameInterpolate →
+                    // VisualCorrection → Writeback → Propagate), BEFORE propagation folds it into
+                    // GlobalTransform. In Update the camera read a frame-stale, non-interpolated
+                    // Transform → micro-stutter when strafing (design P5). Mouse yaw/pitch stay
+                    // resource-driven (accumulated in Update) so look remains instant.
+                    follow_local_net_player
+                        .after(avian3d::prelude::PhysicsSystems::Writeback)
+                        .before(bevy::transform::TransformSystems::Propagate),
+                    apply_aim_pitch_to_local_spine
+                        .after(bevy::app::AnimationSystems)
+                        .before(bevy::transform::TransformSystems::Propagate),
+                ),
             );
     }
 }
@@ -272,6 +286,7 @@ fn stamp_spine_pitch_bones(
     parents: Query<&ChildOf>,
     body_marker: Query<(), With<ArenaBody>>,
     local_body_marker: Query<(), With<LocalPlayerBody>>,
+    players: Query<(), With<crate::net::protocol::NetworkedPlayer>>,
 ) {
     for (entity, name) in &new_named {
         if name.as_str() != AIM_PITCH_BONE {
@@ -285,16 +300,31 @@ fn stamp_spine_pitch_bones(
         if ancestor_has_local_body(entity, &parents, &local_body_marker) {
             continue;
         }
-        commands.entity(entity).insert(SpinePitchBone);
+        // Resolve the owning NetworkedPlayer root once (the rig hangs under it — present.rs), so
+        // the per-frame lean can read THAT player's replicated input pitch.
+        let mut cur = entity;
+        let owner = loop {
+            if players.contains(cur) {
+                break Some(cur);
+            }
+            match parents.get(cur) {
+                Ok(p) => cur = p.0,
+                Err(_) => break None,
+            }
+        };
+        let Some(owner) = owner else {
+            continue;
+        };
+        commands.entity(entity).insert(SpinePitchBone(owner));
     }
 }
 
 /// After animation has set bone Transforms, apply the aim pitch on top of the
-/// `chest_joint` spine bone so the body leans with the aim. Behaviorally VERBATIM
-/// from `wisp/src/player/controller.rs:219-249` (the spine-pitch system), but the
-/// per-frame `Name` scan + ancestry walk is replaced by the [`SpinePitchBone`] marker
-/// ([`stamp_spine_pitch_bones`] stamps exactly the REMOTE chest bones), and the pitch
-/// source is the [`AimPitch`] resource (mouse-Y) rather than wisp's `Facing.pitch`.
+/// `chest_joint` spine bone so the body leans with the aim. The pitch source is the
+/// OWNING player's replicated `ActionState<ArenaInput>.pitch` (design WS2 put pitch
+/// in the input; rebroadcast delivers the opponent's) — so the opponent leans with
+/// THEIR aim and telegraphs where they're aiming, not with our mouse (the old
+/// placeholder read the local [`AimPitch`] resource).
 ///
 /// Only the REMOTE (opponent) bodies carry [`SpinePitchBone`] — the LOCAL body is
 /// hidden in first-person, so leaning it is moot and it is never marked.
@@ -304,17 +334,20 @@ fn stamp_spine_pitch_bones(
 /// per-frame `GlobalTransform` propagation. Getting this order wrong makes the
 /// lean invisible (Propagate already ran) or jittery (fights the clip).
 pub fn apply_aim_pitch_to_local_spine(
-    aim_pitch: Res<AimPitch>,
-    mut bones: Query<&mut Transform, With<SpinePitchBone>>,
+    mut bones: Query<(&mut Transform, &SpinePitchBone)>,
+    players: Query<
+        &lightyear::prelude::input::native::ActionState<crate::net::input::ArenaInput>,
+    >,
 ) {
-    // Bone-local axes on the gltf-imported Polysplit chest bone: X runs along
-    // the spine (its "up"), so rotating around X twists the torso. Z is the
-    // perpendicular sideways axis we pivot the lean around. Negative sign: pitch
-    // is positive when looking up, but the chest's +Z faces the wrong way for
-    // "lean back" — invert so up-look bends the upper body back, down-look bends
-    // it forward.
-    let pitch_quat = Quat::from_axis_angle(Vec3::Z, -aim_pitch.0);
-    for mut tf in &mut bones {
+    for (mut tf, bone) in &mut bones {
+        let pitch = players.get(bone.0).map(|a| a.0.pitch).unwrap_or(0.0);
+        // Bone-local axes on the gltf-imported Polysplit chest bone: X runs along
+        // the spine (its "up"), so rotating around X twists the torso. Z is the
+        // perpendicular sideways axis we pivot the lean around. Negative sign: pitch
+        // is positive when looking up, but the chest's +Z faces the wrong way for
+        // "lean back" — invert so up-look bends the upper body back, down-look bends
+        // it forward.
+        let pitch_quat = Quat::from_axis_angle(Vec3::Z, -pitch);
         // Post-multiply so the animation's bone rotation is preserved and the
         // aim pitch is added on top in the bone's local frame.
         tf.rotation *= pitch_quat;

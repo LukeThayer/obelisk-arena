@@ -114,7 +114,16 @@ fn spawn_client(mut commands: Commands, target: Res<ConnectTo>) {
             PeerAddr(target.server),
             Link::new(None),
             ReplicationReceiver::default(),
-            PredictionManager::default(),
+            // Explicit (== default) policies, named so the tuning surface is visible: rollback on
+            // confirmed-state mismatch per the protocol's 0.01-epsilon comparators; smooth the
+            // post-rollback visual error exponentially (50% per 200ms; teleport-scale errors are
+            // snapped by `client::harness::snap_large_corrections`). Tune `correction_policy`'s
+            // decay downward if remote-input mispredicts feel too floaty under the conditioner.
+            PredictionManager {
+                rollback_policy: lightyear::prelude::RollbackPolicy::default(),
+                correction_policy: lightyear::prediction::correction::CorrectionPolicy::default(),
+                ..default()
+            },
             // Input-timeline ahead-margin. The sync objective is `server + rtt/2 + jitter_margin -
             // input_delay` (lightyear_sync input.rs::sync_objective); the default 5ms margin leaves
             // the client only ~⅓ tick ahead at LAN/localhost RTT, so input messages for tick T can

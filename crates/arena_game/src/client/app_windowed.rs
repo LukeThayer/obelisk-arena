@@ -165,6 +165,14 @@ pub fn run_windowed_client() {
     app.add_plugins(FrameInterpolationPlugin::<Position>::default());
     app.add_plugins(FrameInterpolationPlugin::<Rotation>::default());
     app.add_observer(add_frame_interpolation_to_predicted);
+    // Teleport snap (design P8): a round-reset moves the body arena-widths in one tick; the
+    // resulting VisualCorrection error would otherwise decay-glide for ~1s. Snap corrections
+    // beyond teleport scale BEFORE lightyear applies/decays them this frame.
+    app.add_systems(
+        PostUpdate,
+        super::harness::snap_large_corrections
+            .before(lightyear::prediction::rollback::RollbackSystems::VisualCorrection),
+    );
     // Trace the replicated NetEvent stream + consume the replicated cues → cosmetics:
     // `register_client_cue_binding` drains CueWireMessage, de-dups the local player's own
     // predicted cue, and feeds survivors to `spawn_cue_cosmetics` via the LocalCue channel. So

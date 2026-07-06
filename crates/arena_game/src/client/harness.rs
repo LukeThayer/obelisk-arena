@@ -10,6 +10,7 @@
 use avian3d::prelude::{Position, Rotation};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+use lightyear::prediction::correction::VisualCorrection;
 use lightyear::prelude::Predicted;
 use lightyear_frame_interpolation::FrameInterpolate;
 use std::path::PathBuf;
@@ -82,6 +83,25 @@ pub(super) fn add_frame_interpolation_to_predicted(
             ..default()
         },
     ));
+}
+
+/// Round-reset teleports produce a huge rollback error that `CorrectionPolicy` would otherwise
+/// GLIDE across the arena over ~1s (design P8). Any correction error beyond this is a teleport,
+/// not a mispredict — snap it (remove the visual correction).
+const CORRECTION_SNAP_DISTANCE: f32 = 2.0;
+
+/// Remove `VisualCorrection` when its error is teleport-sized so resets snap instead of gliding.
+pub(super) fn snap_large_corrections(
+    q: Query<(Entity, &VisualCorrection<Position>), With<Predicted>>,
+    mut commands: Commands,
+) {
+    for (e, corr) in &q {
+        if corr.error.0.length() > CORRECTION_SNAP_DISTANCE {
+            commands
+                .entity(e)
+                .remove::<(VisualCorrection<Position>, VisualCorrection<Rotation>)>();
+        }
+    }
 }
 
 /// Counts rendered frames so the smoke run can exit deterministically.
