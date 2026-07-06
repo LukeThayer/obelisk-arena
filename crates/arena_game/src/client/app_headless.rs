@@ -21,7 +21,7 @@ pub(super) type LocalPlayerFilter = (
     With<crate::net::protocol::NetworkedPlayer>,
     With<net::LocalNetPlayer>,
 );
-/// Query filter for the REMOTE (interpolated, opponent) networked players.
+/// Query filter for the REMOTE (predicted, opponent) networked players.
 pub(super) type RemotePlayerFilter = (
     With<crate::net::protocol::NetworkedPlayer>,
     Without<net::LocalNetPlayer>,

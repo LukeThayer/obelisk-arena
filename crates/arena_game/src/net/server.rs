@@ -22,10 +22,13 @@ use serde_json::json;
 use crate::net::{default_server_addr, ProtocolPlugin, NETCODE_KEY, PROTOCOL_ID, TICK_HZ};
 use crate::trace;
 
-/// Replication send rate (Hz). The per-client `ReplicationSender` ships component updates at this
-/// cadence (every `1000 / REPLICATION_SEND_HZ` ms ⇒ 100ms here); clients interpolate between the
-/// snapshots. Deliberately slower than [`TICK_HZ`] (60) — pose is interpolated, not sent every tick.
-const REPLICATION_SEND_HZ: u32 = 10;
+/// Replication send rate (Hz). The per-client `ReplicationSender` flushes component updates at this
+/// cadence. 30 Hz (33 ms): nothing is interpolated any more (both players are PREDICTED — design
+/// WS1), so this no longer sets a visual delay; it sets (a) how fast a mispredict is detected +
+/// rolled back and (b) the staleness bound on the `NetworkedHealth`/`NetworkedCastState`/
+/// `PlayerCustomization` mirrors. Bandwidth at 2 players is trivial. (lightyear's own examples use
+/// 100 ms — a demo-bandwidth default, not a feel choice.)
+const REPLICATION_SEND_HZ: u32 = 30;
 
 /// Plugin: server-side lightyear net stack — `ServerPlugins` + `ProtocolPlugin` + trace, spawns the
 /// netcode server entity bound to `ServerBind`, and attaches a `ReplicationSender` per client link.

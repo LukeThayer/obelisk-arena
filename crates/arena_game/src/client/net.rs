@@ -471,10 +471,10 @@ fn trace_remote_cast_phase(
     }
 }
 
-/// [H] check support: throttled trace of a REMOTE (Interpolated) player's avian `Position` (the
+/// [H] check support: throttled trace of a REMOTE predicted player's avian `Position` (the
 /// local player is excluded). Lets the headless movement-replication check confirm the OTHER client
-/// observes a moving player's interpolated pose propagate server → this client. Keyed by
-/// `NetworkOwner`, gated on `Changed<Position>` (lightyear interpolation writes Position each frame).
+/// observes a moving player's predicted remote pose (driven by rebroadcast inputs) propagate
+/// server → this client. Keyed by `NetworkOwner`, gated on `Changed<Position>`.
 #[allow(clippy::type_complexity)]
 fn trace_received_remote_pose(
     remotes: Query<
