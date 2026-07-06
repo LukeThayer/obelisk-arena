@@ -24,8 +24,8 @@ use lightyear::prelude::{Controlled, MessageReceiver, MessageSender, Predicted};
 use crate::client::parts::PartSelection;
 use crate::net::input::ArenaInput;
 use crate::net::protocol::{
-    CastChannel, CastRequestMessage, CustomizeBroadcast, CustomizeMessage, NetworkOwner,
-    NetworkedCastState, NetworkedId, NetworkedPlayer, PlayerCustomization,
+    CustomizeBroadcast, CustomizeMessage, NetworkOwner, NetworkedCastState, NetworkedId,
+    NetworkedPlayer, PlayerCustomization, RequestChannel,
 };
 use crate::shared_controller::{apply_arena_movement, apply_arena_yaw};
 use arena_sim::tuning::{PLAYER_CAPSULE_LENGTH, PLAYER_CAPSULE_RADIUS};
@@ -42,17 +42,14 @@ pub struct LocalInput {
     pub yaw: f32,
     pub pitch: f32,
     pub jump: bool,
+    /// Set by the input bridge on a jump PRESS; OR-ed into the next sampled tick then cleared, so
+    /// a sub-tick tap (press+release between FixedPreUpdates) still lands in exactly one tick.
+    pub jump_latch: bool,
 }
 
-/// One-shot request to cast a skill, set by the windowed cast key or the headless `ARENA_AUTOCAST`
-/// hook and consumed by [`send_cast_requests`]. `Some(skill_id)` means "send a cast_request this
-/// frame"; the send system clears it back to `None`. The CLIENT never validates or resolves — it
-/// only requests; the server re-validates + resolves authoritatively (Stage A, guide §5.2).
-#[derive(Resource, Default)]
-pub struct CastIntent(pub Option<String>);
-
-/// The skill the windowed player will cast next (number keys 1/2/3 select it). Default firebolt.
-/// Windowed-only: the headless autocast path sets `CastIntent` directly and never reads this.
+/// The skill the local player will cast next — `buffer_arena_input` maps it to the input's
+/// `skill_slot` each tick. Windowed number keys 1/2/3 select it; the headless autocast sets it
+/// from `ARENA_AUTOCAST_SKILL`. Default firebolt.
 #[derive(Resource)]
 pub struct SelectedSkill(pub String);
 impl Default for SelectedSkill {
@@ -67,32 +64,24 @@ impl Default for SelectedSkill {
 pub use crate::net::{charge_byte_from_frac, charge_mult, MAX_CHARGE_SECS, TAP_CHARGE_BYTE};
 
 /// Per-frame charge-hold state for the local player's cast. Written by `bridge_windowed_cast_hold`
-/// (real keyboard/mouse) and read by `send_cast_requests` + the charge-bar HUD.
+/// (real keyboard/mouse) or the headless autocast latch, and read by `buffer_arena_input` + the
+/// charge-bar HUD.
 ///
-/// Lifecycle per cast:
-///   1. Cast button held → `charging = true`, `secs` accumulates.
-///   2. Button released → `pending_charge` is locked in, `CastIntent` is set, state resets.
-///   3. `send_cast_requests` fires → reads `pending_charge`, sends it on the wire, resets to
-///      the tap default (85) so the next autocast gets normal-strength casts.
-#[derive(Resource)]
+/// Lifecycle per cast (design WS2 — the cast IS the input stream's charging falling edge):
+///   1. Cast button pressed → `charging = true` + `tap_latch = true`; `secs` accumulates.
+///   2. Button released → `charging = false`. `buffer_arena_input` samples `charging || tap_latch`
+///      per tick, so even a sub-tick tap yields ≥1 charging tick followed by a released tick — the
+///      falling EDGE both peers' detectors fire on. The charge byte derives from the held tick
+///      count on BOTH peers (`net::charge_byte_from_hold_ticks`); nothing rides a message.
+#[derive(Resource, Default)]
 pub struct ChargeState {
     /// Accumulated hold time this charge (clamped to [`MAX_CHARGE_SECS`]).
     pub secs: f32,
     /// True while the cast button is held but not yet released.
     pub charging: bool,
-    /// Charge byte locked in at release; consumed (and reset to the tap default
-    /// [`TAP_CHARGE_BYTE`]) by `send_cast_requests`. Initialized to it so autocast paths get ≈1.0×.
-    pub(crate) pending_charge: u8,
-}
-
-impl Default for ChargeState {
-    fn default() -> Self {
-        Self {
-            secs: 0.0,
-            charging: false,
-            pending_charge: TAP_CHARGE_BYTE, // frac=0 → charge_mult(TAP_CHARGE_BYTE) ≈ 1.0×
-        }
-    }
+    /// Set on cast-button PRESS; guarantees the input stream carries ≥1 `charging=true` tick even
+    /// for a sub-tick tap. Cleared by `buffer_arena_input` after it samples a released tick.
+    pub tap_latch: bool,
 }
 
 impl ChargeState {
@@ -102,18 +91,22 @@ impl ChargeState {
     }
 }
 
-/// Emitted by [`send_cast_requests`] the instant a local cast_request goes out, so the client can
-/// play the PREDICTED own-cast cosmetics immediately (zero latency) instead of waiting for the
-/// server's replicated cue (Task 17, guide §6.4). Carries the local caster's stable `ObeliskId`, its
-/// world position, and the aim direction. Consumed by `skills::predicted_local_cast`, which is the
-/// presentation-only predicted half — it spawns the on_cast muzzle + cosmetic projectile, NEVER an
-/// obelisk `Hitbox` and NEVER touching `CombatRng` (the server resolves damage authoritatively).
+/// Emitted by [`local_cast_edge`] the tick the local cast edge fires, so the client can play the
+/// PREDICTED own-cast cosmetics immediately (zero latency) instead of waiting for the server's
+/// replicated cue (design WS3). Carries the local caster's stable `ObeliskId`, its world position,
+/// the aim direction, and the locally-derived charge byte. Consumed by
+/// `skills::predicted_local_cast`, which is the presentation-only predicted half — it spawns the
+/// on_cast muzzle + cosmetic projectile, NEVER an obelisk `Hitbox` and NEVER touching `CombatRng`
+/// (the server resolves damage authoritatively).
 #[derive(Message, Clone, Debug)]
 pub struct PredictedCast {
     pub skill_id: String,
     pub source_id: String,
     pub position: Vec3,
     pub aim_dir: Vec3,
+    /// Charge byte derived from the local hold (same `charge_byte_from_hold_ticks` the server
+    /// uses), threaded into the predicted cues' `ParamSource::Charge` bindings.
+    pub charge: u8,
 }
 
 /// Set true when the local player finishes editing their costume (customizer panel close), so
@@ -142,7 +135,6 @@ pub struct ClientNetPlayerPlugin;
 impl Plugin for ClientNetPlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LocalInput>()
-            .init_resource::<CastIntent>()
             .init_resource::<ChargeState>()
             // The skill the input's `skill_slot` points at. Windowed number-keys set it; headless
             // autocast sets it from ARENA_AUTOCAST_SKILL. `init_resource` is idempotent with the
@@ -160,18 +152,19 @@ impl Plugin for ClientNetPlayerPlugin {
                 FixedPreUpdate,
                 buffer_arena_input.in_set(InputSystems::WriteClientInputs),
             )
-            // The shared force controller, predicted on the local `Predicted` entity (lightyear
-            // re-runs it during rollback). Chained so the body yaws before the movement force.
+            // The shared force controller, predicted on ALL `Predicted` entities (lightyear
+            // re-runs it during rollback; the remote's ActionState comes from rebroadcast inputs).
+            // Chained so the body yaws before the movement force; `local_cast_edge` runs after so
+            // the predicted cast fires the same tick the (already-applied) input released.
             .add_systems(
                 FixedUpdate,
-                (client_apply_yaw, client_apply_movement).chain(),
+                (client_apply_yaw, client_apply_movement, local_cast_edge).chain(),
             )
             .add_systems(
                 Update,
                 (
                     materialize_predicted_players,
                     trace_remote_input_once,
-                    send_cast_requests,
                     send_customization,
                     drain_customize_broadcasts,
                     trace_received_remote_pose,
@@ -186,22 +179,29 @@ impl Plugin for ClientNetPlayerPlugin {
 /// it to that client's authoritative entity) and re-applies it during rollback. Mirrors
 /// `simple_box::buffer_input`. No-op until the `InputMarker<ArenaInput>` entity exists (post-spawn).
 fn buffer_arena_input(
-    input: Res<LocalInput>,
-    charge: Res<ChargeState>,
+    mut input: ResMut<LocalInput>,
+    mut charge: ResMut<ChargeState>,
     selected: Res<SelectedSkill>,
     mut query: Query<&mut ActionState<ArenaInput>, With<InputMarker<ArenaInput>>>,
 ) {
     let Ok(mut action_state) = query.single_mut() else {
         return;
     };
+    let charging = charge.charging || charge.tap_latch;
     action_state.0 = ArenaInput {
         movement: input.movement,
         yaw: input.yaw,
         pitch: input.pitch,
-        jump: input.jump,
-        charging: charge.charging,
+        jump: input.jump || input.jump_latch,
+        charging,
         skill_slot: crate::net::skill_slot_for(&selected.0).unwrap_or(0),
     };
+    input.jump_latch = false;
+    if !charge.charging {
+        // We just sampled the release (or the latch-extended tap tick); the NEXT tick samples
+        // false and produces the falling edge on both peers.
+        charge.tap_latch = false;
+    }
 }
 
 /// Predict the local player's body yaw from its input (avian `Rotation`), `With<Predicted>`.
@@ -306,82 +306,58 @@ fn trace_remote_input_once(
     }
 }
 
-/// Send a `CastRequestMessage` on the reliable `CastChannel` when [`CastIntent`] is set.
-/// `aim_dir` is the camera forward vector built from [`CameraYaw`] + [`AimPitch`] (the projectile
-/// flies where the camera looks, pitch included; it can miss). The SERVER resolves the actual
-/// `CastAim` from the skill's `Acquisition` (the client just supplies the ray). The client NEVER
-/// validates or resolves. Clears the intent after sending (one cast per intent). `Single` sender
-/// (multiple would panic — guide §1.2); no-op until the sender exists + we own a local player.
-///
-/// Reads [`ChargeState::pending_charge`], which is set by `bridge_windowed_cast_hold` on button
-/// release and defaults to 85 (≈1.0×) for autocast paths. Resets `pending_charge` to 85 after
-/// consuming so the next autocast gets normal-strength casts regardless of the previous hold.
+/// FixedUpdate: mirror the server's cast-edge detection on the LOCAL predicted entity's own
+/// per-tick `ActionState<ArenaInput>` (the identical stream lightyear ships), emitting a
+/// [`PredictedCast`] on the falling edge for zero-latency own-cast presentation (design WS3).
+/// The server detects the same edge in the same stream and runs the authoritative cast — the two
+/// stay in lockstep by construction (same data, same state machine).
 #[allow(clippy::type_complexity)]
-fn send_cast_requests(
-    mut intent: ResMut<CastIntent>,
-    mut charge_state: ResMut<ChargeState>,
+fn local_cast_edge(
+    mut prev: Local<(bool, u32, u8)>, // (charging, hold_ticks, latched slot)
     local: Query<
-        (&Position, &crate::net::protocol::ObeliskNetId),
+        (
+            &Position,
+            &crate::net::protocol::ObeliskNetId,
+            &ActionState<ArenaInput>,
+        ),
         (With<NetworkedPlayer>, With<LocalNetPlayer>),
     >,
-    sender: Option<Single<&mut MessageSender<CastRequestMessage>>>,
     mut predicted: MessageWriter<PredictedCast>,
-    yaw: Res<super::controller::CameraYaw>,
-    pitch: Res<super::controller::AimPitch>,
 ) {
-    let Some(skill_id) = intent.0.clone() else {
+    let Ok((pos, obelisk_id, action)) = local.single() else {
         return;
     };
-    let Ok((local_pos, local_obelisk_id)) = local.single() else {
-        return; // no local player yet
-    };
-    let Some(mut sender) = sender else {
-        return; // sender not ready (pre-connect)
-    };
-    let here = local_pos.0;
-
-    // Compute aim direction from the camera look vector (yaw + pitch = first-person forward).
-    // Matches the camera placement in `controller::follow_local_net_player`: the camera rotation
-    // is `Quat::from_axis_angle(Y, yaw) * Quat::from_axis_angle(X, pitch)`, so the forward
-    // vector is that rotation applied to `-Z`. Full 3D: pitch is included so looking up/down
-    // aims the bolt there. The projectile can miss — this is intentional (free aim).
-    let rot = Quat::from_axis_angle(Vec3::Y, yaw.0) * Quat::from_axis_angle(Vec3::X, pitch.0);
-    let aim_dir_vec = (rot * -Vec3::Z).normalize();
-    let aim_dir = [aim_dir_vec.x, aim_dir_vec.y, aim_dir_vec.z];
-
-    // Consume the locked-in charge byte. Autocast paths leave `pending_charge` at the tap default
-    // ([`TAP_CHARGE_BYTE`], ≈1.0×); `bridge_windowed_cast_hold` sets it on release via
-    // `charge_byte_from_frac`.
-    let charge = charge_state.pending_charge;
-    // Reset to tap-default so the next autocast (if any) gets normal-strength, not a stale value.
-    charge_state.pending_charge = TAP_CHARGE_BYTE;
-
-    sender.send::<CastChannel>(CastRequestMessage {
-        skill_id: skill_id.clone(),
-        aim_dir,
-        charge,
-    });
-    crate::trace::event(
-        "cast_request_sent",
-        serde_json::json!({ "skill_id": skill_id, "aim_dir": aim_dir, "charge": charge }),
-    );
-
-    // PREDICTED own-cast feedback (Task 17): fire the local on_cast cosmetics IMMEDIATELY so the
-    // windup + cosmetic projectile start with zero perceptible latency. Presentation-only — the
-    // server still resolves damage authoritatively (its replicated OnCast cue for this same player
-    // is de-duped on this client by `skills::consume_replicated_cues`). NO obelisk Hitbox / RNG.
-    predicted.write(PredictedCast {
-        skill_id: skill_id.clone(),
-        source_id: local_obelisk_id.0.clone(),
-        position: here,
-        aim_dir: Vec3::from_array(aim_dir),
-    });
-
-    intent.0 = None;
+    let a = &action.0;
+    let fired = prev.0 && !a.charging;
+    if a.charging {
+        if !prev.0 {
+            prev.2 = a.skill_slot; // latch selection at press (matches the server's edge machine)
+            prev.1 = 0;
+        }
+        prev.1 = prev.1.saturating_add(1);
+    }
+    if fired {
+        let charge = crate::net::charge_byte_from_hold_ticks(prev.1);
+        if let Some(skill_id) = crate::net::ARENA_SKILLS.get(prev.2 as usize) {
+            crate::trace::event(
+                "cast_edge_sent",
+                serde_json::json!({ "skill_id": skill_id, "charge": charge }),
+            );
+            predicted.write(PredictedCast {
+                skill_id: skill_id.to_string(),
+                source_id: obelisk_id.0.clone(),
+                position: pos.0,
+                aim_dir: crate::net::aim_dir(a.yaw, a.pitch),
+                charge,
+            });
+        }
+        prev.1 = 0;
+    }
+    prev.0 = a.charging;
 }
 
 /// Ship the local player's [`PartSelection`] to the server when [`CustomizeDirty`] is set (debounced
-/// on panel close). The server applies it + broadcasts to all clients (D6). Reliable `CastChannel`.
+/// on panel close). The server applies it + broadcasts to all clients (D6). Reliable `RequestChannel`.
 /// No-op until we own a local player + the sender exists. Mirrors `send_cast_requests`'s shape.
 fn send_customization(
     mut dirty: ResMut<CustomizeDirty>,
@@ -398,7 +374,7 @@ fn send_customization(
     let Some(mut sender) = sender else {
         return; // sender not ready (pre-connect)
     };
-    sender.send::<CastChannel>(CustomizeMessage { parts: *selection });
+    sender.send::<RequestChannel>(CustomizeMessage { parts: *selection });
     dirty.0 = false;
     crate::trace::event("customize_sent", serde_json::json!({}));
 }

@@ -120,27 +120,26 @@ pub fn run_headless_client() {
     app.run();
 }
 
-/// AUTOCAST (`ARENA_AUTOCAST=1`), shared by the windowed and headless clients: set [`net::CastIntent`]
-/// to firebolt on a CADENCE once the local player + an opponent are materialized, so
-/// `net::send_cast_requests` ships a `CastRequestMessage` over the wire (the server re-validates +
-/// resolves — Stage A). This is the headless verification + windowed visual-gate vehicle: it drives a
-/// firebolt cast (predicted own-cast cosmetics + the replicated server cue + the server-authoritative
-/// damage) without a keyboard.
+/// AUTOCAST (`ARENA_AUTOCAST=1`), shared by the windowed and headless clients: pulse the cast
+/// charge latch on a cadence once the local player + an opponent are materialized, so the input
+/// stream carries a press→release edge and BOTH peers' edge detectors fire (server: authoritative
+/// cast via `detect_cast_edges`; client: predicted cosmetics via `local_cast_edge`) — design WS2.
+/// `ARENA_AUTOCAST_SKILL` picks the skill (default firebolt) via [`net::SelectedSkill`];
+/// `ARENA_AUTOCAST_PERIOD` the cadence (default 0.8s, comfortably above firebolt's ~0.6s cast time
+/// so edges don't pile up behind an in-flight cast — the server skips a caster mid-cast).
 ///
 /// Repeating (not one-shot) so an AUTOCAST client drives a FULL best-of-3 match across rounds.
-/// Cadence is `ARENA_AUTOCAST_PERIOD` seconds (default 0.8) — comfortably above firebolt's ~0.6s cast
-/// time so requests don't pile up behind an in-flight cast (the server skips a caster mid-cast). The
-/// server is authoritative for whether a given cast lands; firing continuously is safe — a stray cast
-/// during a countdown/round-over window is harmless (the per-round reset heals both players on entry
-/// to Active, and only deaths during Active count).
+/// The server is authoritative for whether a given cast lands; firing continuously is safe — a
+/// stray cast during a countdown/round-over window is harmless.
 pub(super) fn autocast(
     time: Res<Time>,
     mut accum: Local<f32>,
-    mut intent: ResMut<net::CastIntent>,
+    mut charge: ResMut<net::ChargeState>,
+    mut selected: ResMut<net::SelectedSkill>,
     local: Query<(), LocalPlayerFilter>,
     remotes: Query<(), RemotePlayerFilter>,
 ) {
-    // Need our own player + an opponent before the request carries a useful target hint.
+    // Need our own player + an opponent before the cast has a useful target.
     if local.iter().next().is_none() || remotes.iter().next().is_none() {
         return;
     }
@@ -151,11 +150,10 @@ pub(super) fn autocast(
     *accum += time.delta_secs();
     if *accum >= period {
         *accum = 0.0;
-        if intent.0.is_none() {
-            intent.0 = Some(
-                std::env::var("ARENA_AUTOCAST_SKILL").unwrap_or_else(|_| "firebolt".to_string()),
-            );
+        if let Ok(skill) = std::env::var("ARENA_AUTOCAST_SKILL") {
+            selected.0 = skill;
         }
+        charge.tap_latch = true; // one charging tick, then release → edge on both peers
     }
 }
 

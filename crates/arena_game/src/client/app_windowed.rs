@@ -231,9 +231,7 @@ fn select_skill(keys: Res<ButtonInput<KeyCode>>, mut selected: ResMut<net::Selec
 fn bridge_windowed_cast_hold(
     mouse: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
-    mut intent: ResMut<net::CastIntent>,
     mut charge: ResMut<net::ChargeState>,
-    selected: Res<net::SelectedSkill>,
     customization: Option<Res<customization::CustomizationOpen>>,
 ) {
     // While the customizer is open, LMB clicks the panel buttons — don't charge/cast.
@@ -243,22 +241,20 @@ fn bridge_windowed_cast_hold(
         return;
     }
     // Cast is LEFT-MOUSE only: Space is reserved for jumping (see `bridge_windowed_input_to_local_input`).
+    // The cast itself is the input stream's charging FALLING EDGE (design WS2): press sets
+    // `charging` + the tap latch (so a sub-tick tap still occupies one input tick); release drops
+    // `charging`, and both peers' edge detectors fire — no message, no locked-in charge byte (the
+    // byte derives from the held tick count on both peers).
     let held = mouse.pressed(MouseButton::Left);
-    let just_released = mouse.just_released(MouseButton::Left);
 
     if held {
+        if mouse.just_pressed(MouseButton::Left) {
+            charge.tap_latch = true;
+        }
         charge.secs = (charge.secs + time.delta_secs()).min(net::MAX_CHARGE_SECS);
         charge.charging = true;
     } else {
-        if just_released && charge.charging {
-            // Lock in the charge and emit the cast intent on release.
-            let frac = charge.frac();
-            charge.pending_charge = net::charge_byte_from_frac(frac);
-            if intent.0.is_none() {
-                intent.0 = Some(selected.0.clone());
-            }
-        }
-        // Reset regardless — keeps state consistent when button is not held.
+        // Reset — the falling edge in the sampled input stream carries the cast.
         charge.secs = 0.0;
         charge.charging = false;
     }

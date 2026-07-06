@@ -93,8 +93,8 @@ impl Plugin for ProtocolPlugin {
             .add_should_rollback(angular_velocity_should_rollback);
 
         // --- Channels ---
-        // cast_request: never drop. Reliable.
-        app.add_channel::<CastChannel>(ChannelSettings {
+        // Rare reliable client→server requests (customization). Casts ride the input stream (WS2).
+        app.add_channel::<RequestChannel>(ChannelSettings {
             mode: ChannelMode::UnorderedReliable(ReliableSettings::default()),
             send_frequency: Duration::default(),
             priority: 1.0,
@@ -110,8 +110,6 @@ impl Plugin for ProtocolPlugin {
         .add_direction(NetworkDirection::ServerToClient);
 
         // --- Messages ---
-        app.register_message::<CastRequestMessage>()
-            .add_direction(NetworkDirection::ClientToServer); // cast, on CastChannel
         app.register_message::<NetEventMessage>()
             .add_direction(NetworkDirection::ServerToClient); // wraps obelisk NetEvent (§5)
         app.register_message::<CueWireMessage>()
@@ -119,7 +117,7 @@ impl Plugin for ProtocolPlugin {
         app.register_message::<RoundStateMessage>()
             .add_direction(NetworkDirection::ServerToClient); // best-of-3 round flow (§7)
 
-        // Live appearance change (D6): client→server request (reused reliable CastChannel) + the
+        // Live appearance change (D6): client→server request (reliable RequestChannel) + the
         // server→client broadcast (reused reliable EventChannel). Mirrors the cue broadcast pattern
         // so a live edit propagates reliably (component UPDATES are unreliable in this setup).
         app.register_message::<CustomizeMessage>()
@@ -133,32 +131,14 @@ impl Plugin for ProtocolPlugin {
 // Channels (unit-struct tags; `Channel` is blanket-impl'd for any Send + Sync + 'static).
 // ---------------------------------------------------------------------------------------------
 
-/// Cast requests, client→server, reliable (a dropped cast is unacceptable).
-pub struct CastChannel;
+/// Rare reliable client→server requests (customization). Casts ride the input stream (WS2).
+pub struct RequestChannel;
 /// Combat events + cues + round state, server→client, reliable.
 pub struct EventChannel;
 
 // ---------------------------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------------------------
-
-/// Cast request — replaces M1's direct `cast_skill_at` on the local entity (spec §5.2). The client
-/// sends its camera-forward `aim_dir` + charge; the SERVER resolves a candidate `CastAim` from the
-/// skill's authored `Acquisition` (hitscan-entity / ground-point raycast, else direction) and
-/// obelisk's `validate_casts` gates mana/cooldown/already-casting + does the authoritative
-/// range/filter/fallback.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CastRequestMessage {
-    pub skill_id: String,
-    /// Camera-forward unit vector in world space (yaw + pitch applied). The server fires the
-    /// projectile along this direction; the client uses it for predicted own-cast cosmetics.
-    pub aim_dir: [f32; 3],
-    /// Hold-to-charge level (0–255). Mapped from hold duration via the formula
-    /// `85 + frac * 170` where `frac ∈ [0, 1]`: 85 ≈ instant tap (≈1.0× via `charge_mult`),
-    /// 255 = max hold (2.0×). The server passes this to `cast_skill_dir_charged`, scaling both
-    /// damage and projectile speed. Formula: `charge_mult(Some(c)) = 0.5 + (c/255) * 1.5`.
-    pub charge: u8,
-}
 
 /// Combat events on the wire — wraps obelisk's `NetEvent` so the server broadcasts it verbatim.
 /// obelisk's `NetEvent` already uses STABLE STRING IDS (not `Entity`) — wire-ready.
@@ -170,7 +150,7 @@ pub struct NetEventMessage(pub obelisk_bevy::net::NetEvent);
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CueWireMessage(pub crate::net::cue::CueMessage);
 
-/// Live appearance change, client→server, reliable (`CastChannel`). Sent when the local player
+/// Live appearance change, client→server, reliable (`RequestChannel`). Sent when the local player
 /// finishes editing their costume (panel close). The server applies it to that player's
 /// `PlayerCustomization` and re-broadcasts via [`CustomizeBroadcast`] (D6).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
