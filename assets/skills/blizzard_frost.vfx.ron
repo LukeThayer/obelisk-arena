@@ -1,0 +1,141 @@
+// Blizzard's frost VFX — a bright HDR cyan burst that reads as ice/frost. Bound by name
+// ("blizzard_frost") from assets/skills/*.vfx.ron (init_vfx_library scans this dir).
+//
+// Used for BOTH blizzard cues (blizzard.cast.ron):
+//   - on_cast   (attach World, at the caster): immediate in-view "I cast a storm" feedback — the
+//     old blizzard had NO on_cast cue, so a first-person caster saw nothing at cast time.
+//   - emit_shard (attach World, at the storm ~8u up): the churning storm, replacing the built-in
+//     `Snow` preset whose 0.03-size / dim-LDR / +5u-local-offset particles are invisible against
+//     the arena's light ground. Same additive-HDR bloom recipe firebolt uses, recoloured cyan.
+//
+// Structure + modules mirror firebolt_trail.vfx.ron (a proven-in-game recipe): a bright Local core
+// + a World spray that lingers, so the effect reads whether it's a burst (on_cast) or a repeated
+// emit (emit_shard). Additive HDR colours (>1.0) bloom on the HDR camera target.
+(
+    emitters: [
+        // Bright cyan-white core — the flash of frost forming. Local sim space so it stays a tight
+        // burst at the spawn point; additive HDR so it blooms.
+        (
+            name: "Frost Core",
+            enabled: true,
+            capacity: 96,
+            spawn: Rate(80.0),
+            init: [
+                SetLifetime(Random(0.15, 0.35)),
+                SetPosition(Sphere(
+                    center: (0.0, 0.0, 0.0),
+                    radius: Random(0.0, 0.1),
+                )),
+                SetVelocity(Random( speed: Random(1.0, 3.0) )),
+            ],
+            update: [
+                Drag(2.5),
+                ColorByLife((
+                    keys: [
+                        ( time: 0.0, color: ( red: 1.2, green: 3.6, blue: 6.0, alpha: 1.0 ) ),
+                        ( time: 0.5, color: ( red: 0.6, green: 2.2, blue: 4.2, alpha: 0.9 ) ),
+                        ( time: 1.0, color: ( red: 0.2, green: 0.9, blue: 2.4, alpha: 0.0 ) ),
+                    ],
+                )),
+                SizeByLife((
+                    keys: [
+                        ( time: 0.0, value: 0.50, interp: EaseOut ),
+                        ( time: 0.5, value: 0.38, interp: Linear ),
+                        ( time: 1.0, value: 0.14, interp: EaseIn ),
+                    ],
+                )),
+            ],
+            render: Billboard((
+                orient: FaceCamera,
+                texture: Some("textures/particles/light_01.png"),
+                flipbook: None,
+                soft_particle_distance: 0.0,
+            )),
+            sim_space: Local,
+            alpha_mode: Additive,
+        ),
+        // Falling ice shards — bright cyan sparks pulled DOWN by gravity, so the effect reads as
+        // ice raining (World sim space so they streak away from the spawn as they fall).
+        (
+            name: "Ice Shards",
+            enabled: true,
+            capacity: 160,
+            spawn: Rate(60.0),
+            init: [
+                SetLifetime(Random(0.3, 0.7)),
+                SetPosition(Sphere(
+                    center: (0.0, 0.0, 0.0),
+                    radius: Random(0.0, 0.2),
+                )),
+                SetVelocity(Random( speed: Random(0.6, 1.8) )),
+            ],
+            update: [
+                Gravity((0.0, -6.0, 0.0)),
+                Drag(0.4),
+                ColorByLife((
+                    keys: [
+                        ( time: 0.0, color: ( red: 1.6, green: 3.2, blue: 4.5, alpha: 1.0 ) ),
+                        ( time: 1.0, color: ( red: 0.4, green: 1.0, blue: 2.2, alpha: 0.0 ) ),
+                    ],
+                )),
+                SizeByLife((
+                    keys: [
+                        ( time: 0.0, value: 0.17, interp: Linear ),
+                        ( time: 1.0, value: 0.03, interp: EaseIn ),
+                    ],
+                )),
+            ],
+            render: Billboard((
+                orient: FaceCamera,
+                texture: Some("textures/particles/spark_04.png"),
+                flipbook: None,
+                soft_particle_distance: 0.0,
+            )),
+            sim_space: World,
+            alpha_mode: Additive,
+        ),
+        // Soft frost mist — a pale-blue cloud that lingers and grows, blended (not additive) so it
+        // reads as a solid puff of cold air rather than a glow.
+        (
+            name: "Frost Mist",
+            enabled: true,
+            capacity: 80,
+            spawn: Rate(28.0),
+            init: [
+                SetLifetime(Random(0.5, 1.0)),
+                SetPosition(Sphere(
+                    center: (0.0, 0.0, 0.0),
+                    radius: Random(0.1, 0.45),
+                )),
+                SetVelocity(Random( speed: Random(0.1, 0.5) )),
+            ],
+            update: [
+                Drag(2.0),
+                ColorByLife((
+                    keys: [
+                        ( time: 0.0, color: ( red: 0.5, green: 0.8, blue: 1.0, alpha: 0.0 ) ),
+                        ( time: 0.3, color: ( red: 0.6, green: 0.85, blue: 1.0, alpha: 0.5 ) ),
+                        ( time: 1.0, color: ( red: 0.7, green: 0.9, blue: 1.0, alpha: 0.0 ) ),
+                    ],
+                )),
+                SizeByLife((
+                    keys: [
+                        ( time: 0.0, value: 0.40, interp: EaseOut ),
+                        ( time: 1.0, value: 0.90, interp: Linear ),
+                    ],
+                )),
+            ],
+            render: Billboard((
+                orient: FaceCamera,
+                texture: Some("textures/particles/smoke_04.png"),
+                flipbook: None,
+                soft_particle_distance: 0.0,
+            )),
+            sim_space: World,
+            alpha_mode: Blend,
+        ),
+    ],
+    params: [],
+    duration: 0.0,
+    looping: true,
+)

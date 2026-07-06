@@ -16,9 +16,18 @@
       hit_filter: Enemies, hit_mode: OncePerTarget ),
   ],
   acquisition: GroundPoint( range: 30.0, fallback: Then(SelfPoint) ),
-  vfx_cues: { "emit_shard": "emit_shard", "on_hit": "on_hit" },
+  vfx_cues: { "on_cast": "on_cast", "emit_shard": "emit_shard", "on_hit": "on_hit" },
   cues: {
-    "emit_shard": ( effect: Some("Snow"), attach: World, anim: None, params: [] ),
-    "on_hit": ( effect: Some("Sparks"), attach: World, anim: None, params: [] ),
+    // on_cast fires during Windup at the CASTER (raised to muzzle height) — immediate first-person
+    // feedback that the storm is going off. The old blizzard had no on_cast cue, so the caster saw
+    // nothing at cast time (the storm is 8u overhead, out of a horizontal view).
+    "on_cast": ( effect: Some("blizzard_frost"), attach: World, anim: None,
+      params: [ ( param: "scale", source: Charge ) ] ),
+    // emit_shard fires per shard-spawn at the storm. `blizzard_frost` (bright additive-HDR cyan)
+    // replaces the built-in `Snow` preset, whose tiny/dim/+5u-offset particles never read in-game.
+    "emit_shard": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [] ),
+    // on_hit fires at each shard's ground/target impact — the spot the caster is LOOKING at (you
+    // aim GroundPoint by looking down), so this is the most reliably in-view blizzard feedback.
+    "on_hit": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [] ),
   },
 )

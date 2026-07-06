@@ -637,4 +637,36 @@ mod cue_binding_resolution_tests {
         apply_modulated_param(&mut system, "nonsense", 1.0);
         assert_eq!(system, before);
     }
+
+    /// Every authored `assets/skills/*.vfx.ron` must parse as a `VfxSystem`. At runtime a parse
+    /// failure only warns+skips (`load_vfx_presets_from_dir`), silently leaving the cue that
+    /// references the preset invisible — exactly the failure mode that made blizzard's storm render
+    /// nothing. This pins authoring typos at test time instead. (Covers firebolt_trail +
+    /// blizzard_frost.)
+    #[test]
+    fn authored_vfx_presets_all_parse() {
+        let dir = crate::arena_root().join("assets/skills");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("assets/skills readable").flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.ends_with(".vfx.ron") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("vfx file readable");
+            let parsed = ron::from_str::<VfxSystem>(&src);
+            assert!(
+                parsed.is_ok(),
+                "{name} failed to parse as VfxSystem: {:?}",
+                parsed.err()
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 2,
+            "expected at least firebolt_trail + blizzard_frost, found {checked}"
+        );
+    }
 }
