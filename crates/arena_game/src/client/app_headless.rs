@@ -268,8 +268,13 @@ fn trace_replicated_round_state(
 /// fires along the same axis, keeping a moving caster on the firing line). The resulting avian
 /// `Position` change is what the movement-replication check asserts on (server pose changes + the
 /// OTHER client observes the interpolated pose move).
-fn automove_input(mut input: ResMut<net::LocalInput>, yaw: Res<controller::CameraYaw>) {
+fn automove_input(
+    mut input: ResMut<net::LocalInput>,
+    yaw: Res<controller::CameraYaw>,
+    pitch: Res<controller::AimPitch>,
+) {
     input.movement = Vec2::new(0.0, 1.0);
     input.yaw = yaw.0;
+    input.pitch = pitch.0;
     input.jump = false;
 }

@@ -40,6 +40,7 @@ use arena_sim::tuning::{PLAYER_CAPSULE_LENGTH, PLAYER_CAPSULE_RADIUS};
 pub struct LocalInput {
     pub movement: Vec2,
     pub yaw: f32,
+    pub pitch: f32,
     pub jump: bool,
 }
 
@@ -60,31 +61,10 @@ impl Default for SelectedSkill {
     }
 }
 
-/// Maximum hold time for the charge mechanic. A full hold of this duration maps to charge=255
-/// (2.0× multiplier); an instant tap maps to charge=[`TAP_CHARGE_BYTE`] (≈1.0×).
-pub const MAX_CHARGE_SECS: f32 = 1.5;
-
-/// Charge byte for an instant tap (no hold). The value 85 is ≈ `0.333 * 255` — one-third up the
-/// 0–255 charge range — which the server's [`charge_mult`] maps to ≈1.0×. A full hold sends 255
-/// (→2.0×). Co-located with [`MAX_CHARGE_SECS`] so the tap/full charge feel is tuned in one place.
-pub const TAP_CHARGE_BYTE: u8 = 85;
-
-/// Map a hold fraction `[0, 1]` to a charge byte: tap (`frac = 0`) → [`TAP_CHARGE_BYTE`], full hold
-/// (`frac = 1`) → 255, linear between. The inverse-direction partner of [`charge_mult`].
-pub fn charge_byte_from_frac(frac: f32) -> u8 {
-    let span = 255.0 - TAP_CHARGE_BYTE as f32; // 170.0
-    (TAP_CHARGE_BYTE as f32 + frac * span)
-        .round()
-        .clamp(0.0, 255.0) as u8
-}
-
-/// The server's charge → multiplier mapping, mirrored here for the unit test + as the single
-/// documented reference: `charge_mult(c) = 0.5 + (c / 255) * 1.5`, so [`TAP_CHARGE_BYTE`] (85) ≈ 1.0×
-/// and 255 = 2.0×. Obelisk's `cast_skill_dir_charged` owns the AUTHORITATIVE scaling on the damage
-/// path; this is the reference mapping, not a second source of truth.
-pub fn charge_mult(byte: u8) -> f32 {
-    0.5 + (byte as f32 / 255.0) * 1.5
-}
+/// Charge tuning + helpers now live in `crate::net` (the shared-tuning home — the SERVER derives
+/// the charge byte from held input ticks too, design WS2); re-exported here so existing client
+/// call sites + tests resolve unchanged.
+pub use crate::net::{charge_byte_from_frac, charge_mult, MAX_CHARGE_SECS, TAP_CHARGE_BYTE};
 
 /// Per-frame charge-hold state for the local player's cast. Written by `bridge_windowed_cast_hold`
 /// (real keyboard/mouse) and read by `send_cast_requests` + the charge-bar HUD.
@@ -164,6 +144,10 @@ impl Plugin for ClientNetPlayerPlugin {
         app.init_resource::<LocalInput>()
             .init_resource::<CastIntent>()
             .init_resource::<ChargeState>()
+            // The skill the input's `skill_slot` points at. Windowed number-keys set it; headless
+            // autocast sets it from ARENA_AUTOCAST_SKILL. `init_resource` is idempotent with the
+            // windowed PartsPlugin init.
+            .init_resource::<SelectedSkill>()
             .init_resource::<CustomizeDirty>()
             // The LOCAL selection the customizer edits + `send_customization` reads. `PartsPlugin`
             // also inits it (windowed); init here too so the headless client + the send path have
@@ -204,6 +188,7 @@ impl Plugin for ClientNetPlayerPlugin {
 fn buffer_arena_input(
     input: Res<LocalInput>,
     charge: Res<ChargeState>,
+    selected: Res<SelectedSkill>,
     mut query: Query<&mut ActionState<ArenaInput>, With<InputMarker<ArenaInput>>>,
 ) {
     let Ok(mut action_state) = query.single_mut() else {
@@ -212,8 +197,10 @@ fn buffer_arena_input(
     action_state.0 = ArenaInput {
         movement: input.movement,
         yaw: input.yaw,
+        pitch: input.pitch,
         jump: input.jump,
         charging: charge.charging,
+        skill_slot: crate::net::skill_slot_for(&selected.0).unwrap_or(0),
     };
 }
 

@@ -22,7 +22,12 @@ use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// Per-tick native input. Camera-relative movement + body yaw + jump + a charge telegraph.
+/// Per-tick native input. Camera-relative movement + body yaw + aim pitch + jump + the cast-charge
+/// telegraph + the selected skill slot. CAST intent is carried IN this stream (design WS2): a cast
+/// is the falling edge of `charging` (true→false across consecutive ticks); the server counts the
+/// held ticks for the charge byte and reconstructs the aim ray from `yaw`+`pitch` — no cast
+/// message, no client-supplied charge. Missing ticks fill as SameAsPrecedent server-side, so a
+/// lost release packet DELAYS a cast 1-2 ticks, never loses it.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default, Reflect)]
 pub struct ArenaInput {
     /// Camera-relative WASD axis: x = strafe (+right), y = forward.
@@ -30,11 +35,17 @@ pub struct ArenaInput {
     /// Camera/body yaw (radians). The controller faces the body to this and builds the
     /// camera-relative movement frame from it.
     pub yaw: f32,
+    /// Aim pitch (radians, +up). With `yaw` it defines the cast ray (`arena_game::net::aim_dir`)
+    /// and drives the opponent-side spine lean.
+    pub pitch: f32,
     /// True while the jump button (Space) is held; the controller jumps on any grounded tick.
     pub jump: bool,
-    /// True while the local player is holding the cast button to charge (pre-release). Drives the
-    /// opponent-facing windup telegraph in `server::mirrors::sync_cast_state`.
+    /// True while the cast button is held to charge. Falling edge = cast (server-side edge
+    /// detection); also drives the opponent-facing windup telegraph in
+    /// `server::mirrors::sync_cast_state`.
     pub charging: bool,
+    /// Index into `arena_game::net::ARENA_SKILLS` of the currently-selected skill.
+    pub skill_slot: u8,
 }
 
 impl MapEntities for ArenaInput {

@@ -56,15 +56,67 @@ pub use arena_sim::tuning::{
 /// Default UDP port the server listens on. CLI flags can override.
 pub const DEFAULT_PORT: u16 = 5000;
 
-/// Fixed tick duration. 60 Hz — must match on both peers or the sims desync. The (slower) 10 Hz
+/// Fixed tick duration. 60 Hz — must match on both peers or the sims desync. The (slower) 30 Hz
 /// replication send rate lives next to its use site as `server::REPLICATION_SEND_HZ`; the rollback
 /// divergence threshold as `protocol::ROLLBACK_EPSILON`.
 pub const TICK_HZ: u32 = 60;
 
-/// Netcode protocol id. Bumped whenever the wire format changes incompatibly. Bumped to 1 for the
-/// lightyear-native prediction wire (native input + avian Position/Rotation replication, dropping
-/// the `PlayerInputMessage`/`NetworkedPosition` streams).
-pub const PROTOCOL_ID: u64 = 1;
+// --- skills / casting (design WS2: cast intent rides the input stream) ---
+
+/// The grantable skill roster, in SLOT ORDER. The single source of truth for: the server grant
+/// loop (`server/spawn.rs`), the windowed number-key select (`skill_for_key`), and the
+/// `ArenaInput.skill_slot` ↔ skill-id mapping on both peers. Index == wire slot.
+pub const ARENA_SKILLS: [&str; 3] = ["firebolt", "chain_lightning", "blizzard"];
+
+/// Slot index for a skill id (positional in [`ARENA_SKILLS`]); `None` for unknown ids.
+pub fn skill_slot_for(id: &str) -> Option<u8> {
+    ARENA_SKILLS.iter().position(|s| *s == id).map(|i| i as u8)
+}
+
+/// The camera-forward aim ray both peers reconstruct from the input's `yaw`+`pitch`:
+/// `Quat(Y,yaw) * Quat(X,pitch) * -Z`, normalized. Matches the windowed camera
+/// (`controller::follow_local_net_player`) exactly, so the bolt flies where the crosshair looks.
+pub fn aim_dir(yaw: f32, pitch: f32) -> bevy::prelude::Vec3 {
+    use bevy::prelude::{Quat, Vec3};
+    let rot = Quat::from_axis_angle(Vec3::Y, yaw) * Quat::from_axis_angle(Vec3::X, pitch);
+    (rot * -Vec3::Z).normalize()
+}
+
+// --- charge (moved here from `client::net` — the server now computes the byte too) ---
+
+/// Maximum hold time for the charge mechanic. A full hold of this duration maps to charge=255
+/// (2.0× multiplier); an instant tap maps to [`TAP_CHARGE_BYTE`] (≈1.0×).
+pub const MAX_CHARGE_SECS: f32 = 1.5;
+
+/// Charge byte for an instant tap: ≈ one-third up the 0-255 range, which `charge_mult` maps to
+/// ≈1.0×. A full hold sends 255 (→2.0×).
+pub const TAP_CHARGE_BYTE: u8 = 85;
+
+/// Map a hold fraction `[0, 1]` to a charge byte: tap → [`TAP_CHARGE_BYTE`], full hold → 255.
+pub fn charge_byte_from_frac(frac: f32) -> u8 {
+    let span = 255.0 - TAP_CHARGE_BYTE as f32;
+    (TAP_CHARGE_BYTE as f32 + frac * span)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+/// The charge → damage/speed multiplier mapping (reference; obelisk owns the authoritative
+/// scaling): `0.5 + (c/255) * 1.5`, so tap ≈ 1.0× and 255 = 2.0×.
+pub fn charge_mult(byte: u8) -> f32 {
+    0.5 + (byte as f32 / 255.0) * 1.5
+}
+
+/// Server-side charge derivation (design WS2): held-tick count → charge byte, via the same
+/// `charge_byte_from_frac` the client HUD uses on its local hold time — both peers derive the
+/// identical value from the identical input stream. Saturates at MAX_CHARGE_SECS worth of ticks.
+pub fn charge_byte_from_hold_ticks(hold_ticks: u32) -> u8 {
+    let full = MAX_CHARGE_SECS * TICK_HZ as f32;
+    charge_byte_from_frac(((hold_ticks as f32 - 1.0) / (full - 1.0)).clamp(0.0, 1.0))
+}
+
+/// Netcode protocol id. Bumped whenever the wire format changes incompatibly. Bumped to 2 for the
+/// input-carried cast wire (ArenaInput v2 with pitch/skill_slot; `CastRequestMessage` removed).
+pub const PROTOCOL_ID: u64 = 2;
 
 /// Shared netcode private key. Dev/test only — a real deployment holds the key server-side and
 /// hands clients a signed `ConnectToken` from a backend auth service.
@@ -159,5 +211,37 @@ mod tests {
     fn jump_apex_matches_documented_height() {
         let apex = JUMP_SPEED * JUMP_SPEED / (2.0 * GRAVITY);
         assert!((apex - 1.225).abs() < 1e-4, "apex={apex}");
+    }
+
+    /// `aim_dir` must equal the camera math the windowed client uses:
+    /// `Quat(Y,yaw) * Quat(X,pitch) * -Z`, normalized.
+    #[test]
+    fn aim_dir_matches_camera_forward() {
+        use bevy::prelude::{Quat, Vec3};
+        for (yaw, pitch) in [(0.0f32, 0.0f32), (-1.5707963, 0.2), (2.5, -0.7)] {
+            let rot = Quat::from_axis_angle(Vec3::Y, yaw) * Quat::from_axis_angle(Vec3::X, pitch);
+            let expect = (rot * -Vec3::Z).normalize();
+            assert!((aim_dir(yaw, pitch) - expect).length() < 1e-5);
+        }
+    }
+
+    /// Slot mapping is the positional index into ARENA_SKILLS; unknown ids have no slot.
+    #[test]
+    fn skill_slots_are_positional() {
+        assert_eq!(skill_slot_for("firebolt"), Some(0));
+        assert_eq!(skill_slot_for("chain_lightning"), Some(1));
+        assert_eq!(skill_slot_for("blizzard"), Some(2));
+        assert_eq!(skill_slot_for("nope"), None);
+        assert_eq!(ARENA_SKILLS.len(), 3);
+    }
+
+    /// Hold-tick charge anchors: an instant tap (1 tick) ≈ TAP_CHARGE_BYTE (≈1.0×); holding
+    /// MAX_CHARGE_SECS worth of ticks (or longer) = 255 (2.0×).
+    #[test]
+    fn charge_from_hold_ticks_anchors() {
+        let full = (MAX_CHARGE_SECS * TICK_HZ as f32).ceil() as u32;
+        assert!(charge_byte_from_hold_ticks(1).abs_diff(TAP_CHARGE_BYTE) <= 2);
+        assert_eq!(charge_byte_from_hold_ticks(full), 255);
+        assert_eq!(charge_byte_from_hold_ticks(full * 3), 255);
     }
 }

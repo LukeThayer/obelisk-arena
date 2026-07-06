@@ -196,12 +196,13 @@ pub fn run_windowed_client() {
 
 /// Map a number key to a grantable skill id (windowed skill-select). `None` for other keys.
 fn skill_for_key(key: KeyCode) -> Option<&'static str> {
-    match key {
-        KeyCode::Digit1 => Some("firebolt"),
-        KeyCode::Digit2 => Some("chain_lightning"),
-        KeyCode::Digit3 => Some("blizzard"),
-        _ => None,
-    }
+    let idx = match key {
+        KeyCode::Digit1 => 0,
+        KeyCode::Digit2 => 1,
+        KeyCode::Digit3 => 2,
+        _ => return None,
+    };
+    crate::net::ARENA_SKILLS.get(idx).copied()
 }
 
 /// Windowed skill-select: number keys 1/2/3 choose which granted skill `bridge_windowed_cast_hold`
@@ -288,6 +289,7 @@ fn release_keys_on_focus_loss(
 fn bridge_windowed_input_to_local_input(
     keys: Res<ButtonInput<KeyCode>>,
     yaw: Res<controller::CameraYaw>,
+    pitch: Res<controller::AimPitch>,
     mut local_input: ResMut<net::LocalInput>,
     customization: Option<Res<customization::CustomizationOpen>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
@@ -323,6 +325,7 @@ fn bridge_windowed_input_to_local_input(
     }
     local_input.movement = movement;
     local_input.yaw = yaw.0;
+    local_input.pitch = pitch.0;
     // SPACE jumps: the server controller (and the local prediction) apply manual gravity + a ground
     // clamp, so a grounded player holding Space launches up (JUMP_SPEED) and falls back to GROUND_Y.
     local_input.jump = keys.pressed(KeyCode::Space);

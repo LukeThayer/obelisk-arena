@@ -185,9 +185,9 @@ pub(crate) fn spawn_player_on_connect(
                 lifetime: Default::default(),
             },
         ))
-        .grant_skill("firebolt")
-        .grant_skill("chain_lightning")
-        .grant_skill("blizzard");
+        .grant_skill(crate::net::ARENA_SKILLS[0])
+        .grant_skill(crate::net::ARENA_SKILLS[1])
+        .grant_skill(crate::net::ARENA_SKILLS[2]);
 
     client_map.0.insert(client_id, player);
 }
