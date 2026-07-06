@@ -23,6 +23,12 @@ pub(super) fn setup_scene(
 ) {
     commands.spawn((
         Camera3d::default(),
+        // HDR is REQUIRED for bevy_vfx's billboard render pipeline: its node renders only into an
+        // `Rgba16Float` (HDR) view target and silently bails on an LDR one
+        // (`bevy_vfx/src/render/billboard.rs`: `main_texture_format() != TEXTURE_FORMAT_HDR`).
+        // Without this, every cue effect spawns + simulates but never draws. `Hdr` is a marker
+        // component in Bevy 0.18 (not a `Camera` field), matching how the editor enables it.
+        bevy::render::view::Hdr,
         FollowCamera,
         Transform::from_xyz(0.0, 2.0, 4.0).looking_at(Vec3::new(0.0, 1.5, 0.0), Vec3::Y),
     ));
