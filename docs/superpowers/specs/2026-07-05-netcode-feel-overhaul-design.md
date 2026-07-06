@@ -2,7 +2,7 @@
 
 **Goal:** make the 1v1 duel feel responsive and smooth at real internet latency (target: excellent at 40–80 ms RTT, playable at 120 ms + jitter), using lightyear 0.26.4's native feature set end-to-end — no hand-rolled networking. Emphasis: player feel — your own movement and casts must feel instant; the opponent must move smoothly and telegraph casts immediately.
 
-**Status:** approved (user pre-approved implementation once planning completes).
+**Status:** implemented on `feat/netcode-feel-overhaul` (plan + deviation notes: `docs/superpowers/plans/2026-07-05-netcode-feel-overhaul.md`).
 
 ---
 

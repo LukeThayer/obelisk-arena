@@ -1650,6 +1650,13 @@ Expected: everything PASS.
 
 ---
 
+## Execution deviation notes (what reality added)
+
+1. **Task 2 discovered a blocker + fix:** enabling `rebroadcast_inputs` left the client's input timeline only ~⅓ tick ahead at LAN RTT (sync objective = `server + rtt/2 + 5ms default jitter_margin`), and 0.26.4's server-side `InputBuffer::get(tick)` has NO last-value fallback — inputs arrived one tick late forever and the player froze server-side. Fix: `InputTimelineConfig` with a **25ms jitter_margin** on the client entity (`net/client.rs`) — ≥1.5 ticks of ahead-slack, zero local input delay. Root-caused via trace-level probes; bisect confirmed the flag (not the targeting) as the trigger.
+2. **Task 8 needed the headless client to compose the obelisk CLIENT subset** (`add_obelisk_sim_client` + config/effects/skills + cast-timeline loading, mirroring the windowed root) — `predicted_local_cast` reads `CastTimelineHandles`/`SkillRegistry`, which the observer never had. Side benefit: the net-test now exercises the real predicted path (9 `predicted_cast` + 9 `predicted_cue` + de-dups per session). `predicted_local_cast`'s timeline params are also `Option`-wrapped (defensive).
+3. **Task 11's conditioned gate immediately caught a real bug:** `local_cast_edge` re-fired during rollback re-simulation (31 client edges for 8 real casts → duplicate predicted cosmetics under loss). Fixed with a `With<Rollback>` guard — recorded as CLAUDE.md invariant 14.
+4. `phase_start` takes obelisk's `WindowPhase` (Windup/Active/Recovery), not `SkillPhase` — the plan's test was adjusted accordingly.
+
 ## Self-review notes (already applied)
 
 - Spec WS1-WS6 → Tasks 2-3 / 4-6 / 7-8 / 9 / 10 / 11; Task 1 is the spec's phase 0; Task 12 the doc phase. The spec's "InputTimelineConfig knob" is deliberately NOT set (documented in Task 2 step 1 comment) — no task needed.
