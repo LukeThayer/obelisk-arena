@@ -1,47 +1,23 @@
-//! `arena_editor` — the in-editor obelisk-arena skill designer, built on `bevy_modal_editor`.
+//! `arena_editor` — a thin HOST SHELL over `bevy_modal_editor`'s built-in obelisk Skill mode.
 //!
-//! This crate embeds the generic modal editor (`EditorPlugin`) + its game lifecycle (`GamePlugin`)
-//! and adds a custom **Skill** mode (registered via the upstream `register_editor_mode` seam) whose
-//! bottom-dock timeline authors obelisk skills and previews them through the real `arena_sim`
-//! simulation. See `docs/superpowers/specs/2026-06-30-skill-designer-design.md` in obelisk-bevy.
+//! Phase 4 (task C8) collapsed this crate from a ~25-module bespoke skill designer (bolted onto
+//! the editor via the old `register_editor_mode` custom-mode seam) down to this shell: the Skill
+//! mode, its panel, its palette, and its deterministic preview stage are now BUILT IN to
+//! `bevy_modal_editor` itself (enabled via its `obelisk` Cargo feature — see `Cargo.toml`). All
+//! this crate does is compose `EditorPlugin` + `GamePlugin` and register the arena workspace as a
+//! content root (`bevy_modal_editor::skill::RegisterObeliskContentExt::register_obelisk_content`).
 //!
 //! `build_editor_app()` is the HEADLESS composition (no window, no event loop) used by tests;
-//! `main()` is the windowed binary.
+//! `main()` (`main.rs`) is the windowed binary. Both register the SAME content root so a headless
+//! assertion on `SkillLibrary` proves what the windowed binary would load.
 
 use bevy::prelude::*;
+use bevy_editor_game::RegisterGltfLibraryExt;
+use bevy_modal_editor::skill::RegisterObeliskContentExt;
 use bevy_modal_editor::{EditorPlugin, EditorPluginConfig, GamePlugin};
+use obelisk_bevy::prelude::ObeliskConfigExt;
 
-pub mod edits;
-pub mod effect_model;
-pub mod effects_panel;
-pub mod enum_ui;
-pub mod fx_edits;
-pub mod gizmo;
 pub mod io;
-pub mod model;
-pub mod rules_edits;
-pub mod rules_model;
-pub mod rules_panel;
-pub mod panel;
-pub mod derived;
-pub mod inspector;
-pub mod scrub;
-pub mod selection;
-pub mod preview_controller;
-pub mod preview_cosmetics;
-pub mod preview_rig;
-pub mod sim_config;
-pub mod skill_designer;
-pub mod socket;
-pub mod stat_ui;
-pub mod timeline_geom;
-pub mod trigger_ui;
-pub mod vfx_bind;
-pub use model::{blank_cast_timeline, blank_skillfx, derive_vfx_cues, EditedSkill, EditedSkillFx};
-pub use preview_controller::PreviewControllerPlugin;
-pub use preview_cosmetics::{PreviewCharge, PreviewCosmetic};
-pub use sim_config::PreviewSimConfigPlugin;
-pub use skill_designer::{register_skill_mode, SkillDesignerPlugin, SKILL_MODE_ID};
 
 /// Build a HEADLESS editor `App` for tests. The editor's render-dependent sub-plugins (outliner
 /// JFA, grid material, gaussian splatting, wireframe, …) require the `RenderApp` sub-app even to
@@ -51,10 +27,30 @@ pub use skill_designer::{register_skill_mode, SkillDesignerPlugin, SKILL_MODE_ID
 ///   - **`WinitPlugin` disabled** — on macOS winit's event loop must be created on the main thread,
 ///     but cargo runs tests on worker threads (→ panic). Tests drive the app with manual
 ///     `app.update()`, so the event loop isn't needed.
-/// The real wgpu backend (Metal on macOS) provides the `RenderApp` the editor requires. The editor
-/// runs with `add_egui:false` + `add_physics:false` (the preview installs plain Avian itself). The
-/// windowed binary (`main.rs`) keeps the full `DefaultPlugins` incl. winit.
+/// The real wgpu backend provides the `RenderApp` the editor requires.
+///
+/// `add_egui:true` (unlike the pre-C8 headless builder, which ran `add_egui:false`): at the
+/// pinned `bevy_modal_editor` rev, `ui::material_editor::handle_material_copy_paste` is registered
+/// unconditionally in `Update` and takes `EguiContexts` unconditionally (its own `EditorMode`
+/// early-out reads the mode INSIDE the system body, after Bevy has already validated/fetched the
+/// param) — with no `EguiPlugin` in the app, that param validation fails and Bevy's default error
+/// handler panics on the very first `app.update()`, before any other system (incl. this crate's own
+/// `Startup` scan) gets a chance to run. `EguiPlugin` itself works fine with zero windows (nothing
+/// to attach a context to, nothing to draw), so `add_egui:true` sidesteps the gap without needing a
+/// real window. `add_physics:false` still holds — the built-in Skill mode's preview stage installs
+/// plain Avian itself — which is why `init_gizmo_group::<PhysicsGizmos>()` below is still required
+/// (same reason `main.rs` needs it: `add_physics:false` skips Avian's `PhysicsDebugPlugin`, which
+/// normally registers that gizmo config group, but `editor::state::suppress_physics_debug_in_particle_mode`
+/// reads it unconditionally every `Update`). The windowed binary (`main.rs`) keeps the full
+/// `DefaultPlugins` incl. winit and was never at risk of either panic (`add_egui:true` there too,
+/// and it already registers the gizmo group).
+///
+/// Registers the SAME content root as `main.rs` (`register_gltf_library` + `add_obelisk_effects` +
+/// `register_obelisk_content`) — note `register_obelisk_content` only QUEUES the root
+/// (`PendingContentRoots`); it's scanned into `SkillLibrary` by a `Startup` system, so callers must
+/// run at least one `app.update()` before asserting on `SkillLibrary` contents.
 pub fn build_editor_app() -> App {
+    let root = io::editor_root();
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -67,19 +63,21 @@ pub fn build_editor_app() -> App {
             // Same workspace-assets root as the windowed binary (`main.rs`) — the default root is
             // CARGO_MANIFEST_DIR (= crates/arena_editor), which has no `character.glb`.
             .set(AssetPlugin {
-                file_path: io::editor_root()
-                    .join("assets")
-                    .to_string_lossy()
-                    .into_owned(),
+                file_path: root.join("assets").to_string_lossy().into_owned(),
                 ..default()
             })
             .disable::<bevy::winit::WinitPlugin>(),
     )
     .add_plugins(EditorPlugin::new(EditorPluginConfig {
-        add_egui: false,
+        add_egui: true,
         add_physics: false,
         ..default()
     }))
-    .add_plugins(GamePlugin);
+    .add_plugins(GamePlugin)
+    .register_gltf_library("character.glb")
+    .add_obelisk_effects(&root.join("config/effects"))
+    .register_obelisk_content(root)
+    // See `main.rs`'s own copy of this call for why `add_physics:false` needs it.
+    .init_gizmo_group::<avian3d::prelude::PhysicsGizmos>();
     app
 }

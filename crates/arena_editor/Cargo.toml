@@ -3,9 +3,13 @@
 # bevy features (dynamic_linking, file_watcher, bevy_remote, ...) + a bevy_egui git patch; pulling
 # it into obelisk-arena's workspace would feature-unify those onto arena_game/arena-server and break
 # the net-test. Isolation gives arena_editor its own lockfile + feature resolution and leaves the
-# game untouched. It path-depends on the game's shared crates (arena_sim/arena_skills) + obelisk-bevy
-# + the editor. Build/test it from THIS directory (cargo build/test here), not `-p arena_editor` from
-# the obelisk-arena root.
+# game untouched. Build/test it from THIS directory (cargo build/test here), not `-p arena_editor`
+# from the obelisk-arena root.
+#
+# Phase 4 (task C8): arena_editor is now a THIN HOST SHELL over bevy_modal_editor's BUILT-IN
+# obelisk Skill mode (the `obelisk` feature below) — the bespoke skill designer (~25 modules) that
+# used to live in `src/` is gone. The shell just composes the editor + registers this workspace as
+# a content root (`main.rs`).
 [package]
 name = "arena_editor"
 version = "0.1.0"
@@ -20,15 +24,20 @@ path = "src/main.rs"
 bevy = "0.18"
 avian3d = { version = "0.5", features = ["default", "serialize"] }
 obelisk-bevy = { git = "https://github.com/LukeThayer/bevy-obelisk", branch = "main" }
-arena_sim = { path = "../arena_sim" }
-bevy_modal_editor = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }
+# `features = ["obelisk"]` enables the editor's BUILT-IN Skill mode (EditorMode::Skill, the K-key
+# panel, the preview stage) + pulls in its own obelisk-bevy/stat_core/loot_core/toml/toml_edit —
+# see that crate's `[features] obelisk` entry.
+bevy_modal_editor = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main", features = ["obelisk"] }
 bevy_editor_game = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }
-bevy_vfx = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }
 bevy_egui = { git = "https://github.com/vladbat00/bevy_egui", rev = "81904dac9a09d49563e39962bf3039afc47016dc" }
-ron = "0.8"
-stat_core = { git = "ssh://git@github.com/vothuul/obelisk.git", branch = "master" }
-loot_core = { git = "ssh://git@github.com/vothuul/obelisk.git", branch = "master" }
-toml = "0.8"
+# Pinned to the exact rev obelisk-bevy/the editor's `obelisk` feature resolve against (NOT
+# `branch = "master"`) so Cargo dedupes this crate to ONE instance in the graph. A `branch=master`
+# spec is a DIFFERENT source id from `rev=bf9f026` even when they currently point at the same
+# commit, which duplicates stat_core/loot_core's TYPES in the graph (same class of crate-dup skew
+# fixed for the game in C1) — e.g. `stat_core::Skill` from one copy isn't the same type as the
+# other copy's, breaking anything that passes one across the boundary.
+stat_core = { git = "ssh://git@github.com/vothuul/obelisk.git", rev = "bf9f026" }
+loot_core = { git = "ssh://git@github.com/vothuul/obelisk.git", rev = "bf9f026" }
 
 [dev-dependencies]
 obelisk-bevy = { git = "https://github.com/LukeThayer/bevy-obelisk", branch = "main", features = ["test-support"] }
