@@ -17,7 +17,7 @@ use lightyear::prelude::MessageReceiver;
 use avian3d::prelude::Position;
 
 use crate::client::controller::FollowCamera;
-use crate::client::net::{ChargeState, LocalNetPlayer};
+use crate::client::net::{ChargeState, LocalNetPlayer, SelectedSkill};
 use crate::net::protocol::{NetEventMessage, NetworkedHealth, NetworkedPlayer, ObeliskNetId};
 
 /// Plugin: the windowed HUD. Builds the bar widgets at startup, drives them from `NetworkedHealth`,
@@ -39,6 +39,7 @@ impl Plugin for ArenaHudPlugin {
                     receive_round_state,
                     update_round_label,
                     update_charge_bar,
+                    update_spell_label,
                 ),
             );
     }
@@ -83,8 +84,8 @@ struct ChargeBarRoot;
 #[derive(Component)]
 struct ChargeBarFill;
 
-/// Marker on the spell-selected label ("Firebolt"). Static for now; structured so more spells
-/// can slot in later (e.g. a hotbar row with one label per slot).
+/// Marker on the spell-selected label. Driven by [`update_spell_label`] from [`SelectedSkill`]
+/// (number keys 1/2/3); structured so more spells can slot in later (e.g. a hotbar row per slot).
 #[derive(Component)]
 struct SpellLabel;
 
@@ -197,8 +198,8 @@ fn setup_hud(mut commands: Commands) {
             ));
         });
 
-    // Spell-selected indicator: static "Firebolt" label at bottom-left, above the local HP bar.
-    // Structured as a named component so more spells can slot in later (one label per hotbar slot).
+    // Spell-selected indicator at bottom-left, above the local HP bar. Seeded to the default skill
+    // ("Firebolt"); `update_spell_label` rewrites it whenever `SelectedSkill` changes (keys 1/2/3).
     commands.spawn((
         SpellLabel,
         Text::new("Firebolt"),
@@ -492,6 +493,31 @@ fn update_round_label(state: Res<RoundHudState>, mut label: Query<&mut Text, Wit
         _ => score,
     };
     *text = Text::new(banner);
+}
+
+/// Rewrite the [`SpellLabel`] text whenever the selected skill changes (number keys 1/2/3 drive
+/// [`SelectedSkill`]). Runs on `is_changed()` — true on the first frame too — so the label
+/// self-syncs to the default skill and then tracks every selection. This is the ONLY visible
+/// feedback that a hotkey took, so it must mirror `SelectedSkill` exactly.
+fn update_spell_label(selected: Res<SelectedSkill>, mut label: Query<&mut Text, With<SpellLabel>>) {
+    if !selected.is_changed() {
+        return;
+    }
+    let Ok(mut text) = label.single_mut() else {
+        return;
+    };
+    *text = Text::new(spell_display_name(&selected.0));
+}
+
+/// Human-facing display name for a skill id (the HUD spell indicator). Falls back to the raw id so a
+/// newly-granted skill still shows *something* legible rather than blanking the label.
+fn spell_display_name(skill_id: &str) -> &str {
+    match skill_id {
+        "firebolt" => "Firebolt",
+        "chain_lightning" => "Chain Lightning",
+        "blizzard" => "Blizzard",
+        other => other,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

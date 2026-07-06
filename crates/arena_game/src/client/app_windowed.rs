@@ -342,4 +342,38 @@ mod tests {
         assert_eq!(skill_for_key(KeyCode::Digit3), Some("blizzard"));
         assert_eq!(skill_for_key(KeyCode::KeyW), None);
     }
+
+    /// Runtime-verifies the keyboard→resource path the dynamic HUD spell label depends on: a
+    /// `Digit3` press must flip [`net::SelectedSkill`] to blizzard, and `Digit1` back to firebolt,
+    /// through the real `select_skill` system reading a real `ButtonInput<KeyCode>`. This is the
+    /// headless proxy for the user-facing "pressing 1/2/3 changes the selected spell"; the windowed
+    /// winit→`ButtonInput` plumbing is Bevy's own and is already exercised by WASD movement (which
+    /// reads the very same resource in `bridge_windowed_input_to_local_input`).
+    #[test]
+    fn select_skill_flips_selected_on_number_key() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<net::SelectedSkill>();
+        app.add_systems(Update, select_skill);
+
+        // Default selection is firebolt.
+        assert_eq!(app.world().resource::<net::SelectedSkill>().0, "firebolt");
+
+        // Press "3" → blizzard.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Digit3);
+        app.update();
+        assert_eq!(app.world().resource::<net::SelectedSkill>().0, "blizzard");
+
+        // Fresh frame (clear just_pressed), press "1" → back to firebolt.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Digit1);
+        app.update();
+        assert_eq!(app.world().resource::<net::SelectedSkill>().0, "firebolt");
+    }
 }
