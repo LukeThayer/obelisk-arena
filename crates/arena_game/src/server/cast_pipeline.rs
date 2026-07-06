@@ -1,27 +1,26 @@
-//! Cast pipeline: client cast_request → server-resolved `CastAim` → obelisk cast.
+//! Cast pipeline: input-stream cast edges → server-resolved `CastAim` → obelisk cast.
 //!
-//! The client sends a `CastRequestMessage` (camera-forward `aim_dir` + charge) on the reliable
-//! `CastChannel`; it NEVER validates or resolves (Stage A). The server maps the sender's `RemoteId`
-//! → caster via `ClientPlayerMap`, then resolves a CANDIDATE `CastAim` from the skill timeline's
-//! authored `Acquisition` (`resolve_cast_aim`): a `HitscanEntity` skill raycasts the aim ray for a
-//! target entity, a `GroundPoint` skill raycasts for a ground point, and `Aim`/`SelfPoint` cast by
-//! direction. It inserts a `PendingCast`; obelisk's `validate_casts` → `resolve_acquisition`
-//! (FixedUpdate) does the AUTHORITATIVE range/filter/fallback walk against that candidate and gates
-//! mana/cooldown/already-casting, emitting `CastBegan` or `CastRejected`. A direction cast that hits
-//! nothing lets the authored fallback fizzle — intentional.
+//! Casts ride the native input (design WS2): a cast is the FALLING EDGE of `ArenaInput.charging`
+//! (true→false across consecutive ticks) in the per-tick `ActionState<ArenaInput>` lightyear
+//! maintains for each player. The server counts held ticks for the charge byte
+//! (`net::charge_byte_from_hold_ticks`), latches the skill slot at press, reconstructs the aim ray
+//! from the input's yaw+pitch (`net::aim_dir` — the same math as the client camera), resolves a
+//! CANDIDATE `CastAim` from the skill's authored `Acquisition` (`resolve_cast_aim`), and inserts a
+//! `PendingCast`; obelisk's `validate_casts` → `resolve_acquisition` does the AUTHORITATIVE
+//! range/filter/fallback walk against that candidate and gates mana/cooldown/already-casting,
+//! emitting `CastBegan` or `CastRejected`. Packet loss fills missing input ticks as
+//! SameAsPrecedent, so a lost release DELAYS the edge 1-2 ticks rather than dropping the cast.
 
 use bevy::prelude::*;
-use lightyear::prelude::server::ClientOf;
-use lightyear::prelude::{MessageReceiver, RemoteId};
+use lightyear::prelude::input::native::ActionState;
 use obelisk_bevy::assets::Acquisition;
 use obelisk_bevy::prelude::*;
 use obelisk_bevy::timeline::cast::{CastAim, PendingCast};
 use serde_json::json;
 
-use crate::net::protocol::{CastRequestMessage, NetworkedPlayer};
+use crate::net::input::ArenaInput;
+use crate::net::protocol::NetworkedPlayer;
 use crate::trace;
-
-use super::spawn::{peer_to_u64, ClientPlayerMap};
 
 /// What a host raycast along the aim ray can return.
 enum RayHit {
@@ -53,18 +52,60 @@ fn resolve_cast_aim(
     }
 }
 
-/// Drain `CastRequestMessage`s from each connected client and cast the caster's skill.
+/// Per-player cast-edge memory: last tick's `charging`, how many ticks it has been held, and the
+/// skill slot latched at press. Server-only (inserted by `spawn_player_on_connect`).
+#[derive(Component, Default, Debug, PartialEq)]
+pub(crate) struct PrevCastInput {
+    charging: bool,
+    hold_ticks: u32,
+    slot: u8,
+}
+
+/// Advance the per-tick edge state machine. Returns `Some((slot, charge_byte))` exactly on the
+/// falling edge of `charging`. Pure — unit-testable without an app.
+fn step_cast_edge(prev: &mut PrevCastInput, charging: bool, slot: u8) -> Option<(u8, u8)> {
+    let fired = match (prev.charging, charging) {
+        (true, false) => Some((
+            prev.slot,
+            crate::net::charge_byte_from_hold_ticks(prev.hold_ticks),
+        )),
+        _ => None,
+    };
+    if charging {
+        if !prev.charging {
+            prev.slot = slot; // latch selection at press
+            prev.hold_ticks = 0;
+        }
+        prev.hold_ticks = prev.hold_ticks.saturating_add(1);
+    } else {
+        prev.hold_ticks = 0;
+    }
+    prev.charging = charging;
+    fired
+}
+
+/// FixedUpdate: detect each player's cast edge from its per-tick `ActionState<ArenaInput>` and
+/// insert a `PendingCast` (obelisk validates + executes). Runs `.before(ObeliskSet::Validate)` so
+/// the cast lands the SAME tick as its input edge. Skips a caster already mid-`ActiveCast`
+/// (obelisk would reject; skipping keeps the edge state clean).
 ///
-/// Resolves a candidate `CastAim` from the skill timeline's authored `Acquisition` via
-/// [`resolve_cast_aim`] (host raycasts along the client's `aim_dir` for `HitscanEntity`/`GroundPoint`;
-/// direction otherwise), then inserts a `PendingCast` for obelisk's `validate_casts` to check + gate.
-/// Skips a caster already mid-cast (`AlreadyCasting` avoidance). The caster entity must exist in the
-/// `ClientPlayerMap`; otherwise the request is silently dropped.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn drain_cast_requests(
-    mut receivers: Query<(&RemoteId, &mut MessageReceiver<CastRequestMessage>), With<ClientOf>>,
-    client_map: Res<ClientPlayerMap>,
-    casters: Query<&ObeliskId, With<NetworkedPlayer>>,
+/// Fires from the caster's EYE (`origin + Y*ARENA_EYE_HEIGHT`), the same height the client camera
+/// sits at, so the bolt travels along the crosshair ray. The charge byte's gameplay meaning:
+/// `charge_mult(c) = 0.5 + (c/255)*1.5` — tap ≈ 1.0×, full 1.5s hold = 2.0×.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(crate) fn detect_cast_edges(
+    mut players: Query<
+        (
+            Entity,
+            &ObeliskId,
+            &ActionState<ArenaInput>,
+            &mut PrevCastInput,
+        ),
+        With<NetworkedPlayer>,
+    >,
+    // Filter-only twin of `players` for the closures' "is a networked player body" check (no
+    // component access → no borrow conflict with the mutable iteration).
+    player_bodies: Query<(), With<NetworkedPlayer>>,
     active: Query<(), With<ActiveCast>>,
     handles: Res<CastTimelineHandles>,
     timelines: Res<Assets<CastTimeline>>,
@@ -73,119 +114,134 @@ pub(crate) fn drain_cast_requests(
     spatial: avian3d::prelude::SpatialQuery,
     mut commands: Commands,
 ) {
-    for (RemoteId(peer_id), mut receiver) in &mut receivers {
-        let Some(client_id) = peer_to_u64(peer_id) else {
+    for (caster, caster_id, action, mut prev) in &mut players {
+        let Some((slot, charge)) =
+            step_cast_edge(&mut prev, action.0.charging, action.0.skill_slot)
+        else {
             continue;
         };
-        for req in receiver.receive() {
-            let Some(&caster) = client_map.0.get(&client_id) else {
-                continue;
-            };
-            if active.get(caster).is_ok() {
-                // Already casting; obelisk would reject. Drop silently.
-                continue;
-            }
-            let Ok(caster_id) = casters.get(caster) else {
-                continue;
-            };
-            // Fire along the client's camera-forward direction. Fall back to -Z (straight forward)
-            // if the vector is degenerate (shouldn't happen from a well-formed client).
-            let dir = Dir3::new(Vec3::from(req.aim_dir)).unwrap_or(Dir3::NEG_Z);
-            trace::event(
-                "cast_request_accepted",
-                json!({ "caster": caster_id.0, "skill_id": req.skill_id,
-                        "aim_dir": req.aim_dir, "charge": req.charge }),
-            );
-            // Use the charged variant; the byte's gameplay meaning is documented client-side by
-            // `client::net::charge_mult` (`0.5 + (c/255)*1.5`) and produced by `charge_byte_from_frac`:
-            // charge=85 (`TAP_CHARGE_BYTE`) ≈ 1.0× (instant tap), charge=255 = 2.0× (full hold).
-            // `u8` is inherently bounded [0, 255] — no extra clamp needed.
-            //
-            // Fire from the caster's EYE (`origin + Y*ARENA_EYE_HEIGHT`), the same height the client
-            // camera sits at. The client's `aim_dir` is the camera-forward ray FROM that eye, so a
-            // muzzle at the eye makes the bolt travel along the crosshair ray — a shot aimed at the
-            // opponent lands (Bug 1). Without the offset the bolt spawns at the feet (Y=1.0) and
-            // undershoots a crosshair-aimed shot.
-            let muzzle_offset = Vec3::Y * crate::net::ARENA_EYE_HEIGHT;
-
-            // AIM ACQUISITION: pick the candidate `CastAim` shape from the skill timeline's
-            // authored `Acquisition`. We do NOT pre-validate range/filter here — obelisk's
-            // `validate_casts` does the real range/filter/LOS check against whatever candidate we
-            // hand it, and walks the authored `fallback` chain on a miss (a `Direction` fallback
-            // either fizzles or casts anyway, per the skill's authoring). If the timeline isn't
-            // loaded yet, default to `Acquisition::Aim` (fire by direction).
-            let acq = timelines
-                .get(handles.0.get(&req.skill_id).map(|h| h.id()).unwrap_or_default())
-                .map(|tl| tl.acquisition.clone())
-                .unwrap_or(Acquisition::Aim);
-
-            // HITSCAN ACQUISITION: a ray along the aim from the eye, first hurtbox/body hit
-            // (excluding the caster's own) within `range` → entity aim. A miss falls through to
-            // `Direction` inside `resolve_cast_aim`.
-            let cast_entity = |range: f32| -> Option<RayHit> {
-                let origin = transforms.get(caster).ok()?.translation + muzzle_offset;
-                let own: Vec<Entity> = hurtboxes
-                    .iter()
-                    .filter(|(_, h)| h.owner == caster)
-                    .map(|(e, _)| e)
-                    .chain([caster])
-                    .collect();
-                let filter =
-                    avian3d::prelude::SpatialQueryFilter::default().with_excluded_entities(own);
-                let hit = spatial.cast_ray(origin, dir, range, true, &filter)?;
-                // The ray can meet the target's HURTBOX child (owner) or its BODY collider
-                // (a combatant entity) — accept both.
-                hurtboxes
-                    .get(hit.entity)
-                    .map(|(_, h)| h.owner)
-                    .ok()
-                    .or_else(|| casters.get(hit.entity).is_ok().then_some(hit.entity))
-                    .map(RayHit::Entity)
-            };
-            // GROUND ACQUISITION: first world hit along the aim (excluding the caster's own
-            // colliders) within `range` → point aim. Blizzard (C6) is its first real consumer; a
-            // horizontal shot that hits nothing falls through to `Direction`, which the sim's
-            // authored fallback handles.
-            let cast_ground = |range: f32| -> Option<Vec3> {
-                let origin = transforms.get(caster).ok()?.translation + muzzle_offset;
-                let own: Vec<Entity> = hurtboxes
-                    .iter()
-                    .filter(|(_, h)| h.owner == caster)
-                    .map(|(e, _)| e)
-                    .chain([caster])
-                    .collect();
-                let filter =
-                    avian3d::prelude::SpatialQueryFilter::default().with_excluded_entities(own);
-                let hit = spatial.cast_ray(origin, dir, range, true, &filter)?;
-                Some(origin + *dir * hit.distance)
-            };
-
-            let aim = resolve_cast_aim(&acq, dir, cast_entity, cast_ground);
-            // Compute the trace label before `insert` moves `aim`.
-            let aim_shape = match &aim {
-                CastAim::Entity(_) => "Entity",
-                CastAim::Point(_) => "Point",
-                CastAim::Direction(_) => "Direction",
-            };
-            trace::event(
-                "cast_acquired",
-                json!({ "caster": caster_id.0, "skill_id": req.skill_id, "aim": aim_shape }),
-            );
-            commands.entity(caster).insert(PendingCast {
-                skill_id: req.skill_id.clone(),
-                aim,
-                charge: Some(req.charge),
-                muzzle_offset,
-            });
+        if active.get(caster).is_ok() {
+            continue; // mid-cast; obelisk would reject anyway
         }
+        let Some(skill_id) = crate::net::ARENA_SKILLS
+            .get(slot as usize)
+            .map(|s| s.to_string())
+        else {
+            continue; // out-of-range slot from a bad client: ignore
+        };
+        // Aim ray from the input's yaw+pitch — the identical math the client camera + predicted
+        // cast use (`net::aim_dir`). Degenerate never happens (aim_dir normalizes), but keep the
+        // -Z fallback for safety.
+        let dir = Dir3::new(crate::net::aim_dir(action.0.yaw, action.0.pitch)).unwrap_or(Dir3::NEG_Z);
+        trace::event(
+            "cast_edge",
+            json!({ "caster": caster_id.0, "skill_id": skill_id, "charge": charge }),
+        );
+        let muzzle_offset = Vec3::Y * crate::net::ARENA_EYE_HEIGHT;
+
+        // AIM ACQUISITION: pick the candidate `CastAim` shape from the skill timeline's authored
+        // `Acquisition`. We do NOT pre-validate range/filter here — obelisk's `validate_casts`
+        // does the real range/filter/LOS check against whatever candidate we hand it, and walks
+        // the authored `fallback` chain on a miss. If the timeline isn't loaded yet, default to
+        // `Acquisition::Aim` (fire by direction).
+        let acq = timelines
+            .get(handles.0.get(&skill_id).map(|h| h.id()).unwrap_or_default())
+            .map(|tl| tl.acquisition.clone())
+            .unwrap_or(Acquisition::Aim);
+
+        // HITSCAN ACQUISITION: a ray along the aim from the eye, first hurtbox/body hit
+        // (excluding the caster's own) within `range` → entity aim. A miss falls through to
+        // `Direction` inside `resolve_cast_aim`.
+        let cast_entity = |range: f32| -> Option<RayHit> {
+            let origin = transforms.get(caster).ok()?.translation + muzzle_offset;
+            let own: Vec<Entity> = hurtboxes
+                .iter()
+                .filter(|(_, h)| h.owner == caster)
+                .map(|(e, _)| e)
+                .chain([caster])
+                .collect();
+            let filter =
+                avian3d::prelude::SpatialQueryFilter::default().with_excluded_entities(own);
+            let hit = spatial.cast_ray(origin, dir, range, true, &filter)?;
+            // The ray can meet the target's HURTBOX child (owner) or its BODY collider
+            // (a networked player entity) — accept both.
+            hurtboxes
+                .get(hit.entity)
+                .map(|(_, h)| h.owner)
+                .ok()
+                .or_else(|| player_bodies.contains(hit.entity).then_some(hit.entity))
+                .map(RayHit::Entity)
+        };
+        // GROUND ACQUISITION: first world hit along the aim (excluding the caster's own
+        // colliders) within `range` → point aim (blizzard). A horizontal shot that hits nothing
+        // falls through to `Direction`, which the sim's authored fallback handles.
+        let cast_ground = |range: f32| -> Option<Vec3> {
+            let origin = transforms.get(caster).ok()?.translation + muzzle_offset;
+            let own: Vec<Entity> = hurtboxes
+                .iter()
+                .filter(|(_, h)| h.owner == caster)
+                .map(|(e, _)| e)
+                .chain([caster])
+                .collect();
+            let filter =
+                avian3d::prelude::SpatialQueryFilter::default().with_excluded_entities(own);
+            let hit = spatial.cast_ray(origin, dir, range, true, &filter)?;
+            Some(origin + *dir * hit.distance)
+        };
+
+        let aim = resolve_cast_aim(&acq, dir, cast_entity, cast_ground);
+        // Compute the trace label before `insert` moves `aim`.
+        let aim_shape = match &aim {
+            CastAim::Entity(_) => "Entity",
+            CastAim::Point(_) => "Point",
+            CastAim::Direction(_) => "Direction",
+        };
+        trace::event(
+            "cast_acquired",
+            json!({ "caster": caster_id.0, "skill_id": skill_id, "aim": aim_shape }),
+        );
+        commands.entity(caster).insert(PendingCast {
+            skill_id,
+            aim,
+            charge: Some(charge),
+            muzzle_offset,
+        });
     }
 }
 
 #[cfg(test)]
-mod acq_tests {
+mod tests {
     use super::*;
     use bevy::prelude::{Dir3, Entity, Vec3};
     use obelisk_bevy::assets::{AcqFallback, Acquisition, HitFilter};
+
+    /// The falling-edge detector: a cast fires exactly when charging goes true→false, with the
+    /// charge byte derived from the number of held ticks.
+    #[test]
+    fn cast_edge_fires_on_release_with_held_charge() {
+        let mut prev = PrevCastInput::default();
+        // idle → no cast
+        assert_eq!(step_cast_edge(&mut prev, false, 0), None);
+        // press + hold 3 ticks → no cast while held
+        assert_eq!(step_cast_edge(&mut prev, true, 0), None);
+        assert_eq!(step_cast_edge(&mut prev, true, 0), None);
+        assert_eq!(step_cast_edge(&mut prev, true, 0), None);
+        // release → cast with 3 held ticks' charge
+        let fired = step_cast_edge(&mut prev, false, 0);
+        assert_eq!(fired, Some((0, crate::net::charge_byte_from_hold_ticks(3))));
+        // staying released → nothing
+        assert_eq!(step_cast_edge(&mut prev, false, 0), None);
+    }
+
+    /// The slot recorded at release is the slot held during the charge (latched at press),
+    /// so a selection change mid-charge can't retarget an in-flight charge.
+    #[test]
+    fn cast_edge_latches_slot_at_press() {
+        let mut prev = PrevCastInput::default();
+        assert_eq!(step_cast_edge(&mut prev, true, 2), None);
+        let fired = step_cast_edge(&mut prev, false, 1);
+        assert_eq!(fired, Some((2, crate::net::charge_byte_from_hold_ticks(1))));
+    }
 
     #[test]
     fn hitscan_entity_hit_yields_entity_aim() {

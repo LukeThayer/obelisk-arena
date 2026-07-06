@@ -26,7 +26,7 @@ mod mirrors;
 mod rounds;
 mod spawn;
 
-use cast_pipeline::drain_cast_requests;
+use cast_pipeline::detect_cast_edges;
 use controller::{server_apply_movement, server_apply_yaw, trace_server_pose};
 use customize::drain_customize_requests;
 use mirrors::{sync_cast_state, sync_networked_health, trace_server_net_events};
@@ -75,13 +75,6 @@ impl Plugin for ArenaServerPlugin {
                     // HP mirror: mirror each player's obelisk life → replicated
                     // NetworkedHealth so the client HUD reads server-authoritative hp.
                     sync_networked_health,
-                    // Cast pipeline: drain client cast_requests → resolve a candidate `CastAim`
-                    // from the skill's authored `Acquisition` (`resolve_cast_aim`) → insert a
-                    // `PendingCast` → obelisk's validate_casts does the authoritative check. The
-                    // ClientPlayerMap is populated by `spawn_player_on_connect`; ordered after the
-                    // lib's Update spatial refresh (in add_obelisk_sim_headless) so the acquisition
-                    // raycasts see a fresh spatial pipeline.
-                    drain_cast_requests,
                     // Appearance pipeline (D6): drain client CustomizeMessage → update that
                     // player's PlayerCustomization + broadcast CustomizeBroadcast to all clients
                     // (reliable), mirroring the cue broadcast. The ClientPlayerMap is populated by
@@ -107,7 +100,16 @@ impl Plugin for ArenaServerPlugin {
             // faces the input yaw before the movement force is applied.
             .add_systems(
                 FixedUpdate,
-                (server_apply_yaw, server_apply_movement).chain(),
+                (
+                    (server_apply_yaw, server_apply_movement).chain(),
+                    // Cast pipeline (design WS2): detect each player's charging falling edge in the
+                    // per-tick input stream → resolve a candidate `CastAim` from the skill's
+                    // authored `Acquisition` (`resolve_cast_aim`) → insert a `PendingCast` →
+                    // obelisk's validate_casts does the authoritative check. Ordered before
+                    // ObeliskSet::Validate (commands flush at the ordering edge) so the cast lands
+                    // the SAME tick as its input edge.
+                    detect_cast_edges.before(obelisk_bevy::prelude::ObeliskSet::Validate),
+                ),
             )
             // Spawn each player when its client connects (canonical observer-driven spawn, so the
             // owner's replication sender is ready before Replicate/PredictionTarget resolve).

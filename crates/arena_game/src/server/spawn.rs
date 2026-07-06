@@ -172,6 +172,8 @@ pub(crate) fn spawn_player_on_connect(
             NetworkedCastState::default(),
             // Native input — lightyear syncs this with the controlling client's input each tick.
             ActionState::<ArenaInput>::default(),
+            // Server-side cast-edge memory (design WS2). Not replicated.
+            super::cast_pipeline::PrevCastInput::default(),
         ))
         .insert((
             Replicate::to_clients(NetworkTarget::All),
