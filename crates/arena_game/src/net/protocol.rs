@@ -59,10 +59,10 @@ impl Plugin for ProtocolPlugin {
         app.register_component::<NetworkedHealth>();
 
         // --- Character appearance (replicated per-player; drives each rig's slot visibility). ---
-        // Initial-value replication is reliable in this lightyear setup — that's what the spawn
-        // relies on (each player spawns with `PlayerCustomization::default()`). Live appearance
-        // changes are pushed via the reliable `CustomizeBroadcast` message path (D6), not by
-        // trusting component-update replication (which is unreliable here — see CLAUDE notes).
+        // Live edits are plain component updates — the receive path writes registered components
+        // directly onto the (single) Predicted entity, and `SinceLastAck` resends unacked deltas.
+        // (The old "component updates are unreliable" `CustomizeBroadcast` workaround was
+        // inherited wisp lore — see the 2026-07-05 netcode spec.)
         app.register_component::<PlayerCustomization>();
 
         // --- avian physics: lightyear-native prediction (rollback) + interpolation. ---
@@ -117,13 +117,11 @@ impl Plugin for ProtocolPlugin {
         app.register_message::<RoundStateMessage>()
             .add_direction(NetworkDirection::ServerToClient); // best-of-3 round flow (§7)
 
-        // Live appearance change (D6): client→server request (reliable RequestChannel) + the
-        // server→client broadcast (reused reliable EventChannel). Mirrors the cue broadcast pattern
-        // so a live edit propagates reliably (component UPDATES are unreliable in this setup).
+        // Live appearance change (D6): client→server request (reliable RequestChannel); the
+        // server applies it to the player's `PlayerCustomization`, which replicates back to every
+        // client as a plain component update.
         app.register_message::<CustomizeMessage>()
             .add_direction(NetworkDirection::ClientToServer);
-        app.register_message::<CustomizeBroadcast>()
-            .add_direction(NetworkDirection::ServerToClient);
     }
 }
 
@@ -155,18 +153,6 @@ pub struct CueWireMessage(pub crate::net::cue::CueMessage);
 /// `PlayerCustomization` and re-broadcasts via [`CustomizeBroadcast`] (D6).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CustomizeMessage {
-    pub parts: PartSelection,
-}
-
-/// Appearance broadcast, server→client, reliable (`EventChannel`). The server relays a player's
-/// new costume to every client; each client applies it to the matching player's rig (keyed by the
-/// replicated [`NetworkedId`]). Mirrors the cue broadcast (`CueWireMessage`) — the proven reliable
-/// S→C path — because component UPDATES don't propagate reliably in this lightyear setup (only
-/// initial inserts do).
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CustomizeBroadcast {
-    /// The target player's replicated [`NetworkedId`] (stable cross-peer key).
-    pub player: u64,
     pub parts: PartSelection,
 }
 

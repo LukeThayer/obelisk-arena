@@ -19,13 +19,13 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::{Controlled, MessageReceiver, MessageSender, Predicted};
+use lightyear::prelude::{Controlled, MessageSender, Predicted};
 
 use crate::client::parts::PartSelection;
 use crate::net::input::ArenaInput;
 use crate::net::protocol::{
-    CustomizeBroadcast, CustomizeMessage, NetworkOwner, NetworkedCastState, NetworkedId,
-    NetworkedPlayer, PlayerCustomization, RequestChannel,
+    CustomizeMessage, NetworkOwner, NetworkedCastState, NetworkedId, NetworkedPlayer,
+    PlayerCustomization, RequestChannel,
 };
 use crate::shared_controller::{apply_arena_movement, apply_arena_yaw};
 use arena_sim::tuning::{PLAYER_CAPSULE_LENGTH, PLAYER_CAPSULE_RADIUS};
@@ -166,7 +166,7 @@ impl Plugin for ClientNetPlayerPlugin {
                     materialize_predicted_players,
                     trace_remote_input_once,
                     send_customization,
-                    drain_customize_broadcasts,
+                    trace_customize_updates,
                     trace_received_remote_pose,
                     trace_remote_cast_phase,
                 ),
@@ -379,28 +379,25 @@ fn send_customization(
     crate::trace::event("customize_sent", serde_json::json!({}));
 }
 
-/// Drain the server's [`CustomizeBroadcast`]s and apply each to the matching player's
-/// [`PlayerCustomization`] (keyed by the replicated [`NetworkedId`]). Setting the component trips
-/// `Changed<PlayerCustomization>`, which `client::parts::refresh_arena_part_visibility_on_change`
-/// picks up to re-skin that player's REMOTE rig. The local player's own rig is driven by the local
-/// [`PartSelection`] resource, so a loopback broadcast for self is harmless. Added by both client
-/// modes (headless just traces — no rig).
-fn drain_customize_broadcasts(
-    mut receivers: Query<&mut MessageReceiver<CustomizeBroadcast>>,
-    mut players: Query<(&NetworkedId, &mut PlayerCustomization), With<NetworkedPlayer>>,
+/// Trace a remote player's live appearance change (a replicated `PlayerCustomization` component
+/// UPDATE — no broadcast message any more, design WS5). The rig re-skin itself is `Changed`-driven
+/// in `client::parts::refresh_arena_part_visibility_on_change`; this keeps the D6 harness signal.
+#[allow(clippy::type_complexity)]
+fn trace_customize_updates(
+    changed: Query<
+        &NetworkedId,
+        (
+            With<NetworkedPlayer>,
+            Changed<PlayerCustomization>,
+            Without<LocalNetPlayer>,
+        ),
+    >,
 ) {
-    for mut rx in &mut receivers {
-        for msg in rx.receive() {
-            for (net_id, mut cust) in &mut players {
-                if net_id.0 == msg.player {
-                    cust.parts = msg.parts;
-                }
-            }
-            crate::trace::event(
-                "customize_received",
-                serde_json::json!({ "player": msg.player }),
-            );
-        }
+    for net_id in &changed {
+        crate::trace::event(
+            "customize_received",
+            serde_json::json!({ "player": net_id.0 }),
+        );
     }
 }
 
