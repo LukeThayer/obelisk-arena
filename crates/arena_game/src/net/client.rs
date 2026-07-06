@@ -10,9 +10,12 @@ use std::net::SocketAddr;
 
 use bevy::prelude::*;
 use lightyear::netcode::prelude::Authentication;
-use lightyear::prelude::client::{Client, ClientPlugins, Connect, NetcodeClient, NetcodeConfig};
+use lightyear::prelude::client::{
+    Client, ClientPlugins, Connect, InputDelayConfig, NetcodeClient, NetcodeConfig,
+};
 use lightyear::prelude::{
-    Connected, Link, LocalAddr, LocalId, PeerAddr, PredictionManager, ReplicationReceiver, UdpIo,
+    Connected, InputTimelineConfig, Link, LocalAddr, LocalId, PeerAddr, PredictionManager,
+    ReplicationReceiver, SyncConfig, UdpIo,
 };
 use serde_json::json;
 
@@ -112,6 +115,21 @@ fn spawn_client(mut commands: Commands, target: Res<ConnectTo>) {
             Link::new(None),
             ReplicationReceiver::default(),
             PredictionManager::default(),
+            // Input-timeline ahead-margin. The sync objective is `server + rtt/2 + jitter_margin -
+            // input_delay` (lightyear_sync input.rs::sync_objective); the default 5ms margin leaves
+            // the client only ~⅓ tick ahead at LAN/localhost RTT, so input messages for tick T can
+            // arrive AFTER the server simulated T — and the server-side buffer read (`get(tick)`,
+            // no fallback in 0.26.4) then NEVER applies them (observed: player frozen with
+            // `rebroadcast_inputs` enabled). 25ms keeps the client ≥1.5 ticks ahead. This is NOT
+            // local input delay (input_delay stays 0) — the client just simulates further ahead;
+            // own-input feel is unchanged.
+            InputTimelineConfig::new(
+                SyncConfig {
+                    jitter_margin: Duration::from_millis(25),
+                    ..Default::default()
+                },
+                InputDelayConfig::no_input_delay(),
+            ),
         ))
         .id();
     commands.trigger(Connect { entity });

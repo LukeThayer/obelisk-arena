@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::ClientOf;
 use lightyear::prelude::{Connected, PeerId, RemoteId, Replicate};
-use lightyear::prelude::{ControlledBy, InterpolationTarget, NetworkTarget, PredictionTarget};
+use lightyear::prelude::{ControlledBy, NetworkTarget, PredictionTarget};
 use obelisk_bevy::prelude::*;
 use serde_json::json;
 
@@ -175,8 +175,11 @@ pub(crate) fn spawn_player_on_connect(
         ))
         .insert((
             Replicate::to_clients(NetworkTarget::All),
-            PredictionTarget::to_clients(NetworkTarget::Single(*peer_id)),
-            InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(*peer_id)),
+            // Predict on EVERY client (avian_3d_character pattern): the owner predicts from its own
+            // inputs; the opponent's client predicts this body from the server-rebroadcast inputs.
+            // No InterpolationTarget — nothing is interpolated any more (design WS1; approach C in
+            // the spec flips this back if extrapolation feel loses to delay under the conditioner).
+            PredictionTarget::to_clients(NetworkTarget::All),
             ControlledBy {
                 owner: conn_entity,
                 lifetime: Default::default(),

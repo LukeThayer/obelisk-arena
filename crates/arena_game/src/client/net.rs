@@ -1,12 +1,12 @@
 //! Client-side net-driven player layer.
 //!
 //! Two jobs, shared by the windowed and headless clients:
-//!   1. **Attach a body** to each lightyear-materialized `NetworkedPlayer`. The local player
-//!      arrives as a `Predicted` entity: this module gives it a Dynamic avian body +
-//!      [`InputMarker`]/[`ActionState<ArenaInput>`] (so the predicted controller can run + roll
-//!      back) and tags it [`LocalNetPlayer`]. Remote players arrive as `Interpolated` entities:
-//!      they get no physical body (lightyear drives their avian `Position`/`Rotation`) and are
-//!      tagged once their pose has replicated.
+//!   1. **Attach a body** to each lightyear-materialized `NetworkedPlayer`. BOTH players arrive as
+//!      `Predicted` entities (`PredictionTarget::All` — design WS1): each gets a Dynamic avian
+//!      body driven by the shared force controller. The `Controlled` one is the local player
+//!      ([`InputMarker`] + [`LocalNetPlayer`]); the remote one's `ActionState<ArenaInput>` is
+//!      filled by lightyear from the server-rebroadcast inputs, so the opponent is SIMULATED at
+//!      the local predicted tick (no interpolation delay), corrected by rollback on mispredicts.
 //!   2. **Stage local input**: copy the local player's WASD/yaw/pitch/jump/charging onto its
 //!      `ActionState<ArenaInput>` in `FixedPreUpdate` (lightyear's `WriteClientInputs`), where
 //!      lightyear samples and ships it. The server runs its authoritative controller against the
@@ -19,7 +19,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use lightyear::prelude::client::input::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::{Controlled, Interpolated, MessageReceiver, MessageSender, Predicted};
+use lightyear::prelude::{Controlled, MessageReceiver, MessageSender, Predicted};
 
 use crate::client::parts::PartSelection;
 use crate::net::input::ArenaInput;
@@ -186,7 +186,7 @@ impl Plugin for ClientNetPlayerPlugin {
                 Update,
                 (
                     materialize_predicted_players,
-                    materialize_interpolated_players,
+                    trace_remote_input_once,
                     send_cast_requests,
                     send_customization,
                     drain_customize_broadcasts,
@@ -236,11 +236,12 @@ fn client_apply_movement(
     }
 }
 
-/// Attach the local player's physics body + input marker to its newly-`Predicted` `NetworkedPlayer`
-/// (the avian_3d_character `handle_new_character` pattern). lightyear creates exactly one Predicted
-/// entity per client — the one it `Controlled` — so this is the local player. The Dynamic body lets
-/// the client predict + roll back physics; `InputMarker`/`ActionState` carry native input. Tags
-/// [`LocalNetPlayer`] (camera + hidden rig hang off it) + [`MaterializedBody`] (rig attach poll).
+/// Attach a physics body to EVERY newly-`Predicted` `NetworkedPlayer` (the avian_3d_character
+/// `handle_new_character` pattern — with `PredictionTarget::All`, BOTH players arrive `Predicted`
+/// on both clients). The Dynamic body lets the client predict + roll back physics. The `Controlled`
+/// one is the local player: it additionally gets `InputMarker` (native-input authority) +
+/// [`LocalNetPlayer`] (camera + hidden rig hang off it); the remote one gets a bare `ActionState`
+/// that lightyear fills from the server-rebroadcast inputs. Both tag [`MaterializedBody`].
 #[allow(clippy::type_complexity)]
 fn materialize_predicted_players(
     new_players: Query<
@@ -274,9 +275,16 @@ fn materialize_predicted_players(
                 InputMarker::<ArenaInput>::default(),
                 ActionState::<ArenaInput>::default(),
             ));
+        } else {
+            // Remote predicted player: no InputMarker (lightyear #1431 — the marker belongs only
+            // on the authority entity), but it needs an ActionState for the rebroadcast
+            // InputBuffer to drive (ActionState is not a replicated component; insert it locally).
+            commands
+                .entity(entity)
+                .insert(ActionState::<ArenaInput>::default());
         }
         info!(
-            "materialized LOCAL (predicted) NetworkedPlayer owner={} controlled={is_controlled}",
+            "materialized (predicted) NetworkedPlayer owner={} controlled={is_controlled}",
             owner.0
         );
         crate::trace::event(
@@ -286,37 +294,28 @@ fn materialize_predicted_players(
     }
 }
 
-/// Mark a remote player's newly-`Interpolated` `NetworkedPlayer` as materialized so the rig attaches.
-/// No physics body — lightyear interpolation drives its `Position`/`Rotation`. We wait until BOTH
-/// `Position` AND `Rotation` are present (the avian Position↔Transform sync only runs when both
-/// exist, else the rig would briefly sit at `Transform::default()` — lightyear_avian's documented
-/// caveat).
-#[allow(clippy::type_complexity)]
-fn materialize_interpolated_players(
-    new_players: Query<
-        (Entity, &NetworkOwner),
-        (
-            With<NetworkedPlayer>,
-            With<Interpolated>,
-            With<Position>,
-            With<Rotation>,
-            Without<MaterializedBody>,
-        ),
+/// One-shot spike gate (design WS1): trace the first time a REMOTE predicted player's
+/// `ActionState<ArenaInput>` carries non-zero movement — proof that native-input rebroadcast
+/// (server → this client) reaches the remote entity's input buffer. Cheap after latching.
+fn trace_remote_input_once(
+    remotes: Query<
+        (&NetworkOwner, &ActionState<ArenaInput>),
+        (With<Predicted>, Without<LocalNetPlayer>),
     >,
-    mut commands: Commands,
+    mut seen: Local<bool>,
 ) {
-    for (entity, owner) in &new_players {
-        commands
-            .entity(entity)
-            .insert((MaterializedBody, Visibility::default()));
-        info!(
-            "materialized remote (interpolated) NetworkedPlayer owner={}",
-            owner.0
-        );
-        crate::trace::event(
-            "materialized_player",
-            serde_json::json!({ "owner": owner.0, "local": false }),
-        );
+    if *seen {
+        return;
+    }
+    for (owner, action) in &remotes {
+        if action.0.movement != Vec2::ZERO {
+            *seen = true;
+            crate::trace::event(
+                "remote_input_seen",
+                serde_json::json!({ "owner": owner.0,
+                    "movement": [action.0.movement.x, action.0.movement.y] }),
+            );
+        }
     }
 }
 

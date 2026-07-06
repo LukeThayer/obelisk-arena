@@ -29,11 +29,17 @@ pub struct ProtocolPlugin;
 impl Plugin for ProtocolPlugin {
     fn build(&self, app: &mut App) {
         // --- Native input (lightyear ships `ActionState<ArenaInput>` per tick) ---
-        // `rebroadcast_inputs` stays default (false): only the predicting OWNER needs its own input
-        // locally; remote players are INTERPOLATED, not simulated, so the server never has to relay
-        // inputs to the other clients (the avian_3d_character example sets rebroadcast because it
-        // predicts ALL characters — the arena predicts only the owner). Mirrors `simple_box`.
-        app.add_plugins(input::native::InputPlugin::<ArenaInput>::default());
+        // `rebroadcast_inputs: true`: the server relays each client's inputs to the other clients,
+        // which lightyear applies to the matching remote PREDICTED entity's InputBuffer
+        // (`lightyear_inputs-0.26.4/src/client.rs:578 receive_remote_player_input_messages`). The
+        // arena predicts ALL players (the avian_3d_character example's pattern) — the opponent's
+        // body is simulated by the same shared controller from these rebroadcast inputs.
+        app.add_plugins(input::native::InputPlugin::<ArenaInput> {
+            config: input::InputConfig::<ArenaInput> {
+                rebroadcast_inputs: true,
+                ..default()
+            },
+        });
 
         // --- Player identity / ownership (replicated on spawn) ---
         app.register_component::<NetworkedPlayer>();
