@@ -76,6 +76,34 @@ fn pseudo_unique_client_id() -> u64 {
         .unwrap_or(0)
 }
 
+/// Optional artificial-latency conditioner (design WS6) so netcode feel/regressions are tested at
+/// real RTTs instead of localhost-zero: `ARENA_NET_LATENCY_MS` (one-way incoming delay),
+/// `ARENA_NET_JITTER_MS`, `ARENA_NET_LOSS` (0..1 drop probability). Applied to the client's
+/// RECEIVE path only — run both observers with latency L to simulate a symmetric ~2·L RTT.
+/// Zero-cost when unset (`Link::new(None)`, the pre-existing shape).
+fn link_conditioner_from_env() -> Option<lightyear::prelude::RecvLinkConditioner> {
+    let ms = |k: &str| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+    let latency = ms("ARENA_NET_LATENCY_MS");
+    let jitter = ms("ARENA_NET_JITTER_MS");
+    let loss = std::env::var("ARENA_NET_LOSS")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok());
+    if latency.is_none() && jitter.is_none() && loss.is_none() {
+        return None;
+    }
+    Some(lightyear::prelude::RecvLinkConditioner::new(
+        lightyear::prelude::LinkConditionerConfig {
+            incoming_latency: Duration::from_millis(latency.unwrap_or(0)),
+            incoming_jitter: Duration::from_millis(jitter.unwrap_or(0)),
+            incoming_loss: loss.unwrap_or(0.0),
+        },
+    ))
+}
+
 fn spawn_client(mut commands: Commands, target: Res<ConnectTo>) {
     let auth = Authentication::Manual {
         server_addr: target.server,
@@ -112,7 +140,7 @@ fn spawn_client(mut commands: Commands, target: Res<ConnectTo>) {
             UdpIo::default(),
             LocalAddr(local_addr),
             PeerAddr(target.server),
-            Link::new(None),
+            Link::new(link_conditioner_from_env()),
             ReplicationReceiver::default(),
             // Explicit (== default) policies, named so the tuning surface is visible: rollback on
             // confirmed-state mismatch per the protocol's 0.01-epsilon comparators; smooth the

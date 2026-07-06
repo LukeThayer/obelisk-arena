@@ -314,6 +314,7 @@ fn trace_remote_input_once(
 #[allow(clippy::type_complexity)]
 fn local_cast_edge(
     mut prev: Local<(bool, u32, u8)>, // (charging, hold_ticks, latched slot)
+    rollback: Query<(), With<lightyear::prelude::Rollback>>,
     local: Query<
         (
             &Position,
@@ -324,6 +325,14 @@ fn local_cast_edge(
     >,
     mut predicted: MessageWriter<PredictedCast>,
 ) {
+    // Rollback re-simulation REPLAYS FixedUpdate over already-simulated ticks — without this
+    // guard the edge (a Local state machine, not rollback-managed) re-fires and duplicates the
+    // predicted cosmetics every time a rollback spans a cast (observed under the conditioner:
+    // 31 client edges for 8 real casts). The presentation edge only ever fires on FIRST
+    // simulation; the server's own detector is rollback-free by construction.
+    if !rollback.is_empty() {
+        return;
+    }
     let Ok((pos, obelisk_id, action)) = local.single() else {
         return;
     };
@@ -434,7 +443,8 @@ fn trace_remote_cast_phase(
 /// [H] check support: throttled trace of a REMOTE predicted player's avian `Position` (the
 /// local player is excluded). Lets the headless movement-replication check confirm the OTHER client
 /// observes a moving player's predicted remote pose (driven by rebroadcast inputs) propagate
-/// server → this client. Keyed by `NetworkOwner`, gated on `Changed<Position>`.
+/// server → this client. Keyed by `NetworkOwner`, gated on `Changed<Position>`, throttled to
+/// every 10th change (each line carries the shared wall-clock `ts`, so freshness is measurable).
 #[allow(clippy::type_complexity)]
 fn trace_received_remote_pose(
     remotes: Query<
@@ -449,7 +459,7 @@ fn trace_received_remote_pose(
 ) {
     for (owner, position) in &remotes {
         *throttle += 1;
-        if *throttle % 30 == 1 {
+        if *throttle % 10 == 1 {
             crate::trace::event(
                 "remote_pose",
                 serde_json::json!({
