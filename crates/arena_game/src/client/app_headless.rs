@@ -152,7 +152,9 @@ pub(super) fn autocast(
     if *accum >= period {
         *accum = 0.0;
         if intent.0.is_none() {
-            intent.0 = Some("firebolt".to_string());
+            intent.0 = Some(
+                std::env::var("ARENA_AUTOCAST_SKILL").unwrap_or_else(|_| "firebolt".to_string()),
+            );
         }
     }
 }
