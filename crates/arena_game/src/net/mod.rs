@@ -114,9 +114,10 @@ pub fn charge_byte_from_hold_ticks(hold_ticks: u32) -> u8 {
     charge_byte_from_frac(((hold_ticks as f32 - 1.0) / (full - 1.0)).clamp(0.0, 1.0))
 }
 
-/// Netcode protocol id. Bumped whenever the wire format changes incompatibly. Bumped to 2 for the
-/// input-carried cast wire (ArenaInput v2 with pitch/skill_slot; `CastRequestMessage` removed).
-pub const PROTOCOL_ID: u64 = 2;
+/// Netcode protocol id. Bumped whenever the wire format changes incompatibly. Bumped to 3 for the
+/// levels-and-lobby wire (RoundStateMessage v2 with host+level, StartMatchMessage, phase tag 0 now
+/// Lobby). 2 was the input-carried cast wire (ArenaInput v2 with pitch/skill_slot).
+pub const PROTOCOL_ID: u64 = 3;
 
 /// Shared netcode private key. Dev/test only — a real deployment holds the key server-side and
 /// hands clients a signed `ConnectToken` from a backend auth service.
@@ -134,6 +135,8 @@ pub const ROUND_WINS_TO_MATCH: u8 = 2;
 pub const COUNTDOWN_SECS: f32 = 3.0;
 /// Pause between a round ending and the next countdown (seconds), so the result is readable.
 pub const ROUND_OVER_SECS: f32 = 2.0;
+/// How long the MatchOver banner holds before everyone returns to the lobby (seconds).
+pub const MATCH_OVER_SECS: f32 = 6.0;
 
 /// Default address the server binds to and clients connect to.
 pub fn default_server_addr() -> std::net::SocketAddr {

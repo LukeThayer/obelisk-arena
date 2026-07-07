@@ -1,21 +1,24 @@
-//! Best-of-3 round state machine (guide §7).
+//! Best-of-3 round state machine (guide §7), lobby-centric since the levels-and-lobby design.
 //!
 //! The server owns the match flow and broadcasts it as a `RoundStateMessage` on the reliable
 //! `EventChannel`. Flow:
-//!   WaitingForPlayers  — until 2 ClientOf players exist.
-//!   Countdown(t)       — ~3s pre-round; reset hp/effects + respawn both at markers on ENTRY.
+//!   Lobby              — everyone hangs out in the lobby LEVEL; the HOST starts a match (G).
+//!   Countdown(t)       — ~3s pre-round; reset hp/effects + respawn both at the level's match
+//!                        slots on ENTRY. Entered ONLY via an accepted `StartMatchMessage`
+//!                        (never auto-started by player count).
 //!   Active             — the duel; a round ends when a player's obelisk dies (NetEvent::EntityDied).
 //!   RoundOver{winner}  — brief pause crediting the SURVIVOR; first to 2 wins → MatchOver.
-//!   MatchOver{winner}  — terminal; the banner stays.
+//!   MatchOver{winner}  — timed banner (`MATCH_OVER_SECS`), then everyone returns to the LOBBY.
 //!
 //! Damage stays 100% server-authoritative (obelisk resolves it); this machine only reads the death
 //! stream + resets state between rounds. The reset heals to max + clears effects (so a leftover burn
 //! DoT doesn't pre-damage the next round) + interrupts any in-flight cast + teleports both back to
-//! their spawn markers.
+//! the current level's match spawn slots.
 //!
-//! The `faction_for_slot` helper + `cleanup_player_on_disconnect` observer live here too: factions
-//! are RE-asserted by sorted-id slot every round, and a disconnect drops the client's score entry +
-//! re-evaluates the phase.
+//! The machine never does level IO: it requests switches via `levels::PendingLevelSwitch`
+//! (`apply_level_switch` owns despawn/load/spawn). The `faction_for_slot` helper +
+//! `cleanup_player_on_disconnect` observer live here too: factions are RE-asserted by sorted-id
+//! slot every round, and a disconnect drops the client's score entry + re-evaluates the phase.
 
 use std::collections::HashMap;
 
@@ -29,10 +32,15 @@ use serde_json::json;
 use crate::net::protocol::{
     EventChannel, NetworkOwner, NetworkedPlayer, ObeliskNetId, RoundStateMessage,
 };
-use crate::net::{COUNTDOWN_SECS, ROUND_OVER_SECS, ROUND_WINS_TO_MATCH};
+use crate::net::{COUNTDOWN_SECS, MATCH_OVER_SECS, ROUND_OVER_SECS, ROUND_WINS_TO_MATCH};
 use crate::trace;
 
-use super::spawn::{peer_to_u64, ClientPlayerMap, SPAWN_MARKERS};
+use super::levels::{
+    lobby_spawn_index, spawn_rotation, CurrentLevel, HostState, LevelSpawns, PendingLevelSwitch,
+};
+use super::spawn::{peer_to_u64, ClientPlayerMap};
+
+use arena_sim::level::LOBBY_LEVEL_ID;
 
 // The match-pacing constants (`ROUND_WINS_TO_MATCH`, `COUNTDOWN_SECS`, `ROUND_OVER_SECS`) live in
 // the `net` tuning surface (the "match pacing" sub-section) and are imported above.
@@ -57,6 +65,8 @@ pub(crate) fn cleanup_player_on_disconnect(
     connections: Query<&RemoteId, With<ClientOf>>,
     mut client_map: ResMut<ClientPlayerMap>,
     mut round: ResMut<RoundState>,
+    mut host: ResMut<HostState>,
+    mut pending: ResMut<PendingLevelSwitch>,
 ) {
     let conn_entity = trigger.entity;
     let Ok(RemoteId(peer_id)) = connections.get(conn_entity) else {
@@ -72,15 +82,27 @@ pub(crate) fn cleanup_player_on_disconnect(
     let obelisk_id = format!("player_{client_id}");
     round.scores.remove(&obelisk_id);
 
-    // Below 2 players: bail any in-progress (non-terminal) phase back to waiting so the survivor
-    // isn't stuck. MatchOver is terminal (hold the banner); WaitingForPlayers is already there.
+    // Host re-election: first of the join order still connected inherits.
+    let prev_host = host.host;
+    host.on_disconnect(client_id);
+    if host.host != prev_host {
+        round.dirty = true; // re-broadcast so the new host learns of its promotion
+        if let Some(new_host) = host.host {
+            trace::event("host_elected", json!({ "client_id": new_host }));
+        }
+    }
+
+    // Below 2 players: bail any in-progress (non-terminal) phase back to the LOBBY (level + phase)
+    // so the survivor isn't stuck mid-arena. MatchOver is terminal-ish (its timer returns everyone
+    // to the lobby anyway); Lobby is already there.
     if client_map.0.len() < 2 {
         match round.phase {
             RoundPhase::Countdown(_) | RoundPhase::Active | RoundPhase::RoundOver { .. } => {
-                round.phase = RoundPhase::WaitingForPlayers;
+                round.phase = RoundPhase::Lobby;
                 round.dirty = true;
+                pending.0 = Some(LOBBY_LEVEL_ID.to_string());
             }
-            RoundPhase::WaitingForPlayers | RoundPhase::MatchOver { .. } => {}
+            RoundPhase::Lobby | RoundPhase::MatchOver { .. } => {}
         }
     }
     trace::event(
@@ -92,19 +114,20 @@ pub(crate) fn cleanup_player_on_disconnect(
 /// The match phase. Mirrors `RoundStateMessage.phase` (0..=4) but carries the live timer/winner.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RoundPhase {
-    WaitingForPlayers,
+    /// Hanging out in the lobby level. Exited ONLY by an accepted host start request.
+    Lobby,
     Countdown(f32),
     Active,
     RoundOver { winner: String, remaining: f32 },
-    MatchOver { winner: String },
+    MatchOver { winner: String, remaining: f32 },
 }
 
 impl RoundPhase {
-    /// The wire phase tag (matches the `RoundStateMessage` docstring: 0 wait, 1 countdown, 2 active,
-    /// 3 round-over, 4 match-over).
+    /// The wire phase tag (matches the `RoundStateMessage` docstring: 0 lobby, 1 countdown,
+    /// 2 active, 3 round-over, 4 match-over).
     fn wire_tag(&self) -> u8 {
         match self {
-            RoundPhase::WaitingForPlayers => 0,
+            RoundPhase::Lobby => 0,
             RoundPhase::Countdown(_) => 1,
             RoundPhase::Active => 2,
             RoundPhase::RoundOver { .. } => 3,
@@ -114,13 +137,14 @@ impl RoundPhase {
     fn countdown_secs(&self) -> f32 {
         match self {
             RoundPhase::Countdown(t) => *t,
-            RoundPhase::RoundOver { remaining, .. } => *remaining,
+            RoundPhase::RoundOver { remaining, .. }
+            | RoundPhase::MatchOver { remaining, .. } => *remaining,
             _ => 0.0,
         }
     }
     fn winner(&self) -> String {
         match self {
-            RoundPhase::RoundOver { winner, .. } | RoundPhase::MatchOver { winner } => {
+            RoundPhase::RoundOver { winner, .. } | RoundPhase::MatchOver { winner, .. } => {
                 winner.clone()
             }
             _ => String::new(),
@@ -128,26 +152,37 @@ impl RoundPhase {
     }
 }
 
-/// Server-owned best-of-3 match state. `scores` is keyed by obelisk_id; `entered_active_for` guards
+/// Should the Lobby phase hand off to Countdown? ONLY on an explicit, accepted start request with
+/// both duelists present — player count alone never starts a match. Pure so it's unit-testable.
+pub(crate) fn lobby_should_start(player_count: usize, start_requested: bool) -> bool {
+    player_count >= 2 && start_requested
+}
+
+/// Server-owned best-of-3 match state. `scores` is keyed by obelisk_id; `needs_round_reset` guards
 /// the per-round reset so it runs exactly once on the Countdown→Active transition.
 #[derive(Resource)]
 pub(crate) struct RoundState {
-    phase: RoundPhase,
+    pub(crate) phase: RoundPhase,
     /// Round wins per obelisk_id. Populated when 2 players first appear.
     scores: HashMap<String, u8>,
     /// True when the phase/score changed and a `RoundStateMessage` must be (re)broadcast.
     dirty: bool,
     /// Set true on entering `Active`; the reset (heal/respawn) runs on the rising edge.
     needs_round_reset: bool,
+    /// An accepted host start request (the level id), set by `levels::drain_start_match` and
+    /// consumed by the FSM's Lobby arm the same frame. The level switch itself rides
+    /// `PendingLevelSwitch`; this only arms the phase transition.
+    pub(crate) start_requested: Option<String>,
 }
 
 impl Default for RoundState {
     fn default() -> Self {
         Self {
-            phase: RoundPhase::WaitingForPlayers,
+            phase: RoundPhase::Lobby,
             scores: HashMap::new(),
-            dirty: true, // broadcast the initial WaitingForPlayers once a client can receive it
+            dirty: true, // broadcast the initial Lobby once a client can receive it
             needs_round_reset: false,
+            start_requested: None,
         }
     }
 }
@@ -163,6 +198,14 @@ impl RoundState {
             out[i] = (id.clone(), *wins);
         }
         out
+    }
+
+    /// Zero every player's round wins (match start / return to lobby) + mark for re-broadcast.
+    pub(crate) fn reset_scores(&mut self) {
+        for wins in self.scores.values_mut() {
+            *wins = 0;
+        }
+        self.dirty = true;
     }
 }
 
@@ -254,6 +297,7 @@ pub(crate) fn detect_round_end(
             if wins >= ROUND_WINS_TO_MATCH {
                 round.phase = RoundPhase::MatchOver {
                     winner: winner.clone(),
+                    remaining: MATCH_OVER_SECS,
                 };
                 trace::event("match_over", json!({ "winner": winner, "wins": wins }));
             } else {
@@ -267,8 +311,9 @@ pub(crate) fn detect_round_end(
     }
 }
 
-/// Drive the round FSM by wall/real time each `Update`. Handles: waiting → countdown (once 2 players
-/// exist) → active (with the per-round reset on entry) → round-over pause → next countdown. The reset
+/// Drive the round FSM by wall/real time each `Update`. Handles: lobby → countdown (ONLY on an
+/// accepted host start request) → active (with the per-round reset on entry) → round-over pause →
+/// next countdown; MatchOver holds `MATCH_OVER_SECS` then returns everyone to the lobby. The reset
 /// (heal/clear-effects/respawn) runs here on the Countdown→Active edge via `reset_for_new_round`.
 #[allow(clippy::type_complexity)]
 pub(crate) fn run_round_machine(
@@ -280,6 +325,7 @@ pub(crate) fn run_round_machine(
             &ObeliskNetId,
             &mut Attributes,
             &mut Position,
+            &mut Rotation,
             &mut LinearVelocity,
             &NetworkOwner,
             &mut Faction,
@@ -288,6 +334,8 @@ pub(crate) fn run_round_machine(
     >,
     mut commands: Commands,
     client_map: Res<ClientPlayerMap>,
+    spawns: Res<LevelSpawns>,
+    mut pending: ResMut<PendingLevelSwitch>,
 ) {
     let dt = time.delta_secs();
     let player_count = players.iter().count();
@@ -304,18 +352,22 @@ pub(crate) fn run_round_machine(
     }
 
     match round.phase.clone() {
-        RoundPhase::WaitingForPlayers => {
-            if player_count >= 2 {
+        RoundPhase::Lobby => {
+            // No auto-start: the ONLY exit is an accepted host start request (drain_start_match
+            // validated it and queued the level switch this same frame).
+            let requested = round.start_requested.take();
+            if lobby_should_start(player_count, requested.is_some()) {
                 round.phase = RoundPhase::Countdown(COUNTDOWN_SECS);
                 round.dirty = true;
                 trace::event("round_phase", json!({ "phase": "countdown" }));
             }
         }
         RoundPhase::Countdown(t) => {
-            // If a player vanished mid-countdown, fall back to waiting.
+            // If a player vanished mid-countdown, fall back to the lobby.
             if player_count < 2 {
-                round.phase = RoundPhase::WaitingForPlayers;
+                round.phase = RoundPhase::Lobby;
                 round.dirty = true;
+                pending.0 = Some(LOBBY_LEVEL_ID.to_string());
                 return;
             }
             let nt = t - dt;
@@ -332,17 +384,18 @@ pub(crate) fn run_round_machine(
             }
         }
         RoundPhase::Active => {
-            // If a player vanished mid-duel, fall back to waiting (mirrors the Countdown arm) so a
-            // disconnect can't hang the survivor in 'FIGHT!' forever.
+            // If a player vanished mid-duel, fall back to the lobby (mirrors the Countdown arm) so
+            // a disconnect can't hang the survivor in 'FIGHT!' forever.
             if player_count < 2 {
-                round.phase = RoundPhase::WaitingForPlayers;
+                round.phase = RoundPhase::Lobby;
                 round.dirty = true;
+                pending.0 = Some(LOBBY_LEVEL_ID.to_string());
                 return;
             }
             // On the rising edge into Active, reset + respawn both players for the new round.
             if round.needs_round_reset {
                 round.needs_round_reset = false;
-                reset_for_new_round(&mut players, &mut commands, &client_map);
+                reset_for_new_round(&mut players, &mut commands, &client_map, &spawns);
                 trace::event("round_reset", json!({ "players": player_count }));
             }
         }
@@ -362,17 +415,33 @@ pub(crate) fn run_round_machine(
                 };
             }
         }
-        RoundPhase::MatchOver { .. } => { /* terminal — hold the banner */ }
+        RoundPhase::MatchOver { winner, remaining } => {
+            // Timed banner, then everyone returns to the LOBBY (level switch + fresh scores).
+            let nr = remaining - dt;
+            if nr <= 0.0 {
+                round.phase = RoundPhase::Lobby;
+                round.reset_scores();
+                pending.0 = Some(LOBBY_LEVEL_ID.to_string());
+                trace::event("round_phase", json!({ "phase": "lobby" }));
+            } else {
+                round.dirty |= remaining.ceil() != nr.ceil();
+                round.phase = RoundPhase::MatchOver {
+                    winner,
+                    remaining: nr,
+                };
+            }
+        }
     }
 }
 
 /// Per-round reset (runs on the Countdown→Active edge): heal every player to full, clear effects
 /// (drops a leftover burn DoT), interrupt any in-flight cast, RE-assert each player's `Faction` by
 /// sorted-id slot (so a connect-order race can never leave the two duelists sharing a faction —
-/// which would make every firebolt resolve zero hits), and teleport both back to their fixed spawn
-/// markers (avian `Position`, zeroing `LinearVelocity` so a falling/jumping body lands clean).
-/// lightyear replicates the Position reset; the predicted owner rolls back to it. Slot is by the
-/// player's connection order in `ClientPlayerMap` so the two land at the two markers consistently.
+/// which would make every firebolt resolve zero hits), and teleport both to the CURRENT LEVEL's
+/// match spawn slots (avian `Position` + the authored facing as `Rotation`, zeroing
+/// `LinearVelocity` so a falling/jumping body lands clean). lightyear replicates the pose reset;
+/// the predicted owner rolls back to it. Slot is by sorted client id in `ClientPlayerMap` so the
+/// two land at slots 0/1 consistently (`drain_start_match` validated both slots exist).
 #[allow(clippy::type_complexity)]
 fn reset_for_new_round(
     players: &mut Query<
@@ -381,6 +450,7 @@ fn reset_for_new_round(
             &ObeliskNetId,
             &mut Attributes,
             &mut Position,
+            &mut Rotation,
             &mut LinearVelocity,
             &NetworkOwner,
             &mut Faction,
@@ -389,6 +459,7 @@ fn reset_for_new_round(
     >,
     commands: &mut Commands,
     client_map: &ClientPlayerMap,
+    spawns: &LevelSpawns,
 ) {
     // Stable slot assignment: order client ids the same way `spawn_player_on_connect` did (insertion
     // order isn't stable across a HashMap, so sort by client id for determinism).
@@ -400,7 +471,7 @@ fn reset_for_new_round(
         .map(|(i, (_, e))| (*e, i))
         .collect();
 
-    for (entity, net_id, mut attrs, mut position, mut lin_vel, _owner, mut faction) in
+    for (entity, net_id, mut attrs, mut position, mut rotation, mut lin_vel, _owner, mut faction) in
         players.iter_mut()
     {
         // Heal to full + restore mana + clear effects (drop any lingering DoT/buff).
@@ -413,23 +484,27 @@ fn reset_for_new_round(
         // Interrupt any in-flight cast so the new round starts clean.
         commands.entity(entity).interrupt_cast();
 
-        // Respawn at the fixed marker for this player's slot; zero velocity so the Dynamic body
-        // doesn't carry momentum (or a fall) into the new round. Re-assert the slot's faction too
-        // (same sorted-id slot), so the two are guaranteed OPPOSING factions before the round goes
-        // Active regardless of connect order — firebolt's `Enemies` filter can resolve hits.
-        let slot = slot_of
-            .get(&entity)
-            .copied()
-            .unwrap_or(0)
-            .min(SPAWN_MARKERS.len() - 1);
-        let spawn = SPAWN_MARKERS[slot];
-        position.0 = spawn;
+        // Respawn at the current level's spawn for this player's slot (round-robin degrades
+        // gracefully if the level somehow has fewer slots than players); zero velocity so the
+        // Dynamic body doesn't carry momentum (or a fall) into the new round. Re-assert the slot's
+        // faction too (same sorted-id slot), so the two are guaranteed OPPOSING factions before
+        // the round goes Active regardless of connect order.
+        let slot = slot_of.get(&entity).copied().unwrap_or(0);
+        let Some(desc) = spawns
+            .slots
+            .get(lobby_spawn_index(slot, spawns.slots.len()))
+        else {
+            continue; // no spawns loaded (unreachable for validated levels)
+        };
+        position.0 = desc.position;
+        *rotation = spawn_rotation(desc);
         lin_vel.0 = Vec3::ZERO;
         *faction = faction_for_slot(slot);
 
         trace::event(
             "player_respawn",
-            json!({ "obelisk_id": net_id.0, "pos": [spawn.x, spawn.y, spawn.z],
+            json!({ "obelisk_id": net_id.0,
+                    "pos": [desc.position.x, desc.position.y, desc.position.z],
                     "life": max_life }),
         );
     }
@@ -441,6 +516,8 @@ fn reset_for_new_round(
 pub(crate) fn broadcast_round_state(
     mut round: ResMut<RoundState>,
     mut senders: Query<&mut MessageSender<RoundStateMessage>, With<ClientOf>>,
+    host: Res<HostState>,
+    current: Res<CurrentLevel>,
 ) {
     if !round.dirty {
         return;
@@ -454,6 +531,8 @@ pub(crate) fn broadcast_round_state(
         scores: round.wire_scores(),
         winner: round.phase.winner(),
         match_seed: crate::net::session_seed(),
+        host: host.host.unwrap_or(0),
+        level: current.id.clone(),
     };
     for mut sender in &mut senders {
         sender.send::<EventChannel>(msg.clone());
@@ -464,15 +543,27 @@ pub(crate) fn broadcast_round_state(
         trace::event(
             "round_state",
             json!({ "phase": msg.phase, "countdown": msg.countdown,
-                    "scores": msg.scores, "winner": msg.winner }),
+                    "scores": msg.scores, "winner": msg.winner,
+                    "host": msg.host, "level": msg.level }),
         );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{faction_for_slot, round_outcome, RoundOutcome};
+    use super::{faction_for_slot, lobby_should_start, round_outcome, RoundOutcome};
     use obelisk_bevy::prelude::Faction;
+
+    /// The lobby NEVER auto-starts on player count — only an explicit accepted start request with
+    /// both duelists present exits it. (The pre-lobby FSM auto-started at 2 players; the net-test's
+    /// autostart hook now supplies the explicit request instead.)
+    #[test]
+    fn lobby_does_not_autostart_with_two_players() {
+        assert!(!lobby_should_start(2, false));
+        assert!(!lobby_should_start(1, true));
+        assert!(!lobby_should_start(0, false));
+        assert!(lobby_should_start(2, true));
+    }
 
     /// Slot 0 → Player, slot 1 → Enemy, and the two are always OPPOSING — so the two duelists can
     /// never share a faction (which would make firebolt's `Enemies` filter resolve zero hits and

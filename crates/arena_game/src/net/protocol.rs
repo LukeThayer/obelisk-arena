@@ -122,6 +122,11 @@ impl Plugin for ProtocolPlugin {
         // client as a plain component update.
         app.register_message::<CustomizeMessage>()
             .add_direction(NetworkDirection::ClientToServer);
+
+        // Host's "start the match on <level>" request (reliable RequestChannel). The server
+        // validates sender==host ∧ phase==Lobby ∧ 2 players ∧ level exists before acting.
+        app.register_message::<StartMatchMessage>()
+            .add_direction(NetworkDirection::ClientToServer);
     }
 }
 
@@ -156,13 +161,13 @@ pub struct CustomizeMessage {
     pub parts: PartSelection,
 }
 
-/// Best-of-3 round flow (guide §7). The wire shape is fixed here so the protocol checksum agrees on
-/// both peers.
+/// Best-of-3 round flow (guide §7) + lobby/host state (levels-and-lobby design). The wire shape is
+/// fixed here so the protocol checksum agrees on both peers.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoundStateMessage {
-    /// 0 WaitingForPlayers, 1 Countdown, 2 Active, 3 RoundOver, 4 MatchOver.
+    /// 0 Lobby, 1 Countdown, 2 Active, 3 RoundOver, 4 MatchOver.
     pub phase: u8,
-    /// Countdown seconds remaining (phase 1) — 0 otherwise.
+    /// Seconds remaining on the phase timer (Countdown / RoundOver / MatchOver) — 0 otherwise.
     pub countdown: f32,
     /// (obelisk_id, round wins) for each of the two players.
     pub scores: [(String, u8); 2],
@@ -170,6 +175,20 @@ pub struct RoundStateMessage {
     pub winner: String,
     /// Replicated session seed (forward-prep for Stage B; informational in Stage A).
     pub match_seed: u64,
+    /// The elected host's client id (first joiner still connected) — 0 while no host exists. The
+    /// matching client shows the "press G" level-select affordance.
+    pub host: u64,
+    /// The currently-loaded level id (catalog stem, e.g. "lobby", "arena_flat"). Clients load the
+    /// matching `.scn.ron` locally on change.
+    pub level: String,
+}
+
+/// Host request: start the PvP match on `level` (a `LevelCatalog` id). Client→server, reliable
+/// (`RequestChannel`), sent from the G-key level-select panel. The server ignores it from anyone
+/// but the elected host, outside the Lobby phase, below 2 players, or naming an unknown level.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StartMatchMessage {
+    pub level: String,
 }
 
 // ---------------------------------------------------------------------------------------------

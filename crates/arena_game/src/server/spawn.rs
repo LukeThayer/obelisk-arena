@@ -2,11 +2,13 @@
 //! networked combatant per connected client (`Replicate::to_clients(All)` +
 //! `PredictionTarget::Single(owner)` + `InterpolationTarget::AllExceptSingle(owner)`) in the
 //! `On<Add, Connected>` OBSERVER so the owner's replication sender exists before the targets resolve.
-//! Also owns the `ClientPlayerMap`/`NetworkedIdAlloc` resources, the `SPAWN_MARKERS` geometry, the
-//! `peer_to_u64` id helper, and the static floor spawn — all shared by spawn AND the per-round reset.
+//! Also owns the `ClientPlayerMap`/`NetworkedIdAlloc` resources and the `peer_to_u64` id helper.
+//! Spawn POSITIONS come from the current level's `LevelSpawns` (the old hard-coded floor +
+//! `SPAWN_MARKERS` are gone — `levels::startup_load_levels` loads the lobby level instead).
 
 use std::collections::{HashMap, HashSet};
 
+use avian3d::prelude::Rotation;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::ClientOf;
@@ -22,12 +24,8 @@ use crate::net::protocol::{
 };
 use crate::trace;
 
+use super::levels::{lobby_spawn_index, spawn_rotation, HostState, LevelSpawns};
 use super::rounds::faction_for_slot;
-
-/// Spawn the static arena floor collider (server-side) the Dynamic player bodies rest on.
-pub(crate) fn spawn_floor(mut commands: Commands) {
-    crate::spawn_arena_floor(&mut commands);
-}
 
 /// Lookup: connected client id → their `NetworkedPlayer` entity. Populated by
 /// `spawn_player_on_connect`; read for cast attribution / input routing.
@@ -49,11 +47,6 @@ impl NetworkedIdAlloc {
         self.next
     }
 }
-
-/// The two fixed arena spawn markers (spec §11 hard-coded geometry) — now lifted into `arena_sim`
-/// and re-exported so the spawn + per-round reset still place players by connection-sorted slot
-/// (marker 0 / marker 1, facing each other across the +Z axis).
-pub(crate) use arena_sim::spawn::SPAWN_MARKERS;
 
 /// Resolve a netcode `PeerId` to its `u64` client id, matching every id-carrying variant.
 pub(crate) fn peer_to_u64(peer: &PeerId) -> Option<u64> {
@@ -92,6 +85,8 @@ pub(crate) fn spawn_player_on_connect(
     mut commands: Commands,
     mut id_alloc: ResMut<NetworkedIdAlloc>,
     mut client_map: ResMut<ClientPlayerMap>,
+    mut host: ResMut<HostState>,
+    spawns: Res<LevelSpawns>,
 ) {
     let conn_entity = trigger.entity;
     let Ok((_, RemoteId(peer_id))) = connections.get(conn_entity) else {
@@ -103,6 +98,15 @@ pub(crate) fn spawn_player_on_connect(
     let existing_ids: HashSet<u64> = existing.iter().map(|o| o.0).collect();
     if existing_ids.contains(&client_id) {
         return; // already spawned (idempotent guard)
+    }
+
+    // Host election: first joiner (by CONNECT order) still connected is the host.
+    let prev_host = host.host;
+    host.on_connect(client_id);
+    if host.host != prev_host {
+        if let Some(new_host) = host.host {
+            trace::event("host_elected", json!({ "client_id": new_host }));
+        }
     }
 
     // Stable slot by SORTED client id over all currently-connected clients (matches
@@ -117,9 +121,16 @@ pub(crate) fn spawn_player_on_connect(
     let slot = all_ids
         .iter()
         .position(|&id| id == client_id)
-        .unwrap_or(0)
-        .min(SPAWN_MARKERS.len() - 1);
-    let spawn = SPAWN_MARKERS[slot];
+        .unwrap_or(0);
+    // Place at the CURRENT level's spawn points, round-robin by sorted-id index (lobby levels can
+    // have any number of points; a match level's slots 0/1 coincide with the match placement).
+    let spawn_desc = spawns
+        .slots
+        .get(lobby_spawn_index(slot, spawns.slots.len()))
+        .copied();
+    let spawn = spawn_desc
+        .map(|d| d.position)
+        .unwrap_or(Vec3::new(0.0, arena_sim::tuning::GROUND_Y, 0.0));
     // OPPOSING factions so firebolt's `hit_filter: Enemies` (target_faction != caster_faction)
     // can resolve a hit player→player, and `nearest_enemy` acquires the opponent. With obelisk's
     // 3-faction model (Player/Enemy/Neutral), a 2-player duel puts slot 0 on Player and slot 1
@@ -160,6 +171,11 @@ pub(crate) fn spawn_player_on_connect(
     commands
         .entity(player)
         .insert((
+            // Face the spawn point's authored direction (identity if the level has no spawns).
+            spawn_desc
+                .as_ref()
+                .map(spawn_rotation)
+                .unwrap_or(Rotation::default()),
             Name::new(format!("NetworkedPlayer({client_id})")),
             NetworkedPlayer,
             NetworkOwner(client_id),
