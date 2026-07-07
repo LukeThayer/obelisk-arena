@@ -11,9 +11,11 @@
 //! FORCE that accelerates the planar velocity toward `move_dir * MAX_SPEED` (avian's `move_towards`
 //! recipe); a grounded jump applies an upward impulse. Body facing (yaw) is a SEPARATE write to
 //! avian `Rotation` (avian's `Forces` borrows `Rotation` internally, so the two can't share a
-//! query). Ground state is read from the body's world Y against the flat arena floor (no raycast —
-//! the arena platform is flat + hard-coded, and a position threshold sidesteps the
-//! ray-hits-own-hurtbox + `LightyearAvianPlugin` spatial-refresh-ordering footguns).
+//! query). Ground state comes from [`grounded_by_ray`] — a short downward raycast from the capsule
+//! bottom (levels are real geometry now: platforms/ramps at any height, not one flat floor) —
+//! computed by the CALLER and passed into [`apply_arena_movement`], keeping the controller pure
+//! and rollback-friendly (both peers compute it identically from the same pipeline state, with the
+//! caster body + its hurtbox child excluded so the ray can't ground on itself).
 
 use avian3d::prelude::forces::ForcesItem;
 use avian3d::prelude::*;
@@ -35,21 +37,54 @@ pub const JUMP_SPEED: f32 = 7.0;
 /// exactly. Lower it (<1.0) to make mid-air direction changes feel floatier/committed.
 pub const AIR_CONTROL: f32 = 1.0;
 
-/// Apply the planar movement force + jump impulse for one character from its `ArenaInput`. World Y
-/// of the body is used for the ground check (flat arena floor at world 0; body rests at
-/// [`crate::tuning::GROUND_Y`]).
+/// How far below the capsule BOTTOM the ground may be while still counting as grounded (m).
+/// Generous enough to keep the jump responsive across solver micro-separation, small enough that
+/// mid-jump (apex ≈ 1.22 m) is unambiguously airborne. (The old flat-floor threshold allowed
+/// 0.05 m above rest height; rest already sits ~0 m from the floor, so 0.15 m of ray is the same
+/// feel with margin for ramps/steps.)
+pub const GROUNDED_RAY_SLACK: f32 = 0.15;
+
+/// The world-space BOTTOM point of the player capsule for a body centered at `center`
+/// (half-height = half-length + radius).
+pub fn capsule_bottom(center: Vec3) -> Vec3 {
+    center
+        - Vec3::Y * (crate::tuning::PLAYER_CAPSULE_LENGTH * 0.5 + crate::tuning::PLAYER_CAPSULE_RADIUS)
+}
+
+/// Raycast ground check: a ray straight DOWN from the capsule bottom; a hit within
+/// [`GROUNDED_RAY_SLACK`] ⇒ grounded. `exclude` must carry the body + its child colliders (the
+/// hurtbox sensor) so the ray can't ground on the caster itself. `solid: true` so a
+/// solver-penetrated floor still reads as ground (hit at distance 0). Works on ANY level geometry
+/// (platforms, ramps) — this replaced the flat-floor `pos_y <= GROUND_Y + 0.05` check when levels
+/// became real colliders (levels-and-lobby). Both peers call it against the same refreshed
+/// `SpatialQueryPipeline`, so prediction and the server agree.
+pub fn grounded_by_ray(spatial: &SpatialQuery, body_center: Vec3, exclude: &[Entity]) -> bool {
+    // Start slightly ABOVE the capsule bottom: a body resting tangent on a floor puts the bottom
+    // EXACTLY on the surface, and a ray originating on a face is a degenerate no-hit in parry.
+    const LIFT: f32 = 0.05;
+    let filter = SpatialQueryFilter::default().with_excluded_entities(exclude.iter().copied());
+    spatial
+        .cast_ray(
+            capsule_bottom(body_center) + Vec3::Y * LIFT,
+            Dir3::NEG_Y,
+            LIFT + GROUNDED_RAY_SLACK,
+            true,
+            &filter,
+        )
+        .is_some()
+}
+
+/// Apply the planar movement force + jump impulse for one character from its `ArenaInput`.
+/// `grounded` is computed by the CALLER (via [`grounded_by_ray`]) — passed in so this stays pure
+/// (no spatial access) and lightyear can re-run it during rollback from the query row alone.
 pub fn apply_arena_movement(
     mass: &ComputedMass,
     dt: f32,
     input: &ArenaInput,
     mut forces: ForcesItem,
+    grounded: bool,
 ) {
     let dt = dt.max(1e-5);
-
-    // Ground check first (read position as a copy, dropping the immutable borrow before the later
-    // mutable force/impulse calls) so the airborne velocity-delta scale is known up front.
-    let pos_y = forces.position().0.y;
-    let grounded = pos_y <= crate::tuning::GROUND_Y + 0.05;
 
     // The movement force is applied unconditionally of ground state; only the per-tick velocity
     // delta is scaled by AIR_CONTROL when airborne (AIR_CONTROL = 1.0 ⇒ full air control, no scale).

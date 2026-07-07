@@ -78,7 +78,7 @@ pub fn add_obelisk_sim(app: &mut App, resolve_hits: bool) {
             .chain(),
     );
 
-    // Host-fired world impacts (report_ground_hits below) feed obelisk's `end_hitboxes` funnel
+    // Host-fired world impacts (report_world_hits below) feed obelisk's `end_hitboxes` funnel
     // via this observer (mirrors `ObeliskSimPlugin::build`).
     app.add_observer(timeline::advance::on_hitbox_world_hit);
     app.add_systems(
@@ -106,11 +106,11 @@ pub fn add_obelisk_sim(app: &mut App, resolve_hits: bool) {
                 .in_set(ObeliskSet::Advance),
             (
                 spatial::projectile::move_projectiles,
-                // Arena rule obelisk doesn't know: the flat floor. A (ballistic or down-aimed)
-                // projectile hitbox that crosses the floor plane has HIT THE WORLD — report it
-                // into obelisk's `end_hitboxes` funnel (HitWorld ending: end event + authored
-                // chain reaction at the impact point). After move, before detect.
-                report_ground_hits,
+                // Arena rule obelisk doesn't know: WORLD GEOMETRY. A projectile hitbox whose
+                // movement segment crosses a level collider (floor, wall, pillar) has HIT THE
+                // WORLD — report it into obelisk's `end_hitboxes` funnel (HitWorld ending: end
+                // event + authored chain reaction at the impact point). After move, before detect.
+                report_world_hits,
             )
                 .chain()
                 .in_set(ObeliskSet::Projectiles),
@@ -207,29 +207,81 @@ pub fn add_obelisk_sim_client(app: &mut App) {
     add_obelisk_sim(app, false);
 }
 
-/// Report any moving projectile hitbox that crossed the arena floor plane (top face at world
-/// y = 0 — see `spawn_arena_floor`) as a WORLD HIT into obelisk's termination funnel. The
-/// world is the host's knowledge (like physics), so the host detects the impact and fires
-/// `HitboxWorldHit`; obelisk's `end_hitboxes` then ends the hitbox with `EndReason::HitWorld`
-/// at the impact point — firing the end cue and spawning any authored `on_end` chain (e.g.
-/// firebolt's ground explosion). Runs on both peers (the client has no `Hitbox` entities).
+/// The previous tick's hitbox position — inserted by [`report_world_hits`] on first sight of a
+/// projectile, then updated each tick. Gives the world-hit check the MOVEMENT SEGMENT to cast
+/// (point-in-collider checks alone would tunnel through thin walls at projectile speeds).
+#[derive(Component)]
+pub struct LastHitboxPos(pub Vec3);
+
+/// Kill plane: a projectile below this world Y has left every conceivable level — end it as a
+/// world hit so its window can't fly forever.
+const PROJECTILE_KILL_PLANE_Y: f32 = -10.0;
+
+/// Report any moving projectile hitbox whose movement segment (previous tick position → current)
+/// intersects WORLD GEOMETRY — any non-sensor collider that isn't a combatant body (hitting a
+/// player is `detect_overlaps`' job; hurtboxes are sensors) — as a WORLD HIT into obelisk's
+/// termination funnel. The world is the host's knowledge (like physics), so the host detects the
+/// impact and fires `HitboxWorldHit`; obelisk's `end_hitboxes` then ends the hitbox with
+/// `EndReason::HitWorld` at the impact point — firing the end cue and spawning any authored
+/// `on_end` chain (e.g. firebolt's ground explosion). Replaced the flat-floor `y < 0` plane check
+/// when levels became real colliders (levels-and-lobby): bolts now burst on walls and pillars,
+/// and a projectile that escapes the level dies at the kill plane. Runs on both peers (the client
+/// has no `Hitbox` entities).
 #[allow(clippy::type_complexity)]
-fn report_ground_hits(
-    q: Query<
-        (Entity, &Transform),
+fn report_world_hits(
+    mut q: Query<
+        (Entity, &Transform, Option<&mut LastHitboxPos>),
         (
             With<obelisk_bevy::prelude::Hitbox>,
             With<obelisk_bevy::spatial::projectile::Projectile>,
             Without<obelisk_bevy::timeline::advance::WorldHit>,
         ),
     >,
+    combatants: Query<(), With<obelisk_bevy::prelude::Combatant>>,
+    sensors: Query<(), With<avian3d::prelude::Sensor>>,
+    spatial: avian3d::prelude::SpatialQuery,
     mut commands: Commands,
 ) {
-    for (e, tf) in &q {
-        if tf.translation.y < 0.0 {
-            // Impact point pinned ONTO the floor plane, not the underground overshoot.
-            let position = Vec3::new(tf.translation.x, 0.0, tf.translation.z);
-            commands.trigger(obelisk_bevy::events::HitboxWorldHit { hitbox: e, position });
+    for (e, tf, last) in &mut q {
+        let cur = tf.translation;
+        // First sight: no segment yet — record and check next tick (spawn is at the muzzle,
+        // never inside world geometry).
+        let prev = match last {
+            Some(mut l) => std::mem::replace(&mut l.0, cur),
+            None => {
+                commands.entity(e).insert(LastHitboxPos(cur));
+                continue;
+            }
+        };
+        if cur.y < PROJECTILE_KILL_PLANE_Y {
+            commands.trigger(obelisk_bevy::events::HitboxWorldHit {
+                hitbox: e,
+                position: cur,
+            });
+            continue;
+        }
+        let segment = cur - prev;
+        let length = segment.length();
+        if length <= 1e-6 {
+            continue;
+        }
+        let Ok(dir) = Dir3::new(segment / length) else {
+            continue;
+        };
+        let hit = spatial.cast_ray_predicate(
+            prev,
+            dir,
+            length,
+            true,
+            &avian3d::prelude::SpatialQueryFilter::default(),
+            &|entity| !combatants.contains(entity) && !sensors.contains(entity),
+        );
+        if let Some(hit) = hit {
+            let position = prev + *dir * hit.distance;
+            commands.trigger(obelisk_bevy::events::HitboxWorldHit {
+                hitbox: e,
+                position,
+            });
         }
     }
 }

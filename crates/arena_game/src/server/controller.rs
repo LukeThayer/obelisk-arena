@@ -30,18 +30,27 @@ pub(crate) fn server_apply_yaw(
     }
 }
 
-/// Apply the planar movement force + jump impulse for each authoritative character.
+/// Apply the planar movement force + jump impulse for each authoritative character. `grounded`
+/// comes from the shared raycast check (self + child hurtbox excluded so the ray can't ground on
+/// the caster) — real level geometry, not a flat-floor Y threshold.
 #[allow(clippy::type_complexity)]
 pub(crate) fn server_apply_movement(
     time: Res<Time>,
+    spatial: SpatialQuery,
+    children: Query<&Children>,
     mut q: Query<
-        (&ComputedMass, &ActionState<ArenaInput>, Forces),
+        (Entity, &Position, &ComputedMass, &ActionState<ArenaInput>, Forces),
         (With<NetworkedPlayer>, Without<Predicted>),
     >,
 ) {
     let dt = time.delta_secs();
-    for (mass, action, forces) in &mut q {
-        apply_arena_movement(mass, dt, &action.0, forces);
+    for (entity, position, mass, action, forces) in &mut q {
+        let mut exclude = vec![entity];
+        if let Ok(kids) = children.get(entity) {
+            exclude.extend(kids.iter());
+        }
+        let grounded = crate::shared_controller::grounded_by_ray(&spatial, position.0, &exclude);
+        apply_arena_movement(mass, dt, &action.0, forces, grounded);
     }
 }
 

@@ -212,14 +212,27 @@ fn client_apply_yaw(mut q: Query<(&ActionState<ArenaInput>, &mut Rotation), With
 }
 
 /// Predict the local player's movement force + jump, `With<Predicted>`. lightyear keeps
-/// `ActionState<ArenaInput>` correct for the (re)simulated tick during rollback.
+/// `ActionState<ArenaInput>` correct for the (re)simulated tick during rollback. `grounded` is
+/// the same raycast check the server runs (self excluded; the predicted client body has no
+/// hurtbox child, but excluding children is harmless) — rollback re-runs it against the
+/// re-simulated pipeline state, so the check stays deterministic.
 fn client_apply_movement(
     time: Res<Time>,
-    mut q: Query<(&ComputedMass, &ActionState<ArenaInput>, Forces), With<Predicted>>,
+    spatial: SpatialQuery,
+    children: Query<&Children>,
+    mut q: Query<
+        (Entity, &Position, &ComputedMass, &ActionState<ArenaInput>, Forces),
+        With<Predicted>,
+    >,
 ) {
     let dt = time.delta_secs();
-    for (mass, action, forces) in &mut q {
-        apply_arena_movement(mass, dt, &action.0, forces);
+    for (entity, position, mass, action, forces) in &mut q {
+        let mut exclude = vec![entity];
+        if let Ok(kids) = children.get(entity) {
+            exclude.extend(kids.iter());
+        }
+        let grounded = crate::shared_controller::grounded_by_ray(&spatial, position.0, &exclude);
+        apply_arena_movement(mass, dt, &action.0, forces, grounded);
     }
 }
 
