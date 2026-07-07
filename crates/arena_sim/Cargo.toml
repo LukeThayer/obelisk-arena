@@ -9,6 +9,12 @@ avian3d = { workspace = true }
 obelisk-bevy = { workspace = true }
 stat_core = { workspace = true }
 serde = { workspace = true }
+# Level loading (editor-authored .scn.ron): scene marker types + material types come from the
+# types-only bevy_editor_game (no egui — default-features off, set at the workspace dep);
+# PrimitiveShape (collider/mesh factory) from bevy_effect; ron for the DynamicScene payload.
+bevy_editor_game = { workspace = true }
+bevy_effect = { workspace = true }
+ron = { workspace = true }
 
 [dev-dependencies]
 obelisk-bevy = { workspace = true, features = ["test-support"] }

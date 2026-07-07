@@ -1,0 +1,79 @@
+(
+  resources: {},
+  entities: {
+    8589934469: (
+      components: {
+        "avian3d::dynamics::rigid_body::RigidBody": Static,
+        "bevy_ecs::name::Name": "Floor",
+        "bevy_editor_game::MaterialRef": Inline((
+          base: (
+            base_color: Srgba((
+              red: 0.45,
+              green: 0.45,
+              blue: 0.5,
+              alpha: 1.0,
+            )),
+            emissive: (
+              red: 0.0,
+              green: 0.0,
+              blue: 0.0,
+              alpha: 1.0,
+            ),
+            metallic: 0.0,
+            perceptual_roughness: 0.5,
+            reflectance: 0.5,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            unlit: false,
+            cull_mode: Back,
+            alpha_mode: Opaque,
+            ior: 1.5,
+            specular_transmission: 0.0,
+            specular_tint: LinearRgba((
+              red: 1.0,
+              green: 1.0,
+              blue: 1.0,
+              alpha: 1.0,
+            )),
+            clearcoat: 0.0,
+            clearcoat_perceptual_roughness: 0.5,
+            anisotropy_strength: 0.0,
+            anisotropy_rotation: 0.0,
+            diffuse_transmission: 0.0,
+            thickness: 0.001,
+            uv_scale: (1.0, 1.0),
+            base_color_texture: None,
+            normal_map_texture: None,
+            metallic_roughness_texture: None,
+            emissive_texture: None,
+            occlusion_texture: None,
+          ),
+          extension: None,
+        )),
+        "bevy_modal_editor::scene::SceneEntity": (),
+        "bevy_modal_editor::scene::primitives::PrimitiveMarker": (
+          shape: Cube,
+        ),
+        "bevy_transform::components::transform::Transform": (
+          translation: (0.0, -0.5, 0.0),
+          rotation: (0.0, 0.0, 0.0, 1.0),
+          scale: (40.0, 1.0, 40.0),
+        ),
+      },
+    ),
+    8589934470: (
+      components: {
+        "bevy_ecs::name::Name": "spawn_0",
+        "bevy_modal_editor::scene::SceneEntity": (),
+        "arena_sim::level::ArenaSpawnPoint": (
+          slot: 0,
+        ),
+        "bevy_transform::components::transform::Transform": (
+          translation: (-4.0, 0.59, 0.0),
+          rotation: (0.0, -0.70710677, 0.0, 0.70710677),
+          scale: (1.0, 1.0, 1.0),
+        ),
+      },
+    ),
+  },
+)

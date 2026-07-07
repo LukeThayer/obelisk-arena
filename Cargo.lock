@@ -318,7 +318,10 @@ version = "0.1.0"
 dependencies = [
  "avian3d",
  "bevy",
+ "bevy_editor_game",
+ "bevy_effect",
  "obelisk-bevy",
+ "ron 0.8.1",
  "serde",
  "stat_core",
 ]
@@ -986,9 +989,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_editor_game"
+version = "0.1.0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#cd9ae1f73baee4814234efe14d9026f6d8bd8d05"
+dependencies = [
+ "bevy",
+ "bevy_effect",
+ "ron 0.8.1",
+ "serde",
+]
+
+[[package]]
 name = "bevy_effect"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#1cc6e7d9b62d2a9a70ac9c335468dc28bd8b497b"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#cd9ae1f73baee4814234efe14d9026f6d8bd8d05"
 dependencies = [
  "avian3d",
  "bevy",
@@ -1965,7 +1979,7 @@ dependencies = [
 [[package]]
 name = "bevy_vfx"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#1cc6e7d9b62d2a9a70ac9c335468dc28bd8b497b"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#cd9ae1f73baee4814234efe14d9026f6d8bd8d05"
 dependencies = [
  "avian3d",
  "bevy",

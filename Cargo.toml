@@ -51,4 +51,10 @@ bevy_vfx = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "
 # Windowed-client-only at runtime (`EffectPlugin` is added only in the windowed build), same as
 # `bevy_vfx` above.
 bevy_effect = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main" }
+# bevy_editor_game (the editor's types-only shared-vocabulary crate): the scene marker types
+# (SceneEntity/PrimitiveMarker/light markers, type_paths pinned) + MaterialRef/MaterialDefinition
+# that `arena_sim::level` needs to deserialize editor-authored `.scn.ron` levels. NO default
+# features — that keeps bevy_egui OUT of the game/server build (the `egui` feature carries the
+# editor-side inspector fn types only).
+bevy_editor_game = { git = "https://github.com/LukeThayer/bevy_modal_editor", branch = "main", default-features = false }
 arena_sim = { path = "crates/arena_sim" }
