@@ -12,7 +12,7 @@
 //! assertion on `SkillLibrary` proves what the windowed binary would load.
 
 use bevy::prelude::*;
-use bevy_editor_game::RegisterGltfLibraryExt;
+use bevy_editor_game::{RegisterCustomEntityExt, RegisterGltfLibraryExt};
 use bevy_modal_editor::skill::RegisterObeliskContentExt;
 use bevy_modal_editor::{EditorPlugin, EditorPluginConfig, GamePlugin};
 use obelisk_bevy::prelude::ObeliskConfigExt;
@@ -77,6 +77,28 @@ pub fn build_editor_app() -> App {
     .register_gltf_library("character.glb")
     .add_obelisk_effects(&root.join("config/effects"))
     .register_obelisk_content(root)
+    // Mirrors `main.rs` — ArenaSpawnPoint must be scene-save-registered in the test app too
+    // (the round-trip smoke test exercises exactly this).
+    .register_custom_entity::<arena_sim::level::ArenaSpawnPoint>(
+        bevy_editor_game::CustomEntityType {
+            name: "Arena Spawn Point",
+            category: "Game",
+            keywords: &["spawn", "player", "start", "arena", "lobby"],
+            default_position: Vec3::new(0.0, 0.6, 0.0),
+            spawn: |commands, position, rotation| {
+                commands
+                    .spawn((
+                        arena_sim::level::ArenaSpawnPoint::default(),
+                        Transform::from_translation(position).with_rotation(rotation),
+                        Visibility::default(),
+                    ))
+                    .id()
+            },
+            draw_inspector: None,
+            draw_gizmo: None,
+            regenerate: None,
+        },
+    )
     // See `main.rs`'s own copy of this call for why `add_physics:false` needs it.
     .init_gizmo_group::<avian3d::prelude::PhysicsGizmos>();
     app

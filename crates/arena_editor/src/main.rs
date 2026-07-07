@@ -5,11 +5,28 @@
 //! panel/palette, and the deterministic preview stage) + the game lifecycle (`GamePlugin`), then
 //! registers this workspace as the Skill mode's content root.
 
+use arena_sim::level::ArenaSpawnPoint;
 use bevy::prelude::*;
-use bevy_editor_game::RegisterGltfLibraryExt;
+use bevy_editor_game::{CustomEntityType, RegisterCustomEntityExt, RegisterGltfLibraryExt};
 use bevy_modal_editor::skill::RegisterObeliskContentExt; // register_obelisk_content
 use bevy_modal_editor::{recommended_image_plugin, EditorPlugin, EditorPluginConfig, GamePlugin};
 use obelisk_bevy::prelude::ObeliskConfigExt; // add_obelisk_effects
+
+/// Gizmo for a placed [`ArenaSpawnPoint`]: a lime sphere at the point + an arrow showing the
+/// spawn FACING (players spawn looking along the marker's forward).
+fn draw_spawn_point_gizmo(gizmos: &mut Gizmos, transform: &GlobalTransform) {
+    let pos = transform.translation();
+    gizmos.sphere(
+        Isometry3d::from_translation(pos),
+        0.4,
+        bevy::color::palettes::css::LIME,
+    );
+    gizmos.arrow(
+        pos,
+        pos + transform.forward() * 1.2,
+        bevy::color::palettes::css::LIME,
+    );
+}
 
 fn main() {
     let root = arena_editor::io::editor_root();
@@ -40,6 +57,28 @@ fn main() {
         // (config/effects/*.toml, e.g. `burn`), which previews that apply an ailment need.
         .add_obelisk_effects(&root.join("config/effects"))
         .register_obelisk_content(root.clone())
+        // Arena level vocabulary: spawn points are palette-insertable ("Game" category), draw a
+        // facing gizmo, and round-trip through scene saves (register_custom_entity adds the type
+        // to the scene-save allow-list). The GAME's level loader reads them back
+        // (arena_sim::level) — match levels need slots 0 and 1; the lobby any number.
+        .register_custom_entity::<ArenaSpawnPoint>(CustomEntityType {
+            name: "Arena Spawn Point",
+            category: "Game",
+            keywords: &["spawn", "player", "start", "arena", "lobby"],
+            default_position: Vec3::new(0.0, 0.6, 0.0),
+            spawn: |commands, position, rotation| {
+                commands
+                    .spawn((
+                        ArenaSpawnPoint::default(),
+                        Transform::from_translation(position).with_rotation(rotation),
+                        Visibility::default(),
+                    ))
+                    .id()
+            },
+            draw_inspector: None,
+            draw_gizmo: Some(draw_spawn_point_gizmo),
+            regenerate: None,
+        })
         // add_physics:false skips Avian's PhysicsDebugPlugin, which normally registers the
         // PhysicsGizmos config group the editor's gizmo systems read — register it so boot doesn't
         // panic on a missing GizmoConfigStore entry.

@@ -34,3 +34,37 @@ fn shell_boots_and_loads_the_arenas_skills() {
         );
     }
 }
+
+/// ArenaSpawnPoint must survive an editor scene save (it's in the SceneComponentRegistry via
+/// register_custom_entity) — the GAME's level loader depends on reading it back from `.scn.ron`.
+#[test]
+fn arena_spawn_point_round_trips_through_scene_save() {
+    use arena_sim::level::ArenaSpawnPoint;
+    use bevy_modal_editor::scene::{build_editor_scene, SceneEntity};
+
+    let mut app = arena_editor::build_editor_app();
+    app.finish();
+    app.cleanup();
+    app.update();
+
+    let e = app
+        .world_mut()
+        .spawn((
+            SceneEntity,
+            bevy::prelude::Name::new("spawn_0"),
+            bevy::prelude::Transform::from_xyz(1.0, 0.6, 2.0),
+            ArenaSpawnPoint { slot: 1 },
+        ))
+        .id();
+    let scene = build_editor_scene(app.world(), std::iter::once(e));
+    let registry = app
+        .world()
+        .resource::<bevy::ecs::reflect::AppTypeRegistry>()
+        .clone();
+    let ron = scene.serialize(&registry.read()).expect("serialize");
+    assert!(
+        ron.contains("ArenaSpawnPoint"),
+        "spawn point must be in the saved scene; got:\n{ron}"
+    );
+    assert!(ron.contains("slot: 1"), "slot data must round-trip:\n{ron}");
+}

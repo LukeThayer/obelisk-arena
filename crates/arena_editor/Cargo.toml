@@ -23,6 +23,9 @@ path = "src/main.rs"
 [dependencies]
 bevy = "0.18"
 avian3d = { version = "0.5", features = ["default", "serialize"] }
+# The shared arena vocabulary (ArenaSpawnPoint etc.) — a path dep into the sibling GAME workspace
+# (arena_sim is transport-agnostic: bevy + avian + obelisk only, no lightyear).
+arena_sim = { path = "../arena_sim" }
 obelisk-bevy = { git = "https://github.com/LukeThayer/bevy-obelisk", branch = "main" }
 # `features = ["obelisk"]` enables the editor's BUILT-IN Skill mode (EditorMode::Skill, the K-key
 # panel, the preview stage) + pulls in its own obelisk-bevy/stat_core/loot_core/toml/toml_edit —

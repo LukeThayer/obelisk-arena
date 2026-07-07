@@ -2,6 +2,7 @@
 
 pub mod ballistics;
 pub mod input;
+pub mod level;
 pub mod obelisk;
 pub mod preview;
 pub mod shared_controller;
