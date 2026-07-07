@@ -542,6 +542,43 @@ mod tests {
     }
 
     #[test]
+    fn arena_flat_matches_legacy_geometry() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/scenes/arena_flat.scn.ron"
+        ));
+        let scene = load_level_scene(path).expect("arena_flat loads");
+        let floor = scene
+            .statics
+            .iter()
+            .find(|s| s.name == "Floor")
+            .expect("floor");
+        // Top face at world 0 (legacy spawn_arena_floor contract).
+        assert!((floor.translation.y + floor.scale.y / 2.0).abs() < 1e-6);
+        assert_eq!(floor.scale, Vec3::new(40.0, 1.0, 40.0));
+        let slots: Vec<_> = scene.spawns.iter().map(|s| (s.slot, s.position)).collect();
+        assert_eq!(slots[0], (0, Vec3::new(-4.0, crate::tuning::GROUND_Y, 0.0)));
+        assert_eq!(slots[1], (1, Vec3::new(4.0, crate::tuning::GROUND_Y, 0.0)));
+        // Duelists face each other: slot 0 looks +X, slot 1 looks -X.
+        let fwd0 = Quat::from_axis_angle(Vec3::Y, scene.spawns[0].yaw) * -Vec3::Z;
+        let fwd1 = Quat::from_axis_angle(Vec3::Y, scene.spawns[1].yaw) * -Vec3::Z;
+        assert!((fwd0 - Vec3::X).length() < 1e-4, "{fwd0:?}");
+        assert!((fwd1 - -Vec3::X).length() < 1e-4, "{fwd1:?}");
+    }
+
+    #[test]
+    fn lobby_loads_with_spawns_statics_and_lights() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/scenes/lobby.scn.ron"
+        ));
+        let scene = load_level_scene(path).expect("lobby loads");
+        assert!(scene.spawns.len() >= 2, "lobby needs at least 2 spawns");
+        assert!(!scene.statics.is_empty());
+        assert!(!scene.lights.is_empty());
+    }
+
+    #[test]
     fn catalog_reserves_lobby_and_keys_by_stem() {
         let dir = std::env::temp_dir().join(format!("arena_catalog_test_{}", std::process::id()));
         let scenes = dir.join("assets/scenes");
