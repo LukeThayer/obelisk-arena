@@ -2,7 +2,7 @@
 
 **Goal:** author playable levels in the editor (bevy_modal_editor) and tie them into the game: players spawn into a designed **lobby** level; the **first player to join is the host**; the host presses **G** to pick a level and start the PvP match there. Multiple selectable arenas are the expected future; the infrastructure must make "add an arena" = "save a new scene in the editor".
 
-**Status:** approved (user directed "plan and build"); implementation follows the companion plan.
+**Status:** IMPLEMENTED (2026-07-07) — all 8 plan tasks landed; clean + conditioned net-test gates PASS (damage 20.0, level_loaded x2), arena_editor smoke suite green. Execution deviations: server level/host state lives in a NEW `server/levels.rs` (mod.rs stays wiring-only); two physics fixes the gate surfaced (shape-baked level colliders; per-tick hurtbox pose pin) — see `tests/level_physics.rs` + the fix(sim) commits.
 
 ---
 

@@ -70,10 +70,9 @@ pub fn add_avian_with_lightyear(app: &mut App) {
     app.insert_resource(Gravity(Vec3::new(0.0, -crate::net::GRAVITY, 0.0)));
 }
 
-/// The STATIC arena floor collider spawn (the Dynamic player bodies rest on it) — now lifted into the
-/// transport-agnostic `arena_sim` crate and re-exported here so the game keeps its
-/// `crate::spawn_arena_floor` call sites unchanged.
-pub use arena_sim::spawn::spawn_arena_floor;
+// (The old `spawn_arena_floor` re-export is gone: since levels-and-lobby, the GAME's floors are
+// LEVEL DATA — `arena_sim::level::spawn_level` on every peer. `arena_sim::spawn::spawn_arena_floor`
+// itself survives for the editor preview stage.)
 
 /// The obelisk sim composition — `add_obelisk_sim` (+ the headless/client wrappers + the
 /// `refresh_spatial_pipeline*` systems) now lives in the transport-agnostic `arena_sim` crate so the
