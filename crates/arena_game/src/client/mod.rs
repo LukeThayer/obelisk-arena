@@ -21,6 +21,7 @@ pub mod controller;
 pub mod cosmetics;
 pub mod customization;
 mod harness;
+pub mod level;
 pub mod hud;
 pub mod net;
 pub mod parts;

@@ -83,11 +83,10 @@ pub fn run_headless_client() {
     app.insert_resource(controller::CameraYaw(env.cam_yaw))
         .insert_resource(controller::AimPitch(env.test_pitch));
 
-    // Static floor collider so the predicted Dynamic body rests on it (headless prediction needs
-    // physics too).
-    app.add_systems(Startup, |mut commands: Commands| {
-        crate::spawn_arena_floor(&mut commands)
-    });
+    // Level sync (physics-only: `windowed: false`): mirrors the server's level id from the
+    // round-state fan-out — the LOBBY level's floor replaces the old hard-coded floor collider, so
+    // the predicted Dynamic body rests on real level geometry here too.
+    app.add_plugins(super::level::ClientLevelPlugin { windowed: false });
     // [H] Trace the replicated combat events (NetEventMessage), and consume the replicated cues
     // (CueWireMessage → trace + de-dup + dispatch). Headless has no cosmetics reader, so the
     // dispatched LocalCues clear harmlessly; the trace lines are what the net-test asserts on.
@@ -254,29 +253,34 @@ fn trace_replicated_health(
     }
 }
 
-/// [H] Trace each replicated `RoundStateMessage` the headless client receives, so the round-machine
-/// check can assert the best-of-3 flow replicates over the wire (phase transitions, the
-/// score increments, and the terminal `MatchOver`). Dedups consecutive identical (phase, scores,
-/// winner) so the trace carries transitions, not the ~1/sec countdown re-broadcasts.
+/// [H] THE headless `RoundStateMessage` drain (single-drain rule, invariant §8): trace each
+/// replicated round state so the round-machine check can assert the best-of-3 flow replicates over
+/// the wire, AND fan every message out as [`super::level::RoundStateChanged`] for the level sync +
+/// autostart consumers. The TRACE dedups consecutive identical (phase, scores, winner) so it
+/// carries transitions, not the ~1/sec countdown re-broadcasts — but the fan-out forwards
+/// EVERYTHING (the level sync must see every change).
 #[allow(clippy::type_complexity)]
 fn trace_replicated_round_state(
     mut receivers: Query<
         &mut lightyear::prelude::MessageReceiver<crate::net::protocol::RoundStateMessage>,
     >,
+    mut out: MessageWriter<super::level::RoundStateChanged>,
     mut last: Local<Option<(u8, [(String, u8); 2], String)>>,
 ) {
     for mut rx in &mut receivers {
         for msg in rx.receive() {
             let key = (msg.phase, msg.scores.clone(), msg.winner.clone());
-            if last.as_ref() == Some(&key) {
-                continue; // skip the per-second countdown re-broadcasts
+            let fresh = last.as_ref() != Some(&key);
+            if fresh {
+                *last = Some(key);
+                crate::trace::event(
+                    "client_round_state",
+                    serde_json::json!({ "phase": msg.phase, "countdown": msg.countdown,
+                        "scores": msg.scores, "winner": msg.winner,
+                        "host": msg.host, "level": msg.level }),
+                );
             }
-            *last = Some(key);
-            crate::trace::event(
-                "client_round_state",
-                serde_json::json!({ "phase": msg.phase, "countdown": msg.countdown,
-                    "scores": msg.scores, "winner": msg.winner }),
-            );
+            out.write(super::level::RoundStateChanged(msg));
         }
     }
 }

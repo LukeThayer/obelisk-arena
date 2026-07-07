@@ -90,6 +90,10 @@ trap cleanup EXIT INT TERM
 
     # observer-0: the CASTER + MOVER. ARENA_CLIENT_ID=1 → server slot 0 → obelisk_id "player_1".
     # ARENA_AUTOCAST scripts a firebolt cast (over the wire) once it owns a player + sees an opponent.
+    # ARENA_AUTOSTART_LEVEL (BOTH observers carry it): whichever peer the server elected HOST (first
+    #   completed handshake — launch order does NOT guarantee it) requests the arena_flat match as
+    #   soon as both players stand in the lobby; the non-host's hook no-ops (host-gated in code).
+    #   The harness's stand-in for pressing G — the lobby never auto-starts on player count.
     # ARENA_AUTOMOVE drives the predicted force controller forward ALONG the aim axis (CameraYaw), so
     #   the caster walks toward the target while firing — its avian Position changes (movement-
     #   replication check) yet it stays on the firing line, so the cast still lands.
@@ -97,6 +101,7 @@ trap cleanup EXIT INT TERM
     #   rot(-Z) = (1,0,0) requires yaw = -π/2 ≈ -1.5707963 so the bolt flies along +X toward slot-1.
     ARENA_HEADLESS=1 ARENA_CLIENT_ID=1 ARENA_AUTOCAST=1 ARENA_AUTOCAST_PERIOD=0.8 \
     ARENA_AUTOMOVE=1 \
+    ARENA_AUTOSTART_LEVEL=arena_flat \
     ARENA_CAM_YAW="-1.5707963" \
     ARENA_TRACE_FILE="$session_dir/observer-0.jsonl" ARENA_TRACE_SRC="observer-0" \
     ARENA_MATCH_SEED="$seed" RUST_LOG="${RUST_LOG:-warn}" \
@@ -106,7 +111,9 @@ trap cleanup EXIT INT TERM
 
     # observer-1: the TARGET. ARENA_CLIENT_ID=2 → server slot 1 → obelisk_id "player_2".
     # No AUTOCAST — it connects, gets bodied, and echoes the replicated cast + damage it receives.
+    # ARENA_AUTOSTART_LEVEL: see observer-0 — the elected host (either peer) starts the match.
     ARENA_HEADLESS=1 ARENA_CLIENT_ID=2 \
+    ARENA_AUTOSTART_LEVEL=arena_flat \
     ARENA_TRACE_FILE="$session_dir/observer-1.jsonl" ARENA_TRACE_SRC="observer-1" \
     ARENA_MATCH_SEED="$seed" RUST_LOG="${RUST_LOG:-warn}" \
         "$observer_bin" >"$session_dir/observer-1.log" 2>&1 &

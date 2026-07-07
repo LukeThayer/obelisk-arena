@@ -23,7 +23,7 @@ use super::harness::{
     ScreenshotConfig, SmokeExit,
 };
 use super::scene::{load_rig, log_registered_skills_once, setup_scene};
-use super::{customization, hud, net, parts, present, rig};
+use super::{customization, hud, level, net, parts, present, rig};
 
 use crate::{add_avian_with_lightyear, add_obelisk_sim_client, arena_root};
 
@@ -116,6 +116,9 @@ pub fn run_windowed_client() {
     app.add_plugins(parts::PartsPlugin);
     // Character customizer (D4): K-toggled per-slot panel + third-person preview. Windowed-only.
     app.add_plugins(customization::CustomizationPlugin);
+    // Level sync + lobby UX (levels-and-lobby): mirrors the server-announced level (WITH visuals —
+    // meshes/materials/lights from the level file) + the host's G-key level-select panel.
+    app.add_plugins(level::ClientLevelPlugin { windowed: true });
     app.add_systems(
         Update,
         (
@@ -241,9 +244,13 @@ fn bridge_windowed_cast_hold(
     time: Res<Time>,
     mut charge: ResMut<net::ChargeState>,
     customization: Option<Res<customization::CustomizationOpen>>,
+    level_select: Option<Res<level::LevelSelectOpen>>,
 ) {
-    // While the customizer is open, LMB clicks the panel buttons — don't charge/cast.
-    if customization.map(|c| c.open).unwrap_or(false) {
+    // While the customizer (LMB clicks panel buttons) or the level select is open — don't
+    // charge/cast.
+    if customization.map(|c| c.open).unwrap_or(false)
+        || level_select.map(|l| l.open).unwrap_or(false)
+    {
         charge.secs = 0.0;
         charge.charging = false;
         return;
@@ -296,10 +303,14 @@ fn bridge_windowed_input_to_local_input(
     pitch: Res<controller::AimPitch>,
     mut local_input: ResMut<net::LocalInput>,
     customization: Option<Res<customization::CustomizationOpen>>,
+    level_select: Option<Res<level::LevelSelectOpen>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
-    // While the customizer is open, A/D orbit the preview camera — don't drive movement.
-    if customization.map(|c| c.open).unwrap_or(false) {
+    // While the customizer is open (A/D orbit the preview camera) or the level select is up
+    // (arrows navigate the list) — don't drive movement.
+    if customization.map(|c| c.open).unwrap_or(false)
+        || level_select.map(|l| l.open).unwrap_or(false)
+    {
         local_input.movement = Vec2::ZERO;
         local_input.jump = false;
         return;

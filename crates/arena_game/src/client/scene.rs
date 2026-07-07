@@ -14,13 +14,11 @@ use obelisk_bevy::prelude::*;
 use super::controller::FollowCamera;
 use super::rig;
 
-/// Spawn a minimal 3D scene: a camera looking at the origin, a directional
-/// light, and a green ground plane.
-pub(super) fn setup_scene(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+/// Spawn the camera. That's ALL the fixed scene now: geometry (floor/walls), colliders, and
+/// lights are LEVEL DATA — `client::level::sync_level_from_round_state` spawns them from the
+/// server-announced `.scn.ron` (lobby on join). The old hard-coded green plane +
+/// `spawn_arena_floor` collider + directional light are gone with the levels-and-lobby design.
+pub(super) fn setup_scene(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         // HDR is REQUIRED for bevy_vfx's billboard render pipeline: its node renders only into an
@@ -32,16 +30,6 @@ pub(super) fn setup_scene(
         FollowCamera,
         Transform::from_xyz(0.0, 2.0, 4.0).looking_at(Vec3::new(0.0, 1.5, 0.0), Vec3::Y),
     ));
-    commands.spawn((
-        DirectionalLight::default(),
-        Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(20.0, 20.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))),
-    ));
-    // Static floor collider the predicted Dynamic player body rests on (top face at world 0).
-    crate::spawn_arena_floor(&mut commands);
 }
 
 /// Kick off the async load of the player character rig (`character.glb`) and insert `RigAssets`.

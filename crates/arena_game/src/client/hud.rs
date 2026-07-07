@@ -458,25 +458,38 @@ struct RoundHudState {
     countdown: f32,
     scores: [(String, u8); 2],
     winner: String,
+    /// Elected host's client id (0 = none) — drives the lobby banner's "press G" affordance.
+    host: u64,
 }
 
-/// Drain the replicated `RoundStateMessage` → cache the latest into `RoundHudState`.
+/// THE windowed `RoundStateMessage` drain (single-drain rule, invariant §8): cache the latest into
+/// `RoundHudState` for the banner AND fan every message out as [`RoundStateChanged`] for the other
+/// consumers (level sync, autostart).
 fn receive_round_state(
     mut receivers: Query<&mut MessageReceiver<crate::net::protocol::RoundStateMessage>>,
     mut state: ResMut<RoundHudState>,
+    mut out: MessageWriter<crate::client::level::RoundStateChanged>,
 ) {
     for mut rx in &mut receivers {
         for msg in rx.receive() {
             state.phase = msg.phase;
             state.countdown = msg.countdown;
-            state.scores = msg.scores;
-            state.winner = msg.winner;
+            state.scores = msg.scores.clone();
+            state.winner = msg.winner.clone();
+            state.host = msg.host;
+            out.write(crate::client::level::RoundStateChanged(msg));
         }
     }
 }
 
-/// Render the round banner from `RoundHudState`.
-fn update_round_label(state: Res<RoundHudState>, mut label: Query<&mut Text, With<RoundLabel>>) {
+/// Render the round banner from `RoundHudState`. The lobby banner tells the HOST (this client's
+/// `ConnectTo.client_id` matches the replicated host id) about the G-key level select; everyone
+/// else waits.
+fn update_round_label(
+    state: Res<RoundHudState>,
+    me: Option<Res<crate::net::client::ConnectTo>>,
+    mut label: Query<&mut Text, With<RoundLabel>>,
+) {
     if !state.is_changed() {
         return;
     }
@@ -487,12 +500,19 @@ fn update_round_label(state: Res<RoundHudState>, mut label: Query<&mut Text, Wit
         "{}:{}  {}:{}",
         state.scores[0].0, state.scores[0].1, state.scores[1].0, state.scores[1].1,
     );
+    let i_am_host =
+        state.host != 0 && me.map(|c| c.client_id == state.host).unwrap_or(false);
     let banner = match state.phase {
-        0 => "waiting for players…".to_string(),
+        0 if i_am_host => "LOBBY — press G to choose an arena".to_string(),
+        0 => "LOBBY — waiting for host to start a match".to_string(),
         1 => format!("round starting in {:.0}…   {score}", state.countdown.ceil()),
         2 => format!("FIGHT!   {score}"),
         3 => format!("round won by {}   {score}", state.winner),
-        4 => format!("MATCH OVER — {} wins!   {score}", state.winner),
+        4 => format!(
+            "MATCH OVER — {} wins!   returning to lobby in {:.0}…   {score}",
+            state.winner,
+            state.countdown.ceil()
+        ),
         _ => score,
     };
     *text = Text::new(banner);
