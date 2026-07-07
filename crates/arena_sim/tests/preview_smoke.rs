@@ -22,6 +22,15 @@ fn enter_obelisk_root() {
 }
 
 fn run(seed: u64, ticks: usize) -> App {
+    run_with_floor(seed, ticks, |app| {
+        spawn_arena_floor(&mut app.world_mut().commands());
+    })
+}
+
+/// The same combat world, but the floor comes from the caller — lets the level-loader test swap
+/// the legacy `spawn_arena_floor` cuboid for a `spawn_level`-spawned `.scn.ron` level and prove
+/// obelisk hit resolution is floor-source-agnostic.
+fn run_with_floor(seed: u64, ticks: usize, spawn_floor: impl FnOnce(&mut App)) -> App {
     init_test_obelisk();
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
@@ -66,7 +75,7 @@ fn run(seed: u64, ticks: usize) -> App {
         .resource_mut::<CastTimelineHandles>()
         .0
         .insert("firebolt".into(), handle);
-    spawn_arena_floor(&mut app.world_mut().commands());
+    spawn_floor(&mut app);
     let caster = make_arena_combatant(
         &mut app.world_mut().commands(),
         "caster",
@@ -111,6 +120,28 @@ fn firebolt_resolves_damage_on_the_dummy() {
             .map(|d| d.total_damage)
             .sum::<f64>()
             > 0.0
+    );
+}
+
+/// REGRESSION (levels-and-lobby): the same firebolt→damage flow over a floor spawned by the LEVEL
+/// LOADER (`spawn_level(arena_flat)`) instead of the legacy `spawn_arena_floor` cuboid. Obelisk
+/// hit resolution must be floor-source-agnostic — this is the plain-avian half of the net-test's
+/// "damage on a loaded level" contract.
+#[test]
+fn firebolt_resolves_damage_on_a_loaded_level_floor() {
+    // Absolute path BEFORE enter_obelisk_root's chdir (load_level_scene reads the fs directly).
+    let level_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/scenes/arena_flat.scn.ron");
+    enter_obelisk_root();
+    let app = run_with_floor(0xC0FFEE, 60, move |app| {
+        let scene = arena_sim::level::load_level_scene(&level_path).expect("arena_flat loads");
+        arena_sim::level::spawn_level(&mut app.world_mut().commands(), &scene, None);
+    });
+    let rec = app.world().resource::<EventRecorder>();
+    assert!(!rec.cast_began.is_empty());
+    assert!(
+        !rec.damage_resolved.is_empty(),
+        "firebolt must resolve damage over a level-loader floor"
     );
 }
 

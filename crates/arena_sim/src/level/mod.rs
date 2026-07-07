@@ -20,7 +20,7 @@ pub struct ArenaSpawnPoint {
 
 use std::path::{Path, PathBuf};
 
-use avian3d::prelude::{Position, RigidBody, Rotation};
+use avian3d::prelude::{Collider, Position, RigidBody, Rotation};
 use bevy::ecs::entity::EntityHashMap;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::reflect::AppTypeRegistry;
@@ -329,10 +329,37 @@ pub fn load_level_scene(path: &Path) -> Result<LevelScene, LevelError> {
     Ok(out)
 }
 
-/// Spawn a loaded level on this peer. Every peer gets the PHYSICS bundle (static collider with
-/// the Transform scale BAKED IN — the arena disables avian's transform-scale sync — plus avian
+/// A collider for `shape` with the level `scale` baked into the SHAPE dimensions — collider
+/// scale stays 1.0.
+///
+/// Why not `Collider::set_scale`: avian's `update_collider_scale` (collider backend, registered
+/// even when the transform-sync plugin is disabled) resets a collider's scale to the entity's
+/// `Transform` scale whenever one is present — and under lightyear's avian Position replication
+/// the physics entities DO acquire an identity `Transform`, which stomped a `set_scale`d floor
+/// back to a 1m cube (players fell through the world; net-test caught it). Shape-baked dimensions
+/// at scale 1.0 are a fixed point of that reset, on every peer, with or without a `Transform`.
+///
+/// Non-uniform x/z scale on Sphere/Cylinder/Capsule can't be represented by the primitive shape;
+/// the larger axis wins (levels scale those roughly uniformly in practice).
+fn scaled_collider(shape: &PrimitiveShape, scale: Vec3) -> Collider {
+    let s = scale.abs();
+    match shape {
+        // Unit shapes per `PrimitiveShape::create_collider` (bevy_effect): cube 1×1×1 (full
+        // extents), sphere r=0.5, cylinder r=0.5 h=1, capsule r=0.25 l=0.5, plane 2×0.01×2.
+        PrimitiveShape::Cube => Collider::cuboid(s.x, s.y, s.z),
+        PrimitiveShape::Sphere => Collider::sphere(0.5 * s.x.max(s.z)),
+        PrimitiveShape::Cylinder => Collider::cylinder(0.5 * s.x.max(s.z), s.y),
+        PrimitiveShape::Capsule => Collider::capsule(0.25 * s.x.max(s.z), 0.5 * s.y),
+        PrimitiveShape::Plane => Collider::cuboid(2.0 * s.x, 0.01, 2.0 * s.z),
+    }
+}
+
+/// Spawn a loaded level on this peer. Every peer gets the PHYSICS bundle (a static collider with
+/// the level scale baked into the SHAPE — see [`scaled_collider`] — plus avian
 /// `Position`/`Rotation`); pass `visuals` (windowed client) to also get meshes, materials, and
-/// lights. Everything is tagged [`LevelEntity`] — the despawn key for level switches.
+/// lights. The visual mesh bakes the scale into its VERTICES so the `Transform` stays scale-1.0 —
+/// a scaled `Transform` would make avian re-scale the already-baked collider. Everything is
+/// tagged [`LevelEntity`] — the despawn key for level switches.
 pub fn spawn_level(
     commands: &mut Commands,
     scene: &LevelScene,
@@ -340,24 +367,22 @@ pub fn spawn_level(
 ) -> Vec<Entity> {
     let mut spawned = Vec::with_capacity(scene.statics.len() + scene.lights.len());
     for s in &scene.statics {
-        let mut collider = s.shape.create_collider();
-        collider.set_scale(s.scale, 8);
         let mut ec = commands.spawn((
             LevelEntity,
             Name::new(s.name.clone()),
             RigidBody::Static,
-            collider,
+            scaled_collider(&s.shape, s.scale),
             Position(s.translation),
             Rotation(s.rotation),
         ));
         if let Some((meshes, materials)) = visuals.as_mut() {
             ec.insert((
-                Mesh3d(meshes.add(s.shape.create_mesh())),
+                Mesh3d(meshes.add(s.shape.create_mesh().scaled_by(s.scale))),
                 MeshMaterial3d(materials.add(s.material.base.to_standard_material())),
                 Transform {
                     translation: s.translation,
                     rotation: s.rotation,
-                    scale: s.scale,
+                    scale: Vec3::ONE,
                 },
                 Visibility::default(),
             ));

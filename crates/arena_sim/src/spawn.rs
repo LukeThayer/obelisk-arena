@@ -91,3 +91,57 @@ pub fn make_arena_combatant(
     ));
     player
 }
+
+/// Re-assert every hurtbox child's AUTHORED pose each tick (before physics): identity local
+/// `Transform`, identity `ColliderTransform`, and world `Position`/`Rotation` = its owner body's.
+/// The hurtbox is by construction a fixed-offset (zero-offset) child sensor — nothing may ever
+/// move it relative to its body.
+///
+/// Why this exists: the live game disables avian's `PhysicsTransformPlugin` (lightyear's avian
+/// Position-mode sync replaces it), which ALSO disables the system that recomputes a child
+/// collider's `ColliderTransform` from its `Transform` — so `ColliderTransform` is captured ONCE
+/// at attach and then frozen. The lobby flow can teleport players within milliseconds of their
+/// spawn (instant host start; level switch), and lightyear's `position_to_transform` scribbles a
+/// WORLD pose into the child's local `Transform` before the capture — freezing a multi-meter
+/// bogus offset into the collider. Every firebolt then flies straight through the target and no
+/// damage ever resolves (the net-test caught this). Pinning `ColliderTransform` (and the rest)
+/// every tick makes the authored pose the only possible steady state.
+#[allow(clippy::type_complexity)]
+pub fn pin_hurtboxes_to_bodies(
+    bodies: Query<(&Position, &Rotation), With<RigidBody>>,
+    mut hurtboxes: Query<
+        (
+            &Hurtbox,
+            &mut Transform,
+            Option<&mut ColliderTransform>,
+            Option<&mut Position>,
+            Option<&mut Rotation>,
+        ),
+        (With<Sensor>, Without<RigidBody>),
+    >,
+) {
+    for (hurt, mut tf, ctf, pos, rot) in &mut hurtboxes {
+        if *tf != Transform::IDENTITY {
+            *tf = Transform::IDENTITY;
+        }
+        if let Some(mut ctf) = ctf {
+            if ctf.translation != avian3d::math::Vector::ZERO {
+                ctf.translation = avian3d::math::Vector::ZERO;
+                ctf.rotation = Rotation::default();
+            }
+        }
+        let Ok((body_pos, body_rot)) = bodies.get(hurt.owner) else {
+            continue;
+        };
+        if let Some(mut p) = pos {
+            if p.0 != body_pos.0 {
+                p.0 = body_pos.0;
+            }
+        }
+        if let Some(mut r) = rot {
+            if *r != *body_rot {
+                *r = *body_rot;
+            }
+        }
+    }
+}

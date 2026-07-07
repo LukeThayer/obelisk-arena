@@ -87,6 +87,15 @@ pub(crate) fn spawn_player_on_connect(
     mut client_map: ResMut<ClientPlayerMap>,
     mut host: ResMut<HostState>,
     spawns: Res<LevelSpawns>,
+    mut placed: Query<
+        (
+            &NetworkOwner,
+            &mut avian3d::prelude::Position,
+            &mut Rotation,
+            &mut avian3d::prelude::LinearVelocity,
+        ),
+        With<NetworkedPlayer>,
+    >,
 ) {
     let conn_entity = trigger.entity;
     let Ok((_, RemoteId(peer_id))) = connections.get(conn_entity) else {
@@ -131,6 +140,24 @@ pub(crate) fn spawn_player_on_connect(
     let spawn = spawn_desc
         .map(|d| d.position)
         .unwrap_or(Vec3::new(0.0, arena_sim::tuning::GROUND_Y, 0.0));
+
+    // A new join can SHIFT existing players' sorted-id slots (id 1 joining after id 2 takes slot
+    // 0 — the slot id 2 was placed at while alone). Re-place every EXISTING player at its
+    // now-current slot so two players can never share a spawn point (they'd interpenetrate and
+    // the solver would slam them apart).
+    for (owner, mut pos, mut rot, mut vel) in &mut placed {
+        let Some(i) = all_ids.iter().position(|&id| id == owner.0) else {
+            continue;
+        };
+        let Some(desc) = spawns.slots.get(lobby_spawn_index(i, spawns.slots.len())) else {
+            continue;
+        };
+        if pos.0 != desc.position {
+            pos.0 = desc.position;
+            *rot = spawn_rotation(desc);
+            vel.0 = Vec3::ZERO;
+        }
+    }
     // OPPOSING factions so firebolt's `hit_filter: Enemies` (target_faction != caster_faction)
     // can resolve a hit player→player, and `nearest_enemy` acquires the opponent. With obelisk's
     // 3-faction model (Player/Enemy/Neutral), a 2-player duel puts slot 0 on Player and slot 1

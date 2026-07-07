@@ -125,6 +125,12 @@ impl Plugin for ArenaServerPlugin {
             .add_systems(
                 FixedUpdate,
                 (
+                    // The hurtbox child is a FIXED-offset sensor: re-assert its authored pose
+                    // every tick before physics so the lightyear/avian Position↔Transform sync
+                    // loop can never park it away from its body (the levels-and-lobby instant
+                    // match-start teleport exposed exactly that — see the fn's doc).
+                    arena_sim::spawn::pin_hurtboxes_to_bodies
+                        .before(avian3d::prelude::PhysicsSystems::Prepare),
                     (server_apply_yaw, server_apply_movement).chain(),
                     // Cast pipeline (design WS2): detect each player's charging falling edge in the
                     // per-tick input stream → resolve a candidate `CastAim` from the skill's
