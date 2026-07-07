@@ -282,7 +282,10 @@ version = "0.1.0"
 dependencies = [
  "avian3d",
  "bevy",
+ "bevy_editor_game",
+ "bevy_effect",
  "obelisk-bevy",
+ "ron 0.8.1",
  "serde",
  "stat_core",
 ]
