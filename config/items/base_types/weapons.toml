@@ -1,0 +1,62 @@
+# Arena weapons — plain obelisk items (loot_core `BaseTypeConfig`). Every `[[base_types]]` entry
+# in this directory appears automatically in the lobby's I-key weapon panel; its `granted_skills`
+# become the equipping player's castable skills (the radial wheel's segments), and its stats
+# (implicit affix, weapon damage, defenses) fold into the combatant's StatBlock via obelisk's own
+# `StatBlock::equip`.
+#
+# `granted_skills` ids must exist in `config/skills/` (the SkillRegistry) — an unknown id would
+# equip fine but the cast would be rejected by obelisk's validate_casts (TimelineMissing/unknown).
+#
+# The weapon tagged "starter" is what every player spawns with (exactly one should carry it;
+# with none, the alphabetically-first id is the fallback). Panel order is alphabetical by id.
+
+[[base_types]]
+id = "ember_wand"
+name = "Ember Wand"
+class = "wand"
+tags = ["caster", "fire", "starter"]
+granted_skills = ["firebolt"]
+
+# A touch of crit so the wand reads as the precise single-target option.
+[base_types.implicit]
+stat = "increased_critical_chance"
+min = 15
+max = 15
+
+[base_types.damage]
+attack_speed = 1.4
+critical_chance = 7.0
+spell_efficiency = 100.0
+
+[[base_types.damage.damages]]
+type = "fire"
+min = 2
+max = 5
+
+[[base_types]]
+id = "storm_staff"
+name = "Storm Staff"
+class = "staff"
+tags = ["caster", "cold", "lightning"]
+granted_skills = ["blizzard", "chain_lightning"]
+
+# A staff trades crit for a mana cushion — its two skills are hungrier than the wand's bolt.
+[base_types.implicit]
+stat = "added_mana"
+min = 20
+max = 20
+
+[base_types.damage]
+attack_speed = 1.1
+critical_chance = 5.0
+spell_efficiency = 100.0
+
+[[base_types.damage.damages]]
+type = "cold"
+min = 2
+max = 6
+
+[[base_types.damage.damages]]
+type = "lightning"
+min = 1
+max = 8

@@ -136,10 +136,13 @@ impl Plugin for ClientNetPlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LocalInput>()
             .init_resource::<ChargeState>()
-            // The skill the input's `skill_slot` points at. Windowed number-keys set it; headless
-            // autocast sets it from ARENA_AUTOCAST_SKILL. `init_resource` is idempotent with the
-            // windowed PartsPlugin init.
+            // The skill the input's `skill_slot` points at. The windowed radial wheel sets it;
+            // headless autocast sets it from ARENA_AUTOCAST_SKILL. `init_resource` is idempotent
+            // with the windowed PartsPlugin init.
             .init_resource::<SelectedSkill>()
+            // Keep the selection valid against the EQUIPPED weapon (protocol v4): on a weapon
+            // change (or a selection the weapon doesn't grant), snap to the weapon's first skill.
+            .add_systems(Update, sync_selected_to_weapon)
             .init_resource::<CustomizeDirty>()
             // The LOCAL selection the customizer edits + `send_customization` reads. `PartsPlugin`
             // also inits it (windowed); init here too so the headless client + the send path have
@@ -182,9 +185,15 @@ fn buffer_arena_input(
     mut input: ResMut<LocalInput>,
     mut charge: ResMut<ChargeState>,
     selected: Res<SelectedSkill>,
-    mut query: Query<&mut ActionState<ArenaInput>, With<InputMarker<ArenaInput>>>,
+    mut query: Query<
+        (
+            &mut ActionState<ArenaInput>,
+            Option<&crate::net::protocol::EquippedWeapon>,
+        ),
+        With<InputMarker<ArenaInput>>,
+    >,
 ) {
-    let Ok(mut action_state) = query.single_mut() else {
+    let Ok((mut action_state, weapon)) = query.single_mut() else {
         return;
     };
     let charging = charge.charging || charge.tap_latch;
@@ -194,13 +203,41 @@ fn buffer_arena_input(
         pitch: input.pitch,
         jump: input.jump || input.jump_latch,
         charging,
-        skill_slot: crate::net::skill_slot_for(&selected.0).unwrap_or(0),
+        // The slot indexes the EQUIPPED WEAPON's skill list (protocol v4). A selection the
+        // weapon doesn't grant falls back to slot 0 (the weapon's first skill) — the same
+        // fallback `sync_selected_to_weapon` converges the selection itself toward.
+        skill_slot: weapon
+            .and_then(|w| crate::net::weapon_skill_slot_for(&w.skills, &selected.0))
+            .unwrap_or(0),
     };
     input.jump_latch = false;
     if !charge.charging {
         // We just sampled the release (or the latch-extended tap tick); the NEXT tick samples
         // false and produces the falling edge on both peers.
         charge.tap_latch = false;
+    }
+}
+
+/// Snap [`SelectedSkill`] to the equipped weapon's FIRST skill whenever the current selection
+/// isn't one the weapon grants (weapon swap, or a stale ARENA_AUTOCAST_SKILL naming a skill the
+/// starter weapon lacks). `Changed<EquippedWeapon>`-shaped polling isn't enough — the selection
+/// can also change out from under the weapon — so this checks membership every frame (two string
+/// compares; the local player is a single entity).
+fn sync_selected_to_weapon(
+    mut selected: ResMut<SelectedSkill>,
+    weapon: Query<
+        &crate::net::protocol::EquippedWeapon,
+        (With<NetworkedPlayer>, With<LocalNetPlayer>),
+    >,
+) {
+    let Ok(weapon) = weapon.single() else {
+        return;
+    };
+    if weapon.skills.iter().any(|s| *s == selected.0) {
+        return;
+    }
+    if let Some(first) = weapon.skills.first() {
+        selected.0 = first.clone();
     }
 }
 
@@ -333,6 +370,7 @@ fn local_cast_edge(
             &Position,
             &crate::net::protocol::ObeliskNetId,
             &ActionState<ArenaInput>,
+            Option<&crate::net::protocol::EquippedWeapon>,
         ),
         (With<NetworkedPlayer>, With<LocalNetPlayer>),
     >,
@@ -346,7 +384,7 @@ fn local_cast_edge(
     if !rollback.is_empty() {
         return;
     }
-    let Ok((pos, obelisk_id, action)) = local.single() else {
+    let Ok((pos, obelisk_id, action, weapon)) = local.single() else {
         return;
     };
     let a = &action.0;
@@ -360,7 +398,9 @@ fn local_cast_edge(
     }
     if fired {
         let charge = crate::net::charge_byte_from_hold_ticks(prev.1);
-        if let Some(skill_id) = crate::net::ARENA_SKILLS.get(prev.2 as usize) {
+        // Resolve the latched slot against the equipped weapon — the same list the server's
+        // detector resolves, so the predicted cosmetic matches the authoritative cast.
+        if let Some(skill_id) = weapon.and_then(|w| w.skills.get(prev.2 as usize)) {
             crate::trace::event(
                 "cast_edge_sent",
                 serde_json::json!({ "skill_id": skill_id, "charge": charge }),

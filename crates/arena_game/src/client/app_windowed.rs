@@ -23,7 +23,7 @@ use super::harness::{
     ScreenshotConfig, SmokeExit,
 };
 use super::scene::{load_rig, log_registered_skills_once, setup_scene};
-use super::{customization, hud, level, net, parts, present, rig};
+use super::{customization, hud, level, net, parts, present, radial, rig, weapon_select};
 
 use crate::{add_avian_with_lightyear, add_obelisk_sim_client, arena_root};
 
@@ -85,9 +85,14 @@ pub fn run_windowed_client() {
     app.init_resource::<AimDirs>();
     // Cast-timeline loading uses the SAME shared `crate::cast_assets` helpers as the headless server.
     app.init_resource::<crate::cast_assets::PendingCastTimelines>();
-    // Windowed-only skill-select state (number keys 1/2/3, see `select_skill` below). The headless
-    // client never inits this — its autocast path sets `CastIntent` directly.
+    // Skill-select state (the radial wheel writes it; `init_resource` is idempotent with
+    // ClientNetPlayerPlugin's own init).
     app.init_resource::<net::SelectedSkill>();
+    // The weapon catalog (obelisk items, protocol v4) — the I panel's list + the wheel's weapon
+    // name. Same files every peer loads.
+    app.insert_resource(crate::net::weapons::WeaponCatalog::load(
+        &root.join("config/items"),
+    ));
 
     // Scene (camera + light + ground) + rig assets + cast timelines. NO co-located combatants.
     app.add_systems(
@@ -119,6 +124,10 @@ pub fn run_windowed_client() {
     // Level sync + lobby UX (levels-and-lobby): mirrors the server-announced level (WITH visuals —
     // meshes/materials/lights from the level file) + the host's G-key level-select panel.
     app.add_plugins(level::ClientLevelPlugin { windowed: true });
+    // Weapons (protocol v4): the lobby's I-key equip panel + the hold-F radial skill wheel
+    // (wisp's, 1:1) selecting among the equipped weapon's skills.
+    app.add_plugins(weapon_select::WeaponSelectPlugin);
+    app.add_plugins(radial::RadialWheelPlugin);
     app.add_systems(
         Update,
         (
@@ -151,6 +160,35 @@ pub fn run_windowed_client() {
         app.insert_resource(cfg);
         app.add_systems(Update, screenshot_system);
     }
+    // [W] UI probe hook (ARENA_DEBUG_UI=wheel|weapons): synthetically hold F (the radial wheel)
+    // or tap I (the weapon panel) from frame 150, so a screenshot probe can capture the UI
+    // without scripted OS input. Mirrors the ARENA_* headless hook idiom.
+    if let Ok(which) = std::env::var("ARENA_DEBUG_UI") {
+        let key = match which.as_str() {
+            "wheel" => Some((KeyCode::KeyF, true)),
+            "weapons" => Some((KeyCode::KeyI, false)),
+            _ => None,
+        };
+        if let Some((key, hold)) = key {
+            // PreUpdate, AFTER bevy's keyboard system clears just_pressed — so every Update
+            // system sees the synthetic press that same frame (an Update-schedule press would
+            // race the consumers' system order).
+            app.add_systems(
+                PreUpdate,
+                (move |mut frames: bevy::prelude::Local<u64>,
+                       mut keys: bevy::prelude::ResMut<ButtonInput<KeyCode>>| {
+                    *frames += 1;
+                    if *frames == 150 || (hold && *frames > 150) {
+                        keys.press(key);
+                    } else if !hold && *frames == 152 {
+                        keys.release(key);
+                    }
+                })
+                .after(bevy::input::InputSystems),
+            );
+        }
+    }
+
     // AUTOCAST harness (ARENA_AUTOCAST=1): drive the NETWORKED cast path on a cadence (set
     // `net::CastIntent` → `send_cast_requests` ships a `CastRequestMessage`). This is the same wire
     // cast the headless AUTOCAST uses. Lets a windowed client script firebolt for the visual gate.
@@ -194,38 +232,14 @@ pub fn run_windowed_client() {
             // Runs before the input bridge so a focus-loss frame clears stuck keys first.
             release_keys_on_focus_loss,
             bridge_windowed_input_to_local_input,
-            // Number-key skill-select runs before the cast-hold bridge so a same-frame
-            // select-then-click picks up the new selection immediately.
-            select_skill,
+            // (Skill selection is the hold-F radial wheel now — `client::radial`, wisp's 1:1.
+            // The old number-key select is gone with the fixed ARENA_SKILLS roster.)
             bridge_windowed_cast_hold,
         )
             .chain(),
     );
 
     app.run();
-}
-
-/// Map a number key to a grantable skill id (windowed skill-select). `None` for other keys.
-fn skill_for_key(key: KeyCode) -> Option<&'static str> {
-    let idx = match key {
-        KeyCode::Digit1 => 0,
-        KeyCode::Digit2 => 1,
-        KeyCode::Digit3 => 2,
-        _ => return None,
-    };
-    crate::net::ARENA_SKILLS.get(idx).copied()
-}
-
-/// Windowed skill-select: number keys 1/2/3 choose which granted skill `bridge_windowed_cast_hold`
-/// casts next (`net::SelectedSkill`). Headless-never: this system is registered only by
-/// `run_windowed_client`, and the headless autocast path sets `CastIntent` directly without ever
-/// reading `SelectedSkill`.
-fn select_skill(keys: Res<ButtonInput<KeyCode>>, mut selected: ResMut<net::SelectedSkill>) {
-    for key in keys.get_just_pressed() {
-        if let Some(id) = skill_for_key(*key) {
-            selected.0 = id.to_string();
-        }
-    }
 }
 
 /// Hold-to-charge cast input: replaces the old press-to-cast `bridge_windowed_cast_to_intent`.
@@ -245,11 +259,15 @@ fn bridge_windowed_cast_hold(
     mut charge: ResMut<net::ChargeState>,
     customization: Option<Res<customization::CustomizationOpen>>,
     level_select: Option<Res<level::LevelSelectOpen>>,
+    weapon_select: Option<Res<weapon_select::WeaponSelectOpen>>,
+    wheel: Option<Res<radial::RadialWheel>>,
 ) {
-    // While the customizer (LMB clicks panel buttons) or the level select is open — don't
-    // charge/cast.
+    // While any selection UI is up (customizer / level select / weapon panel / radial wheel) —
+    // don't charge/cast.
     if customization.map(|c| c.open).unwrap_or(false)
         || level_select.map(|l| l.open).unwrap_or(false)
+        || weapon_select.map(|w| w.open).unwrap_or(false)
+        || wheel.map(|w| w.open).unwrap_or(false)
     {
         charge.secs = 0.0;
         charge.charging = false;
@@ -304,12 +322,17 @@ fn bridge_windowed_input_to_local_input(
     mut local_input: ResMut<net::LocalInput>,
     customization: Option<Res<customization::CustomizationOpen>>,
     level_select: Option<Res<level::LevelSelectOpen>>,
+    weapon_select: Option<Res<weapon_select::WeaponSelectOpen>>,
+    wheel: Option<Res<radial::RadialWheel>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
-    // While the customizer is open (A/D orbit the preview camera) or the level select is up
-    // (arrows navigate the list) — don't drive movement.
+    // While any selection UI is up (customizer / level select / weapon panel / radial wheel) —
+    // don't drive movement. The wheel case is wisp's "keys stay held at the OS level but the
+    // movement context is off" behavior: zero input here = the same brake.
     if customization.map(|c| c.open).unwrap_or(false)
         || level_select.map(|l| l.open).unwrap_or(false)
+        || weapon_select.map(|w| w.open).unwrap_or(false)
+        || wheel.map(|w| w.open).unwrap_or(false)
     {
         local_input.movement = Vec2::ZERO;
         local_input.jump = false;
@@ -346,52 +369,6 @@ fn bridge_windowed_input_to_local_input(
     local_input.jump = keys.pressed(KeyCode::Space);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Pins the number-key → skill-id mapping `select_skill` relies on: 1/2/3 map to the three
-    /// granted reference skills (`server/spawn.rs`'s `grant_skill` chain), any other key selects
-    /// nothing.
-    #[test]
-    fn number_keys_map_to_the_three_skills() {
-        assert_eq!(skill_for_key(KeyCode::Digit1), Some("firebolt"));
-        assert_eq!(skill_for_key(KeyCode::Digit2), Some("chain_lightning"));
-        assert_eq!(skill_for_key(KeyCode::Digit3), Some("blizzard"));
-        assert_eq!(skill_for_key(KeyCode::KeyW), None);
-    }
-
-    /// Runtime-verifies the keyboard→resource path the dynamic HUD spell label depends on: a
-    /// `Digit3` press must flip [`net::SelectedSkill`] to blizzard, and `Digit1` back to firebolt,
-    /// through the real `select_skill` system reading a real `ButtonInput<KeyCode>`. This is the
-    /// headless proxy for the user-facing "pressing 1/2/3 changes the selected spell"; the windowed
-    /// winit→`ButtonInput` plumbing is Bevy's own and is already exercised by WASD movement (which
-    /// reads the very same resource in `bridge_windowed_input_to_local_input`).
-    #[test]
-    fn select_skill_flips_selected_on_number_key() {
-        let mut app = App::new();
-        app.init_resource::<ButtonInput<KeyCode>>();
-        app.init_resource::<net::SelectedSkill>();
-        app.add_systems(Update, select_skill);
-
-        // Default selection is firebolt.
-        assert_eq!(app.world().resource::<net::SelectedSkill>().0, "firebolt");
-
-        // Press "3" → blizzard.
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::Digit3);
-        app.update();
-        assert_eq!(app.world().resource::<net::SelectedSkill>().0, "blizzard");
-
-        // Fresh frame (clear just_pressed), press "1" → back to firebolt.
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .clear();
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::Digit1);
-        app.update();
-        assert_eq!(app.world().resource::<net::SelectedSkill>().0, "firebolt");
-    }
-}
+// (The number-key skill-select tests left with `select_skill` itself — skill selection is the
+// hold-F radial wheel now, whose hit-test math + selection flow are unit-tested in
+// `client::radial`. The `weapon_skill_slot_for` slot mapping is pinned in `net::tests`.)

@@ -25,6 +25,7 @@ use bevy::prelude::*;
 mod cast_pipeline;
 mod controller;
 mod customize;
+mod equip;
 mod levels;
 mod mirrors;
 mod rounds;
@@ -50,6 +51,11 @@ pub struct ArenaServerPlugin;
 
 impl Plugin for ArenaServerPlugin {
     fn build(&self, app: &mut App) {
+        // The weapon catalog (obelisk items from `config/items/` — protocol v4): loaded at
+        // plugin-build time so it exists before the first connect can spawn a player.
+        app.insert_resource(crate::net::weapons::WeaponCatalog::load(
+            &crate::arena_root().join("config/items"),
+        ));
         app.init_resource::<NetworkedIdAlloc>()
             .init_resource::<ClientPlayerMap>()
             .init_resource::<RoundState>()
@@ -97,6 +103,8 @@ impl Plugin for ArenaServerPlugin {
                     // (reliable), mirroring the cue broadcast. The ClientPlayerMap is populated by
                     // `spawn_player_on_connect`.
                     drain_customize_requests,
+                    // Weapon equip requests (protocol v4): Lobby-phase only, catalog-validated.
+                    equip::drain_equip_weapon,
                 ),
             )
             // Lobby-centric best-of-3 round machine + level flow, chained so one frame carries a

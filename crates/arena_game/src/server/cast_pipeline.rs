@@ -100,6 +100,7 @@ pub(crate) fn detect_cast_edges(
             &ObeliskId,
             &ActionState<ArenaInput>,
             &mut PrevCastInput,
+            &crate::net::protocol::EquippedWeapon,
         ),
         With<NetworkedPlayer>,
     >,
@@ -114,7 +115,7 @@ pub(crate) fn detect_cast_edges(
     spatial: avian3d::prelude::SpatialQuery,
     mut commands: Commands,
 ) {
-    for (caster, caster_id, action, mut prev) in &mut players {
+    for (caster, caster_id, action, mut prev, weapon) in &mut players {
         let Some((slot, charge)) =
             step_cast_edge(&mut prev, action.0.charging, action.0.skill_slot)
         else {
@@ -123,11 +124,10 @@ pub(crate) fn detect_cast_edges(
         if active.get(caster).is_ok() {
             continue; // mid-cast; obelisk would reject anyway
         }
-        let Some(skill_id) = crate::net::ARENA_SKILLS
-            .get(slot as usize)
-            .map(|s| s.to_string())
-        else {
-            continue; // out-of-range slot from a bad client: ignore
+        // The slot indexes the EQUIPPED WEAPON's skill list (protocol v4) — this lookup IS the
+        // "can't cast an unequipped skill" gate: a stale/bad slot simply resolves to no skill.
+        let Some(skill_id) = weapon.skills.get(slot as usize).cloned() else {
+            continue; // out-of-range slot (weapon swap raced the input, or a bad client): ignore
         };
         // Aim ray from the input's yaw+pitch — the identical math the client camera + predicted
         // cast use (`net::aim_dir`). Degenerate never happens (aim_dir normalizes), but keep the

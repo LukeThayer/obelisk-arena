@@ -184,10 +184,14 @@ fn cursor_grab(
     mouse: Res<ButtonInput<MouseButton>>,
     cursor: Option<Single<&mut CursorOptions, With<PrimaryWindow>>>,
     customization: Option<Res<crate::client::customization::CustomizationOpen>>,
+    wheel: Option<Res<crate::client::radial::RadialWheel>>,
 ) {
     // While the customizer is open it owns the cursor (free + visible for clicking buttons);
-    // a stray LMB on a panel button must not re-lock it.
-    if customization.map(|c| c.open).unwrap_or(false) {
+    // a stray LMB on a panel button must not re-lock it. Same for the radial wheel, which owns
+    // the cursor in CONFINED mode (selection = offset from center).
+    if customization.map(|c| c.open).unwrap_or(false)
+        || wheel.map(|w| w.open).unwrap_or(false)
+    {
         return;
     }
     let Some(mut cursor) = cursor else {
@@ -218,10 +222,15 @@ fn accumulate_mouse_look(
     pitch_locked: Res<AimPitchLocked>,
     sensitivity: Res<MouseSensitivity>,
     customization: Option<Res<crate::client::customization::CustomizationOpen>>,
+    wheel: Option<Res<crate::client::radial::RadialWheel>>,
 ) {
     // While the customizer is open the cursor is free (moving it to click buttons) and the orbit
     // preview owns the camera — don't accumulate mouse-look (it would spin the view on reopen).
-    if customization.map(|c| c.open).unwrap_or(false) {
+    // Same for the radial wheel: mouse motion is SELECTING a segment, not looking (wisp freezes
+    // look identically while its wheel is up).
+    if customization.map(|c| c.open).unwrap_or(false)
+        || wheel.map(|w| w.open).unwrap_or(false)
+    {
         return;
     }
     let delta = motion.delta;

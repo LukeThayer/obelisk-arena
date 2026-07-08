@@ -12,6 +12,7 @@ pub mod cue;
 pub mod input;
 pub mod protocol;
 pub mod server;
+pub mod weapons;
 
 pub use client::ClientNetPlugin;
 pub use protocol::ProtocolPlugin;
@@ -63,14 +64,16 @@ pub const TICK_HZ: u32 = 60;
 
 // --- skills / casting (design WS2: cast intent rides the input stream) ---
 
-/// The grantable skill roster, in SLOT ORDER. The single source of truth for: the server grant
-/// loop (`server/spawn.rs`), the windowed number-key select (`skill_for_key`), and the
-/// `ArenaInput.skill_slot` ↔ skill-id mapping on both peers. Index == wire slot.
-pub const ARENA_SKILLS: [&str; 3] = ["firebolt", "chain_lightning", "blizzard"];
+// The old fixed `ARENA_SKILLS` roster is GONE (weapons wire, protocol v4): skills come from the
+// EQUIPPED WEAPON — an obelisk item's `granted_skills`, replicated per-player as
+// `protocol::EquippedWeapon.skills`. `ArenaInput.skill_slot` indexes THAT list on both peers
+// ([`weapon_skill_slot_for`] client-side; `server/cast_pipeline.rs` resolves its own copy).
+// Weapon content lives in `config/items/` — see [`weapons::WeaponCatalog`].
 
-/// Slot index for a skill id (positional in [`ARENA_SKILLS`]); `None` for unknown ids.
-pub fn skill_slot_for(id: &str) -> Option<u8> {
-    ARENA_SKILLS.iter().position(|s| *s == id).map(|i| i as u8)
+/// Slot index of `id` within an equipped weapon's skill list; `None` when the weapon doesn't
+/// grant it (the cast pipeline treats an out-of-range slot the same way: no cast).
+pub fn weapon_skill_slot_for(skills: &[String], id: &str) -> Option<u8> {
+    skills.iter().position(|s| s == id).map(|i| i as u8)
 }
 
 /// The camera-forward aim ray both peers reconstruct from the input's `yaw`+`pitch`:
@@ -114,10 +117,10 @@ pub fn charge_byte_from_hold_ticks(hold_ticks: u32) -> u8 {
     charge_byte_from_frac(((hold_ticks as f32 - 1.0) / (full - 1.0)).clamp(0.0, 1.0))
 }
 
-/// Netcode protocol id. Bumped whenever the wire format changes incompatibly. Bumped to 3 for the
-/// levels-and-lobby wire (RoundStateMessage v2 with host+level, StartMatchMessage, phase tag 0 now
-/// Lobby). 2 was the input-carried cast wire (ArenaInput v2 with pitch/skill_slot).
-pub const PROTOCOL_ID: u64 = 3;
+/// Netcode protocol id. Bumped whenever the wire format changes incompatibly. Bumped to 4 for the
+/// weapons wire (EquippedWeapon replicated component, EquipWeaponMessage; skill_slot now indexes
+/// the equipped weapon's skill list). 3 was levels-and-lobby, 2 the input-carried cast wire.
+pub const PROTOCOL_ID: u64 = 4;
 
 /// Shared netcode private key. Dev/test only — a real deployment holds the key server-side and
 /// hands clients a signed `ConnectToken` from a backend auth service.
@@ -231,11 +234,13 @@ mod tests {
     /// Slot mapping is the positional index into ARENA_SKILLS; unknown ids have no slot.
     #[test]
     fn skill_slots_are_positional() {
-        assert_eq!(skill_slot_for("firebolt"), Some(0));
-        assert_eq!(skill_slot_for("chain_lightning"), Some(1));
-        assert_eq!(skill_slot_for("blizzard"), Some(2));
-        assert_eq!(skill_slot_for("nope"), None);
-        assert_eq!(ARENA_SKILLS.len(), 3);
+        let staff: Vec<String> = vec!["blizzard".into(), "chain_lightning".into()];
+        assert_eq!(weapon_skill_slot_for(&staff, "blizzard"), Some(0));
+        assert_eq!(weapon_skill_slot_for(&staff, "chain_lightning"), Some(1));
+        // A skill the equipped weapon doesn't grant has NO slot — the "can't cast unequipped
+        // skills" gate on the input side.
+        assert_eq!(weapon_skill_slot_for(&staff, "firebolt"), None);
+        assert_eq!(weapon_skill_slot_for(&[], "firebolt"), None);
     }
 
     /// Hold-tick charge anchors: an instant tap (1 tick) ≈ TAP_CHARGE_BYTE (≈1.0×); holding

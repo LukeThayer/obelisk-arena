@@ -1,0 +1,15 @@
+(
+    steps: [
+        (
+            name: "spawn",
+            trigger: OnSpawn,
+            actions: [
+                SpawnParticle(
+                    tag: "fx",
+                    preset: "Sparks",
+                    at: Offset((0.0, 0.0, 0.0)),
+                ),
+            ],
+        ),
+    ],
+)

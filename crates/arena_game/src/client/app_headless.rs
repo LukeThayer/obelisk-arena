@@ -129,6 +129,14 @@ pub fn run_headless_client() {
         app.add_systems(Update, headless_customize_once);
     }
 
+    // [H] AUTOEQUIP hook (ARENA_AUTOEQUIP=<weapon_id>): request the named weapon once per lobby
+    // visit as soon as we own a local player — the harness's stand-in for the I panel. Pairs
+    // with ARENA_AUTOCAST_SKILL to script casts from a non-starter weapon (e.g.
+    // ARENA_AUTOEQUIP=storm_staff ARENA_AUTOCAST_SKILL=blizzard).
+    if std::env::var("ARENA_AUTOEQUIP").is_ok() {
+        app.add_systems(Update, autoequip_weapon);
+    }
+
     // [H] AUTOCAST hook: once we own a local player AND an opponent is replicated, set the cast
     // intent once so `net::send_cast_requests` fires a `CastRequestMessage`. This is the
     // headless verification vehicle — a server `CastBegan` (and downstream the egress of
@@ -175,6 +183,35 @@ pub(super) fn autocast(
         }
         charge.tap_latch = true; // one charging tick, then release → edge on both peers
     }
+}
+
+/// [H] `ARENA_AUTOEQUIP=<weapon_id>`: send `EquipWeaponMessage` once per lobby visit, as soon as
+/// the local player exists — the headless stand-in for the lobby's I panel (mirrors
+/// `autostart_level`'s once-per-lobby re-arm so soaks re-equip after each match).
+fn autoequip_weapon(
+    state: Res<super::level::ClientLevel>,
+    local: Query<(), LocalPlayerFilter>,
+    sender: Option<
+        Single<&mut lightyear::prelude::MessageSender<crate::net::protocol::EquipWeaponMessage>>,
+    >,
+    mut sent_this_lobby: Local<bool>,
+) {
+    if state.phase != 0 {
+        *sent_this_lobby = false;
+        return;
+    }
+    if *sent_this_lobby || local.iter().next().is_none() {
+        return;
+    }
+    let Ok(item_id) = std::env::var("ARENA_AUTOEQUIP") else {
+        return;
+    };
+    let Some(mut sender) = sender else { return };
+    sender.send::<crate::net::protocol::RequestChannel>(crate::net::protocol::EquipWeaponMessage {
+        item_id: item_id.clone(),
+    });
+    *sent_this_lobby = true;
+    crate::trace::event("equip_weapon_sent", serde_json::json!({ "item_id": item_id }));
 }
 
 /// The Top-slot index a headless observer applies once under `ARENA_CUSTOMIZE` (D6 verification).

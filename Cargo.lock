@@ -305,6 +305,7 @@ dependencies = [
  "bevy_vfx",
  "lightyear",
  "lightyear_frame_interpolation",
+ "loot_core",
  "obelisk-bevy",
  "ron 0.8.1",
  "serde",

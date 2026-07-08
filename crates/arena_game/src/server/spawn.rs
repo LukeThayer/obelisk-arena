@@ -14,7 +14,6 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::ClientOf;
 use lightyear::prelude::{Connected, PeerId, RemoteId, Replicate};
 use lightyear::prelude::{ControlledBy, NetworkTarget, PredictionTarget};
-use obelisk_bevy::prelude::*;
 use serde_json::json;
 
 use crate::net::input::ArenaInput;
@@ -59,9 +58,10 @@ pub(crate) fn peer_to_u64(peer: &PeerId) -> Option<u64> {
 }
 
 /// Each player is a full obelisk combatant: `make_combatant(StatBlock::with_id(...))` +
-/// `Faction::Player` + all three reference skills (`grant_skill("firebolt")` +
-/// `grant_skill("chain_lightning")` + `grant_skill("blizzard")`; the windowed client picks which one
-/// to cast via number-key `SelectedSkill`, see `client/net.rs`) + a CHILD hurtbox + the replicated networked
+/// `Faction::Player` + the STARTER WEAPON equipped (protocol v4 — `equip::queue_equip` applies
+/// the obelisk item's stats, writes `SkillSlots`, and inserts the replicated `EquippedWeapon`
+/// whose skill list the cast slots index; the windowed client picks a skill via the radial
+/// wheel) + a CHILD hurtbox + the replicated networked
 /// component set (`NetworkedPlayer`/`NetworkOwner`/`NetworkedId`/`ObeliskNetId`/`NetworkedHealth`/
 /// `NetworkedCastState`/`PlayerCustomization`) + a Dynamic avian body driven by the shared force
 /// controller. Replicated with `Replicate::to_clients(NetworkTarget::All)` +
@@ -87,6 +87,7 @@ pub(crate) fn spawn_player_on_connect(
     mut client_map: ResMut<ClientPlayerMap>,
     mut host: ResMut<HostState>,
     spawns: Res<LevelSpawns>,
+    catalog: Res<crate::net::weapons::WeaponCatalog>,
     mut placed: Query<
         (
             &NetworkOwner,
@@ -229,10 +230,16 @@ pub(crate) fn spawn_player_on_connect(
                 owner: conn_entity,
                 lifetime: Default::default(),
             },
-        ))
-        .grant_skill(crate::net::ARENA_SKILLS[0])
-        .grant_skill(crate::net::ARENA_SKILLS[1])
-        .grant_skill(crate::net::ARENA_SKILLS[2]);
+        ));
+
+    // Equip the STARTER weapon (protocol v4): skills come from the equipped obelisk item now —
+    // the old fixed grant-3-skills roster is gone. `queue_equip` applies the item's stats
+    // (StatBlock::equip), writes SkillSlots, and inserts the replicated EquippedWeapon.
+    if let Some(weapon) = catalog.default_weapon() {
+        super::equip::queue_equip(&mut commands, player, weapon);
+    } else {
+        warn!("no weapons in the catalog — player {client_id} spawns with NO castable skills");
+    }
 
     client_map.0.insert(client_id, player);
 }

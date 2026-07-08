@@ -58,6 +58,12 @@ impl Plugin for ProtocolPlugin {
         // No interpolation: hp is discrete and damage feedback feels best snapping.
         app.register_component::<NetworkedHealth>();
 
+        // --- Equipped weapon (replicated per-player). Carries the obelisk item id + the skill
+        // list it grants, in slot order: the input stream's `skill_slot` indexes THIS list on
+        // both peers (the client's wheel/selection maps into it; the server's cast pipeline
+        // resolves from its own copy). Discrete — plain registration, snapped on receive.
+        app.register_component::<EquippedWeapon>();
+
         // --- Character appearance (replicated per-player; drives each rig's slot visibility). ---
         // Live edits are plain component updates — the receive path writes registered components
         // directly onto the (single) Predicted entity, and `SinceLastAck` resends unacked deltas.
@@ -127,6 +133,11 @@ impl Plugin for ProtocolPlugin {
         // validates sender==host ∧ phase==Lobby ∧ 2 players ∧ level exists before acting.
         app.register_message::<StartMatchMessage>()
             .add_direction(NetworkDirection::ClientToServer);
+
+        // Weapon equip request (reliable RequestChannel), sent from the lobby's I-key panel.
+        // The server validates phase==Lobby ∧ the id exists in the weapon catalog.
+        app.register_message::<EquipWeaponMessage>()
+            .add_direction(NetworkDirection::ClientToServer);
     }
 }
 
@@ -189,6 +200,24 @@ pub struct RoundStateMessage {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StartMatchMessage {
     pub level: String,
+}
+
+/// Equip request: swap this player's weapon to `item_id` (a `WeaponCatalog` id). Client→server,
+/// reliable (`RequestChannel`), sent from the lobby's I-key weapon panel. The server ignores it
+/// outside the Lobby phase or for an unknown id.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EquipWeaponMessage {
+    pub item_id: String,
+}
+
+/// The player's equipped weapon, replicated to every client: the obelisk item id (display/HUD
+/// resolves the name via the local `WeaponCatalog`) + the skills it grants IN SLOT ORDER — the
+/// single source of truth both peers resolve `ArenaInput.skill_slot` against. Server-written on
+/// spawn (the starter weapon) and on an accepted `EquipWeaponMessage`.
+#[derive(Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EquippedWeapon {
+    pub item_id: String,
+    pub skills: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------------------------

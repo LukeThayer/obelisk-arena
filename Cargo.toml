@@ -39,6 +39,10 @@ obelisk-bevy = { git = "https://github.com/LukeThayer/bevy-obelisk", branch = "m
 # `?rev=…`), which duplicates `stat_core` in the graph and makes the two `StatBlock` types
 # incompatible. Bump this rev in lockstep with obelisk-bevy's own stat_core pin.
 stat_core = { git = "ssh://git@github.com/vothuul/obelisk.git", rev = "bf9f026" }
+# loot_core: the obelisk ITEM model (weapons are plain obelisk items — BaseTypeConfig TOML with
+# granted_skills + stats). SAME rev pin as stat_core/obelisk-bevy (the crate-dup skew warning
+# above applies identically — a mismatched source id would duplicate Item/StatBlock types).
+loot_core = { git = "ssh://git@github.com/vothuul/obelisk.git", rev = "bf9f026" }
 # bevy_vfx (the editor's GPU particle engine) — the live-game particle upgrade: replaces the M1
 # emissive-billboard stand-in so authored `.skillfx.ron` effects render in-game as they do in the
 # skill-designer preview. Windowed-client-only at runtime (VfxPlugin is added only in the windowed
