@@ -131,7 +131,11 @@ pub fn init_vfx_library(mut library: ResMut<VfxLibrary>) {
     for (name, system) in bevy_vfx::presets::default_presets() {
         library.effects.entry(name.to_string()).or_insert(system);
     }
-    for dir in ["assets/vfx", "assets/skills"] {
+    // ORDER MATTERS (mirrors the editor's content-root scan): `assets/skills/` first — the
+    // hand-authored seeds living next to their `.cast.ron` — then `assets/vfx/` LAST, the
+    // editor-MANAGED library dir its Save button auto-writes, so a designer's saved edit to a
+    // skill-adjacent preset (e.g. blizzard_frost) wins on a name collision.
+    for dir in ["assets/skills", "assets/vfx"] {
         load_vfx_presets_from_dir(&mut library, dir);
     }
 }
