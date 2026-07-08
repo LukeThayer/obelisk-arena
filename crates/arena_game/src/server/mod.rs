@@ -28,8 +28,11 @@ mod customize;
 mod equip;
 mod levels;
 mod mirrors;
+mod portals;
 mod rounds;
+mod skill_objects;
 mod spawn;
+mod verbs;
 
 use cast_pipeline::detect_cast_edges;
 use controller::{server_apply_movement, server_apply_yaw, trace_server_pose};
@@ -82,8 +85,25 @@ impl Plugin for ArenaServerPlugin {
                 (
                     crate::cast_assets::poll_cast_timelines,
                     trace_server_net_events,
+                    // Skill-object housekeeping (wisp weapon ports): lifetime reaping, glacier
+                    // trail drops (polled off the live roll hitbox), spire rise settling.
+                    skill_objects::reap_skill_objects,
+                    verbs::drop_glacier_trail,
+                    verbs::settle_spires,
                 ),
             )
+            // Skill-object teleport verbs: portal crossings run in FixedUpdate AFTER the physics
+            // step + projectile motion moved every traveler this tick.
+            .add_systems(
+                FixedUpdate,
+                portals::portal_teleport
+                    .after(avian3d::prelude::PhysicsSystems::StepSimulation)
+                    .after(obelisk_bevy::prelude::ObeliskSet::Projectiles),
+            )
+            .init_resource::<portals::PortalTravelers>()
+            // The verb observer: obelisk CueEvents -> arena game verbs (portal placement, spire
+            // eruption). See server/verbs.rs's table.
+            .add_observer(verbs::skill_verbs_on_cue)
             .add_systems(
                 Update,
                 (

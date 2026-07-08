@@ -1,0 +1,18 @@
+// Glacier Burst (potted-spring port, stage 3 of 3, TRIGGERED-ONLY): the terminal frost nova.
+// Executes wherever the ball fused out or the roll ended — anchor CastPoint puts the blast at
+// the trigger's payload position (same pattern as firebolt_explosion). Owns the burst VISUAL.
+(
+  skill_id: "glacier_burst",
+  phase_durations: ( windup: 0.0, active: 0.05, recovery: 0.0 ),
+  collision_windows: [
+    ( id: "burst", spawn: Scheduled( phase: Active, offset: 0.0 ), anchor: CastPoint,
+      active_duration: 0.05, shape: Sphere( radius: 3.5 ), motion: Static,
+      hit_filter: Enemies, hit_mode: OncePerTarget ),
+  ],
+  acquisition: SelfPoint,
+  vfx_cues: { "on_window_burst": "on_window_burst" },
+  cues: {
+    "on_window_burst": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],
+      duration: Some(0.6) ),
+  },
+)

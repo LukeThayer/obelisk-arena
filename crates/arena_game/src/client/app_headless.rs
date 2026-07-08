@@ -152,9 +152,10 @@ pub fn run_headless_client() {
 /// charge latch on a cadence once the local player + an opponent are materialized, so the input
 /// stream carries a press→release edge and BOTH peers' edge detectors fire (server: authoritative
 /// cast via `detect_cast_edges`; client: predicted cosmetics via `local_cast_edge`) — design WS2.
-/// `ARENA_AUTOCAST_SKILL` picks the skill (default firebolt) via [`net::SelectedSkill`];
-/// `ARENA_AUTOCAST_PERIOD` the cadence (default 0.8s, comfortably above firebolt's ~0.6s cast time
-/// so edges don't pile up behind an in-flight cast — the server skips a caster mid-cast).
+/// `ARENA_AUTOCAST_SKILL` picks the skill (default firebolt) via [`net::SelectedSkill`] — a
+/// comma-separated list rotates one entry per pulse (e.g. `portal_orange,portal_blue` places the
+/// pair); `ARENA_AUTOCAST_PERIOD` the cadence (default 0.8s, comfortably above firebolt's ~0.6s
+/// cast time so edges don't pile up behind an in-flight cast — the server skips a caster mid-cast).
 ///
 /// Repeating (not one-shot) so an AUTOCAST client drives a FULL best-of-3 match across rounds.
 /// The server is authoritative for whether a given cast lands; firing continuously is safe — a
@@ -162,6 +163,10 @@ pub fn run_headless_client() {
 pub(super) fn autocast(
     time: Res<Time>,
     mut accum: Local<f32>,
+    mut pulses: Local<usize>,
+    mut input: ResMut<net::LocalInput>,
+    yaw: Res<controller::CameraYaw>,
+    pitch: Res<controller::AimPitch>,
     mut charge: ResMut<net::ChargeState>,
     mut selected: ResMut<net::SelectedSkill>,
     local: Query<(), LocalPlayerFilter>,
@@ -171,6 +176,12 @@ pub(super) fn autocast(
     if local.iter().next().is_none() || remotes.iter().next().is_none() {
         return;
     }
+    // Stamp the configured aim onto the input stream — WITHOUT this, a headless caster that
+    // isn't also AUTOMOVE-ing (the only other yaw/pitch writer) casts along the identity aim
+    // (-Z, flat) no matter what ARENA_CAM_YAW/ARENA_TEST_PITCH say. Windowed, CameraYaw/AimPitch
+    // are the live camera so this matches what the input bridge writes anyway.
+    input.yaw = yaw.0;
+    input.pitch = pitch.0;
     let period = std::env::var("ARENA_AUTOCAST_PERIOD")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
@@ -178,9 +189,13 @@ pub(super) fn autocast(
     *accum += time.delta_secs();
     if *accum >= period {
         *accum = 0.0;
-        if let Ok(skill) = std::env::var("ARENA_AUTOCAST_SKILL") {
-            selected.0 = skill;
+        if let Ok(skills) = std::env::var("ARENA_AUTOCAST_SKILL") {
+            let list: Vec<&str> = skills.split(',').filter(|s| !s.is_empty()).collect();
+            if !list.is_empty() {
+                selected.0 = list[*pulses % list.len()].to_string();
+            }
         }
+        *pulses += 1;
         charge.tap_latch = true; // one charging tick, then release → edge on both peers
     }
 }

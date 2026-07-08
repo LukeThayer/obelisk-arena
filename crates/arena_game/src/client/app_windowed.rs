@@ -23,7 +23,7 @@ use super::harness::{
     ScreenshotConfig, SmokeExit,
 };
 use super::scene::{load_rig, log_registered_skills_once, setup_scene};
-use super::{customization, hud, level, net, parts, present, radial, rig, weapon_select};
+use super::{customization, hud, level, net, parts, present, radial, rig, skill_objects, weapon_select};
 
 use crate::{add_avian_with_lightyear, add_obelisk_sim_client, arena_root};
 
@@ -128,6 +128,8 @@ pub fn run_windowed_client() {
     // (wisp's, 1:1) selecting among the equipped weapon's skills.
     app.add_plugins(weapon_select::WeaponSelectPlugin);
     app.add_plugins(radial::RadialWheelPlugin);
+    // Replicated skill-object visuals (wisp weapon ports: portals, frost tiles, spires).
+    app.add_plugins(skill_objects::SkillObjectVisualsPlugin);
     app.add_systems(
         Update,
         (

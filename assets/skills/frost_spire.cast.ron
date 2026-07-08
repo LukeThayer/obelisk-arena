@@ -1,0 +1,27 @@
+// Frost Spire (potted-spring port): erupt a spire out of a frost tile the glacier dropped.
+// GroundPoint aims the tile; the ARENA validator (cast_pipeline::validate_arena_aim) rejects
+// any point not on a tile and snaps hits to the tile's center — Fizzle here is the paid
+// rejection for the rare point that outranges obelisk's own check. The damage window is a
+// capsule the size of the rising spire (anchor_offset lifts its center to half-height); the
+// PHYSICAL spire is a server skill object spawned on the "on_window_spike" cue
+// (server/verbs.rs), which also consumes the aimed tile.
+(
+  skill_id: "frost_spire",
+  phase_durations: ( windup: 0.25, active: 0.1, recovery: 0.25 ),
+  collision_windows: [
+    ( id: "spike", spawn: Scheduled( phase: Active, offset: 0.0 ), anchor: CastPoint,
+      anchor_offset: (0.0, 0.8, 0.0), active_duration: 0.25,
+      shape: Capsule( radius: 0.45, height: 1.6 ), motion: Static,
+      hit_filter: Enemies, hit_mode: OncePerTarget ),
+  ],
+  acquisition: GroundPoint( range: 60.0, fallback: Fizzle ),
+  chargeable: true,
+  max_hold: 1.5,
+  vfx_cues: { "on_cast": "on_cast", "on_window_spike": "on_window_spike" },
+  cues: {
+    "on_cast": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],
+      duration: Some(0.25) ),
+    "on_window_spike": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],
+      duration: Some(0.4) ),
+  },
+)

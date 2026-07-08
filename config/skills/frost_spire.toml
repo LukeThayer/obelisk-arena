@@ -1,0 +1,15 @@
+id = "frost_spire"
+name = "Frost Spire"
+tags = ["spell", "cold"]
+targeting = "single_enemy"
+delivery = "projectile"
+mana_cost = 15.0
+cooldown = 0.9
+
+# The eruption's damage window (a capsule the height of the rising spire). The GESTURE — "aim
+# at a frost tile the glacier dropped" — is an ARENA extension: server/cast_pipeline.rs's
+# validate_arena_aim rejects the cast edge unless the aimed ground point lies on a frost tile,
+# and snaps it to the tile's center. The physical spire is a server skill object
+# (server/verbs.rs, cue "on_window_spike").
+[damage]
+base_damages = [{ type = "cold", min = 22.0, max = 22.0 }]

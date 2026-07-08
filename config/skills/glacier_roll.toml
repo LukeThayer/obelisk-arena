@@ -1,0 +1,24 @@
+id = "glacier_roll"
+name = "Glacier Roll"
+tags = ["spell", "cold"]
+targeting = "single_enemy"
+delivery = "projectile"
+mana_cost = 0.0
+
+# TRIGGERED-ONLY (never on a weapon): rolling_glacier's on_impact starts this at the landing
+# point. The roll plows through enemies (OncePerTarget — each struck once, the ball keeps
+# going); the arena server polls this skill's hitbox to drop the frost-tile trail
+# (server/verbs.rs::drop_glacier_trail).
+[damage]
+base_damages = [{ type = "cold", min = 28.0, max = 28.0 }]
+
+# However the roll ENDS — a wall (on_impact) or the 6.5s fuse (on_expire) — it bursts there.
+[[conditions]]
+trigger_skill = "glacier_burst"
+type = "on_impact"
+additional = true
+
+[[conditions]]
+trigger_skill = "glacier_burst"
+type = "on_expire"
+additional = true

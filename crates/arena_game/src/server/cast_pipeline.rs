@@ -113,6 +113,8 @@ pub(crate) fn detect_cast_edges(
     transforms: Query<&bevy::prelude::Transform>,
     hurtboxes: Query<(Entity, &Hurtbox)>,
     spatial: avian3d::prelude::SpatialQuery,
+    skill_objects: Query<(Entity, &super::skill_objects::SkillObject)>,
+    object_positions: Query<&avian3d::prelude::Position>,
     mut commands: Commands,
 ) {
     for (caster, caster_id, action, mut prev, weapon) in &mut players {
@@ -190,6 +192,21 @@ pub(crate) fn detect_cast_edges(
         };
 
         let aim = resolve_cast_aim(&acq, dir, cast_entity, cast_ground);
+
+        // ARENA AIM VALIDATORS (the wisp-port pattern): per-skill gates the obelisk acquisition
+        // vocabulary can't express, checked against arena world state BEFORE the cast enters
+        // obelisk. A `None` drops the edge — no cast, no mana, no cooldown (the wisp gesture:
+        // clicking on nothing does nothing). Currently: frost_spire requires its ground point to
+        // land on a frost tile (which it SNAPS to — the tile is the fuel the spire consumes).
+        let Some(aim) = validate_arena_aim(&skill_id, aim, &skill_objects, &object_positions)
+        else {
+            trace::event(
+                "cast_aim_rejected",
+                json!({ "caster": caster_id.0, "skill_id": skill_id }),
+            );
+            continue;
+        };
+
         // Compute the trace label before `insert` moves `aim`.
         let aim_shape = match &aim {
             CastAim::Entity(_) => "Entity",
@@ -206,6 +223,40 @@ pub(crate) fn detect_cast_edges(
             charge: Some(charge),
             muzzle_offset,
         });
+    }
+}
+
+/// Per-skill arena aim gates (see the call site above). Returns the (possibly adjusted) aim, or
+/// `None` to drop the cast edge entirely.
+fn validate_arena_aim(
+    skill_id: &str,
+    aim: CastAim,
+    skill_objects: &Query<(Entity, &super::skill_objects::SkillObject)>,
+    positions: &Query<&avian3d::prelude::Position>,
+) -> Option<CastAim> {
+    match skill_id {
+        // frost_spire: the ground point must land on a frost tile (the fuel); SNAP the cast
+        // point to the tile center so the obelisk damage window + the eruption verb agree on
+        // the exact spot. No tile in range = no cast (wisp: clicking non-ice does nothing).
+        "frost_spire" => {
+            let CastAim::Point(point) = aim else {
+                return None; // GroundPoint acquisition missed entirely (sky shot)
+            };
+            skill_objects
+                .iter()
+                .filter(|(_, o)| o.kind == super::skill_objects::KIND_FROST_TILE)
+                .filter_map(|(e, _)| positions.get(e).ok())
+                .map(|p| {
+                    (
+                        p.0,
+                        Vec2::new(p.0.x - point.x, p.0.z - point.z).length(),
+                    )
+                })
+                .filter(|(_, d)| *d <= super::verbs::SPIRE_MATCH_RANGE)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(tile_pos, _)| CastAim::Point(tile_pos))
+        }
+        _ => Some(aim),
     }
 }
 

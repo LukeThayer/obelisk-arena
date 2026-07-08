@@ -98,7 +98,7 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/items")
     }
 
-    /// The shipped catalog: both weapons load with their authored skills, in authored order
+    /// The shipped catalog: all four weapons load with their authored skills, in authored order
     /// (slot 0 of storm_staff is blizzard, slot 1 chain_lightning — the wheel + cast slots
     /// depend on this order), and ember_wand is the starter.
     #[test]
@@ -106,12 +106,20 @@ mod tests {
         let catalog = WeaponCatalog::load(&arena_items_dir());
         assert_eq!(
             catalog.weapons.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(),
-            vec!["ember_wand", "storm_staff"],
+            vec!["ember_wand", "needle_and_thread", "potted_spring", "storm_staff"],
         );
         assert_eq!(catalog.get("ember_wand").unwrap().skills, vec!["firebolt"]);
         assert_eq!(
             catalog.get("storm_staff").unwrap().skills,
             vec!["blizzard", "chain_lightning"],
+        );
+        assert_eq!(
+            catalog.get("potted_spring").unwrap().skills,
+            vec!["rolling_glacier", "frost_spire"],
+        );
+        assert_eq!(
+            catalog.get("needle_and_thread").unwrap().skills,
+            vec!["portal_orange", "portal_blue"],
         );
         assert_eq!(catalog.default_weapon().unwrap().id, "ember_wand");
         assert_eq!(catalog.get("ember_wand").unwrap().name, "Ember Wand");

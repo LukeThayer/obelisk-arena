@@ -1,0 +1,30 @@
+// Rolling Glacier (potted-spring port, stage 1 of 3): a chargeable ballistic snow-ball lob.
+// Causality is rules-side (config/skills/rolling_glacier.toml): ground impact -> glacier_roll
+// executes at the landing point; mid-air fuse -> glacier_burst. OncePerTarget: a direct player
+// clip damages but does NOT end the ball (it flies on and still lands). `on_end_ball` is the
+// Follow-trail TEARDOWN trigger (vfx_cues only, no binding) — same pattern as firebolt.
+(
+  skill_id: "rolling_glacier",
+  phase_durations: ( windup: 0.35, active: 0.1, recovery: 0.25 ),
+  collision_windows: [
+    ( id: "ball", spawn: Scheduled( phase: Active, offset: 0.0 ), active_duration: 2.0,
+      shape: Sphere( radius: 0.32 ), motion: Ballistic( speed: 9.0, gravity: 9.8 ),
+      hit_filter: Enemies, hit_mode: OncePerTarget ),
+  ],
+  acquisition: Aim,
+  chargeable: true,
+  max_hold: 1.5,
+  vfx_cues: {
+    "on_cast": "on_cast",
+    "on_window_ball": "on_window_ball",
+    "on_hit": "on_hit",
+    "on_end_ball": "on_end_ball",
+  },
+  cues: {
+    "on_cast": ( effect: Some("blizzard_frost"), attach: World, anim: None,
+      params: [ ( param: "scale", source: Charge ) ], duration: Some(0.3) ),
+    "on_window_ball": ( effect: Some("blizzard_frost"), attach: Follow, anim: None, params: [] ),
+    "on_hit": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],
+      duration: Some(0.3) ),
+  },
+)

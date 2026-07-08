@@ -303,10 +303,16 @@ fn spawn_level_panel(commands: &mut Commands, choices: &[String], highlighted: u
 /// lobby is ready (both players present), once per lobby visit — the harness's stand-in for
 /// pressing G. Non-hosts (and non-lobby phases) no-op; the flag re-arms when the phase leaves
 /// Lobby, so a MatchOver→Lobby return starts the next match too (keeps long soaks running).
+///
+/// Composes with `ARENA_AUTOEQUIP` (app_headless): when set, the host holds its start until the
+/// requested weapon is CONFIRMED on its own player (the replicated `EquippedWeapon` round-trip) —
+/// equips are Lobby-gated server-side, so a start racing ahead of an equip would strand the
+/// caster on the starter weapon for the whole match. Scripts equipping from a NON-host observer
+/// should set `ARENA_AUTOEQUIP` on every observer so the host's own round-trip paces the start.
 fn autostart_level(
     state: Res<ClientLevel>,
     me: Res<ConnectTo>,
-    local: Query<(), LocalPlayerFilter>,
+    local: Query<Option<&crate::net::protocol::EquippedWeapon>, LocalPlayerFilter>,
     remotes: Query<(), RemotePlayerFilter>,
     sender: Option<Single<&mut MessageSender<StartMatchMessage>>>,
     mut sent_this_lobby: Local<bool>,
@@ -315,13 +321,20 @@ fn autostart_level(
         *sent_this_lobby = false; // left the lobby — re-arm for the next visit
         return;
     }
+    let Some(weapon) = local.iter().next() else {
+        return;
+    };
     if *sent_this_lobby
         || state.host == 0
         || state.host != me.client_id
-        || local.iter().next().is_none()
         || remotes.iter().next().is_none()
     {
         return;
+    }
+    if let Ok(item_id) = std::env::var("ARENA_AUTOEQUIP") {
+        if weapon.map(|w| w.item_id != item_id).unwrap_or(true) {
+            return; // equip still in flight — hold the start until it round-trips
+        }
     }
     let Ok(level) = std::env::var("ARENA_AUTOSTART_LEVEL") else {
         return;

@@ -33,6 +33,54 @@ type = "fire"
 min = 2
 max = 5
 
+# The wisp portal weapon: both skills are pure UTILITY (place the orange/blue portal ends —
+# server skill objects + the portal_teleport system). Weapon damage is inert for them.
+[[base_types]]
+id = "needle_and_thread"
+name = "Needle and Thread"
+class = "wand"
+tags = ["caster", "arcane"]
+granted_skills = ["portal_orange", "portal_blue"]
+
+[base_types.implicit]
+stat = "added_mana"
+min = 15
+max = 15
+
+[base_types.damage]
+attack_speed = 1.2
+critical_chance = 5.0
+spell_efficiency = 100.0
+
+[[base_types.damage.damages]]
+type = "cold"
+min = 1
+max = 2
+
+# The wisp potted-spring weapon: the glacier chain (lob -> roll -> burst, dropping a frost-tile
+# trail) + frost_spire (erupt a spire out of a dropped tile). The mana cushion feeds the combo.
+[[base_types]]
+id = "potted_spring"
+name = "Potted Spring"
+class = "staff"
+tags = ["caster", "cold"]
+granted_skills = ["rolling_glacier", "frost_spire"]
+
+[base_types.implicit]
+stat = "added_mana"
+min = 25
+max = 25
+
+[base_types.damage]
+attack_speed = 1.0
+critical_chance = 5.0
+spell_efficiency = 100.0
+
+[[base_types.damage.damages]]
+type = "cold"
+min = 3
+max = 7
+
 [[base_types]]
 id = "storm_staff"
 name = "Storm Staff"

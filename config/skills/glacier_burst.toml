@@ -1,0 +1,12 @@
+id = "glacier_burst"
+name = "Glacier Burst"
+tags = ["spell", "cold"]
+targeting = "single_enemy"
+delivery = "projectile"
+mana_cost = 0.0
+
+# TRIGGERED-ONLY: the glacier family's terminal AoE — fired wherever rolling_glacier fused out
+# mid-air or glacier_roll ended (wall / fuse). Its own damage, separate from the ball/roll
+# contact hits.
+[damage]
+base_damages = [{ type = "cold", min = 20.0, max = 20.0 }]

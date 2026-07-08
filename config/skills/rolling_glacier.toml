@@ -1,0 +1,26 @@
+id = "rolling_glacier"
+name = "Rolling Glacier"
+tags = ["spell", "cold"]
+targeting = "single_enemy"
+delivery = "projectile"
+mana_cost = 12.0
+cooldown = 0.8
+
+# The lobbed snowball's own contact damage (it can clip someone mid-arc).
+[damage]
+base_damages = [{ type = "cold", min = 28.0, max = 28.0 }]
+
+# Causality (the potted-spring port): the ball LANDS on the ground -> it starts ROLLING
+# (glacier_roll's timeline executes at the impact point); it fuses out mid-air (fell off the
+# world / never landed) -> it BURSTS where it died. OncePerTarget means a direct player clip
+# does NOT end the ball — it flies on and still lands/rolls. additional = true is REQUIRED for
+# timeline-target conditions.
+[[conditions]]
+trigger_skill = "glacier_roll"
+type = "on_impact"
+additional = true
+
+[[conditions]]
+trigger_skill = "glacier_burst"
+type = "on_expire"
+additional = true

@@ -58,6 +58,12 @@ impl Plugin for ProtocolPlugin {
         // No interpolation: hp is discrete and damage feedback feels best snapping.
         app.register_component::<NetworkedHealth>();
 
+        // --- Skill objects (replicated world objects spawned by skills: portals, frost tiles,
+        // spires — the wisp-port persistence layer). Plain replication (no prediction target);
+        // pose rides the registered avian Position/Rotation like everything else. Clients build
+        // visuals from `kind` (see client/skill_objects.rs).
+        app.register_component::<NetworkedSkillObject>();
+
         // --- Equipped weapon (replicated per-player). Carries the obelisk item id + the skill
         // list it grants, in slot order: the input stream's `skill_slot` indexes THIS list on
         // both peers (the client's wheel/selection maps into it; the server's cast pipeline
@@ -218,6 +224,17 @@ pub struct EquipWeaponMessage {
 pub struct EquippedWeapon {
     pub item_id: String,
     pub skills: Vec<String>,
+}
+
+/// A replicated skill-spawned WORLD OBJECT (the wisp-port persistence layer): portals, frost
+/// tiles, frost spires. `kind` keys everything — server limits/behavior
+/// (`server/skill_objects.rs`) and the client visual recipe (`client/skill_objects.rs`).
+/// `owner` = the spawning client id (0 = none). Pose rides the replicated avian
+/// `Position`/`Rotation`.
+#[derive(Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NetworkedSkillObject {
+    pub kind: String,
+    pub owner: u64,
 }
 
 // ---------------------------------------------------------------------------------------------

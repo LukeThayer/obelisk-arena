@@ -1,0 +1,23 @@
+// Glacier Roll (potted-spring port, stage 2 of 3, TRIGGERED-ONLY): the grounded roll.
+// Executes at rolling_glacier's ground-impact point (CastPoint = the trigger payload position).
+// motion_direction: Horizontal flattens the inherited direction — the trigger inherits the
+// ball's DESCENDING impact velocity, and flattening keeps the roll hugging the ground instead
+// of burying itself. No Follow trail: the roll's visual IS the replicated frost-tile trail the
+// server drops along this window's hitbox (server/verbs.rs::drop_glacier_trail) + the burst at
+// the end. Ends at a wall (on_impact) or the 6.5s fuse (on_expire) -> glacier_burst (rules).
+(
+  skill_id: "glacier_roll",
+  phase_durations: ( windup: 0.0, active: 0.05, recovery: 0.0 ),
+  collision_windows: [
+    ( id: "roll", spawn: Scheduled( phase: Active, offset: 0.0 ), anchor: CastPoint,
+      anchor_offset: (0.0, 0.35, 0.0), active_duration: 6.5,
+      shape: Sphere( radius: 0.32 ), motion: Linear( speed: 7.0 ), motion_direction: Horizontal,
+      hit_filter: Enemies, hit_mode: OncePerTarget ),
+  ],
+  acquisition: SelfPoint,
+  vfx_cues: { "on_hit": "on_hit" },
+  cues: {
+    "on_hit": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],
+      duration: Some(0.3) ),
+  },
+)

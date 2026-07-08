@@ -23,6 +23,7 @@ pub mod customization;
 mod harness;
 pub mod level;
 pub mod radial;
+pub mod skill_objects;
 pub mod weapon_select;
 pub mod hud;
 pub mod net;

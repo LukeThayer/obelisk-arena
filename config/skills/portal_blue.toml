@@ -1,0 +1,14 @@
+id = "portal_blue"
+name = "Blue Portal"
+tags = ["spell"]
+targeting = "single_enemy"
+delivery = "projectile"
+mana_cost = 10.0
+cooldown = 0.3
+
+# Places (or re-places — max 1 per color per caster) the BLUE end of the caster's portal
+# pair. Deals no damage: the mark window is strikes:false, so this table is inert; the actual
+# portal is a server skill object spawned by server/verbs.rs on the "on_window_portal_mark"
+# cue, and the teleport itself is server/portals.rs.
+[damage]
+base_damages = [{ type = "cold", min = 0.0, max = 0.0 }]
