@@ -18,16 +18,25 @@
   acquisition: GroundPoint( range: 30.0, fallback: Then(SelfPoint) ),
   vfx_cues: { "on_cast": "on_cast", "emit_shard": "emit_shard", "on_hit": "on_hit" },
   cues: {
+    // `duration` = how long the bound effect EMITS at this cue (the skill editor's Duration
+    // control); its live particles then finish their own authored lifetimes + fade curves (the
+    // drain). Unset = the vfx preset's own Duration field, else the 1.5s host default.
+    //
     // on_cast fires during Windup at the CASTER (raised to muzzle height) — immediate first-person
     // feedback that the storm is going off. The old blizzard had no on_cast cue, so the caster saw
     // nothing at cast time (the storm is 8u overhead, out of a horizontal view).
     "on_cast": ( effect: Some("blizzard_frost"), attach: World, anim: None,
-      params: [ ( param: "scale", source: Charge ) ] ),
+      params: [ ( param: "scale", source: Charge ) ], duration: Some(0.5) ),
     // emit_shard fires per shard-spawn at the storm. `blizzard_frost` (bright additive-HDR cyan)
     // replaces the built-in `Snow` preset, whose tiny/dim/+5u-offset particles never read in-game.
-    "emit_shard": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [] ),
+    // A short emit per shard: each spawn is a tight puff whose ice sparks rain out and fade
+    // naturally. (Pre-duration behavior: every instance emitted a flat 1.5s, then every live
+    // particle vaporized in one frame.) Crank this up for a longer-churning cloud per shard.
+    "emit_shard": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],
+      duration: Some(0.35) ),
     // on_hit fires at each shard's ground/target impact — the spot the caster is LOOKING at (you
     // aim GroundPoint by looking down), so this is the most reliably in-view blizzard feedback.
-    "on_hit": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [] ),
+    "on_hit": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],
+      duration: Some(0.35) ),
   },
 )

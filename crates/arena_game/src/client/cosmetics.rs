@@ -20,7 +20,10 @@
 use crate::trace;
 use bevy::color::LinearRgba;
 use bevy::prelude::*;
-use bevy_effect::{cleanup_effect, EffectLibrary, EffectPlayback, PlaybackState};
+use bevy_effect::{
+    cleanup_effect, max_spawned_particle_lifetime, stop_effect, EffectLibrary, EffectPlayback,
+    PlaybackState,
+};
 use bevy_vfx::{ColorSource, InitModule, ScalarRange, SpawnModule, VfxLibrary, VfxSystem};
 use obelisk_bevy::assets::{CastTimeline, CueAttach, CueBinding, CueParam, ParamSource, VolumeMotion};
 use obelisk_bevy::prelude::{charge_mult, CastTimelineHandles};
@@ -46,10 +49,23 @@ pub struct LocalCue(pub crate::net::cue::CueMessage);
 /// This fixed offset is a stand-in; a real `wand_tip` socket on the rig is later polish.
 const MUZZLE_HEIGHT_OFFSET: Vec3 = Vec3::new(0.0, 1.2, 0.0);
 
-/// A cosmetic's presentation lifetime — no `CueBinding` authors one (the v2 schema has no
-/// per-binding lifetime field, unlike the deleted v1 lane format), so every spawned cue cosmetic
-/// gets this single default (mirrors the editor's `DEFAULT_COSMETIC_LIFETIME`).
+/// The fallback cue-effect PLAY duration when neither the `CueBinding` nor the bound vfx preset
+/// authors one — mirrors the editor's `DEFAULT_COSMETIC_LIFETIME` so preview == game.
 const DEFAULT_CUE_EFFECT_LIFETIME: f32 = 1.5;
+
+/// Resolve a cue cosmetic's PLAY duration (how long it EMITS before the graceful drain): the
+/// binding's authored `duration` (the skill editor's Duration control) → the bound vfx preset's
+/// own `VfxSystem::duration` when > 0.0 (the VFX editor's Duration field) → the default.
+/// MIRRORS the editor's `skill::preview::cosmetics::resolve_cue_duration` exactly (the editor
+/// crate isn't a dependency here, so the chain is restated — the unit test pins it).
+fn resolve_cue_duration(
+    binding_duration: Option<f32>,
+    preset: Option<&bevy_vfx::VfxSystem>,
+) -> f32 {
+    binding_duration
+        .or_else(|| preset.map(|s| s.duration).filter(|d| *d > 0.0))
+        .unwrap_or(DEFAULT_CUE_EFFECT_LIFETIME)
+}
 
 /// Per-caster aim direction (normalized), recorded when a cast is issued, keyed by the caster's
 /// stable `ObeliskId` string.
@@ -153,11 +169,18 @@ pub fn init_effect_library(mut library: ResMut<EffectLibrary>) {
 }
 
 /// A short-lived cosmetic entity (particle billboard, `bevy_vfx`/`bevy_effect` cue effect, or
-/// cosmetic projectile). Despawned by `age_lifetimes` once `elapsed >= duration`.
+/// cosmetic projectile). Life is TWO-phase (see [`age_lifetimes`]): `duration` seconds of PLAY
+/// (emitting), then a `drain` window (emission stopped, live particles finish their authored
+/// lifetimes + fade curves), then despawn. The old single-phase reap hard-despawned at
+/// `duration`, which vanishes every live GPU particle the same frame.
 #[derive(Component)]
 pub struct ParticleLifetime {
     pub elapsed: f32,
+    /// The PLAY (emission) window, seconds — [`resolve_cue_duration`].
     pub duration: f32,
+    /// `None` until the play window closes; then `Some(remaining_drain_seconds)` counting down
+    /// to the final despawn.
+    pub drain: Option<f32>,
 }
 
 /// A cosmetic, non-authoritative projectile flown by the game. `velocity` is `aim_dir * speed`
@@ -281,6 +304,7 @@ fn spawn_cue_effect(
     name: &str,
     params: &[CueParam],
     charge: f32,
+    duration: f32,
     translation: Vec3,
     warned: &mut HashSet<String>,
 ) -> Entity {
@@ -289,7 +313,8 @@ fn spawn_cue_effect(
         Visibility::default(),
         ParticleLifetime {
             elapsed: 0.0,
-            duration: DEFAULT_CUE_EFFECT_LIFETIME,
+            duration,
+            drain: None,
         },
     ));
 
@@ -339,22 +364,31 @@ pub fn spawn_cue_cosmetics(
     effects: Option<Res<EffectLibrary>>,
     vfx: Option<Res<VfxLibrary>>,
     mut commands: Commands,
-    mut flying: Query<(Entity, &CosmeticProjectile, Option<&mut EffectPlayback>)>,
+    mut flying: Query<(
+        Entity,
+        &CosmeticProjectile,
+        &mut Transform,
+        &mut ParticleLifetime,
+    )>,
     mut warned: Local<HashSet<String>>,
 ) {
     for LocalCue(m) in msgs.read() {
-        // An END cue is the sim saying "the bolt stopped HERE" — terminate every cosmetic
-        // projectile bound to it via `end_cue` (unconditional: even an unbound end cue must still
-        // stop the flight it's ending). An `EffectLibrary`-resolved cosmetic tracks its OWN spawned
-        // children in `EffectPlayback::spawned` rather than as true Bevy hierarchy children, so
-        // `cleanup_effect` must despawn them before the root itself despawns, or they'd leak.
+        // An END cue is the sim saying "the bolt stopped HERE" — retire every cosmetic
+        // projectile bound to it via `end_cue` (unconditional: even an unbound end cue must
+        // still stop the flight it's ending). GRACEFULLY: snap it to the authoritative end
+        // position, stop the flight, and close its play window so `age_lifetimes` enters the
+        // drain — emission stops and the trail's live particles finish their authored fade at
+        // the impact point instead of vanishing in one frame (the old hard-despawn).
         if m.kind == crate::net::cue::CueKind::OnEnd {
-            for (e, proj, playback) in &mut flying {
+            for (e, proj, mut tf, mut life) in &mut flying {
                 if proj.end_cue.as_deref() == Some(m.cue_id.as_str()) {
-                    if let Some(mut playback) = playback {
-                        cleanup_effect(&mut commands, &mut playback);
+                    tf.translation = m.position;
+                    if let Ok(mut ec) = commands.get_entity(e) {
+                        ec.remove::<CosmeticProjectile>();
                     }
-                    commands.entity(e).try_despawn();
+                    // Close the play window NOW (0-length remainder); the drain starts on the
+                    // next `age_lifetimes` tick.
+                    life.duration = life.duration.min(life.elapsed);
                 }
             }
         }
@@ -391,6 +425,13 @@ pub fn spawn_cue_cosmetics(
         // bakes to 0.0 — an unspecified arena charge reads as "uncharged", not "full strength".
         let charge = m.charge.unwrap_or(0) as f32 / 255.0;
 
+        // PLAY duration: authored on the binding (skill editor Duration control) → the vfx
+        // preset's own Duration → the default. Same chain the editor preview resolves.
+        let duration = resolve_cue_duration(
+            binding.duration,
+            vfx.as_deref().and_then(|lib| lib.effects.get(effect_name.as_str())),
+        );
+
         let spawned = spawn_cue_effect(
             &mut commands,
             effects.as_deref(),
@@ -398,6 +439,7 @@ pub fn spawn_cue_cosmetics(
             effect_name,
             &binding.params,
             charge,
+            duration,
             spawn_pos,
             &mut warned,
         );
@@ -440,6 +482,7 @@ pub fn spawn_cue_cosmetics(
                     effect_name,
                     &binding.params,
                     charge,
+                    duration,
                     from.lerp(m.position, t),
                     &mut warned,
                 );
@@ -464,27 +507,56 @@ pub fn fly_cosmetic_projectiles(
     }
 }
 
-/// Age every `ParticleLifetime` and despawn it once it has outlived its `duration`. An
-/// `EffectLibrary`-resolved cosmetic also carries `EffectPlayback`, whose spawned children live in
-/// `EffectPlayback::spawned` rather than as true Bevy hierarchy children — `cleanup_effect` stops it
-/// and despawns those children before the root itself despawns, or they'd leak. (No render-frame
-/// grace ladder like the editor's `reap_preview_cosmetics`: nothing here synchronously mass-despawns
-/// entities mid-frame the way the editor's scrub/Reset does, so the same-frame despawn race that
-/// ladder guards against doesn't arise.)
+/// Age every `ParticleLifetime`, in TWO phases:
+///
+/// **Phase 1 — drain**: when the play window (`duration`) closes, STOP EMISSION only —
+/// `VfxEmissionStopped` on the root (the GPU buffers stay alive so live particles keep
+/// simulating and fade on their authored `SetLifetime`/`ColorByLife` curves) and
+/// `stop_effect` for an `EffectPlayback` cosmetic (halts triggers + stops its spawned vfx
+/// children emitting, despawns nothing). The drain length is the effect's own max particle
+/// lifetime — this is the "die out naturally as designed" fix; the old single-phase despawn
+/// vanished every live particle the same frame.
+///
+/// **Phase 2 — despawn**: drain exhausted, everything already invisible. `cleanup_effect`
+/// despawns an `EffectPlayback` cosmetic's tracked children (they live in
+/// `EffectPlayback::spawned`, not the Bevy hierarchy — skipping this leaks them), then the root
+/// goes. (No render-frame grace ladder like the editor's `reap_preview_cosmetics`: nothing here
+/// synchronously mass-despawns entities mid-frame the way the editor's scrub/Reset does, so the
+/// same-frame despawn race that ladder guards against doesn't arise.)
 pub fn age_lifetimes(
     time: Res<Time>,
     mut commands: Commands,
     mut q: Query<(Entity, &mut ParticleLifetime, Option<&mut EffectPlayback>)>,
+    systems: Query<&bevy_vfx::VfxSystem>,
 ) {
     let dt = time.delta_secs();
     for (e, mut life, playback) in &mut q {
         life.elapsed += dt;
-        if life.elapsed >= life.duration {
-            if let Some(mut playback) = playback {
-                cleanup_effect(&mut commands, &mut playback);
-            }
-            commands.entity(e).despawn();
+        if life.elapsed < life.duration {
+            continue;
         }
+        let Some(remaining) = life.drain else {
+            // Phase 1: enter the drain — stop emitting, let live particles age out as authored.
+            let mut drain_len = systems.get(e).map(|s| s.max_particle_lifetime()).unwrap_or(0.0);
+            if let Some(mut playback) = playback {
+                drain_len = drain_len.max(max_spawned_particle_lifetime(&playback, &systems));
+                stop_effect(&mut commands, &mut playback);
+            }
+            if let Ok(mut ec) = commands.get_entity(e) {
+                ec.insert(bevy_vfx::VfxEmissionStopped);
+            }
+            life.drain = Some(drain_len);
+            continue;
+        };
+        if remaining > 0.0 {
+            life.drain = Some(remaining - dt);
+            continue;
+        }
+        // Phase 2: everything has aged out — despawn for real.
+        if let Some(mut playback) = playback {
+            cleanup_effect(&mut commands, &mut playback);
+        }
+        commands.entity(e).try_despawn();
     }
 }
 
@@ -520,6 +592,31 @@ mod cue_binding_resolution_tests {
         let mut handles = CastTimelineHandles::default();
         handles.0.insert(skill_id.to_string(), handle);
         (handles, timelines)
+    }
+
+    /// The play-duration resolution chain (MUST mirror the editor's
+    /// `skill::preview::cosmetics::resolve_cue_duration`, so preview == game): the binding's
+    /// authored duration wins; else the vfx preset's own `VfxSystem.duration` when > 0; else the
+    /// 1.5s default.
+    #[test]
+    fn cue_duration_resolves_binding_then_preset_then_default() {
+        let mut preset = VfxSystem::default();
+        preset.duration = 3.5;
+        // Binding wins over everything.
+        assert_eq!(resolve_cue_duration(Some(0.4), Some(&preset)), 0.4);
+        // No binding → the preset's own duration.
+        assert_eq!(resolve_cue_duration(None, Some(&preset)), 3.5);
+        // Preset duration 0.0 means "no preset default" → the fallback.
+        preset.duration = 0.0;
+        assert_eq!(
+            resolve_cue_duration(None, Some(&preset)),
+            DEFAULT_CUE_EFFECT_LIFETIME
+        );
+        // EffectLibrary-resolved names have no preset → the fallback.
+        assert_eq!(
+            resolve_cue_duration(None, None),
+            DEFAULT_CUE_EFFECT_LIFETIME
+        );
     }
 
     #[test]
