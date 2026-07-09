@@ -49,9 +49,17 @@ fn main() {
             ..default()
         }))
         .add_plugins(GamePlugin)
-        // Index `character.glb`'s clips/meshes/scenes into the editor's asset libraries (a rig for
-        // a future preview cast animation — the built-in preview stage doesn't consume it yet).
+        // Index `character.glb`'s clips/meshes/scenes into the editor's asset libraries, and hang
+        // that rig under the Skill mode's preview caster (PreviewCasterRig): the bone picker lists
+        // its real joints, authored anims play on it, and bone-anchored cue/charge previews ride
+        // the animated skeleton. Offset/yaw = the GAME's rig conventions
+        // (arena_game::client::present RIG_FOOT_OFFSET -0.62 + π gltf import yaw).
         .register_gltf_library("character.glb")
+        .insert_resource(bevy_modal_editor::PreviewCasterRig {
+            scene_key: "character::scene0".to_string(),
+            offset: bevy::math::Vec3::new(0.0, -0.62, 0.0),
+            yaw: std::f32::consts::PI,
+        })
         // register_obelisk_content loads the skill triad (rules TOML + .cast.ron + cues) + the
         // assets/effects + assets/vfx presets — but NOT the stat_core AILMENT effects
         // (config/effects/*.toml, e.g. `burn`), which previews that apply an ailment need.
