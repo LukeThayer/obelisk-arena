@@ -38,7 +38,8 @@ pub use crate::shared_controller::{JUMP_SPEED, MAX_ACCELERATION, MAX_SPEED};
 // of truth shared with the editor preview); re-exported here so existing `crate::net::*` use sites
 // resolve unchanged. The full doc rationale lives on each const in `arena_sim/src/tuning.rs`.
 pub use arena_sim::tuning::{
-    ARENA_EYE_HEIGHT, GRAVITY, GROUND_Y, PLAYER_CAPSULE_LENGTH, PLAYER_CAPSULE_RADIUS,
+    ARENA_EYE_HEIGHT, CAST_HAND_OFFSET, GRAVITY, GROUND_Y, PLAYER_CAPSULE_LENGTH,
+    PLAYER_CAPSULE_RADIUS,
 };
 
 // --- camera ---
@@ -132,15 +133,8 @@ pub const NETCODE_KEY: [u8; 32] = [0u8; 32];
 
 // --- casting presentation ---
 
-/// The CASTING-HAND launch offset, in the caster's LOCAL aim frame (+X = right, +Y = up from
-/// the body center, -Z = forward): where projectiles/windows SPAWN, matching where the charge
-/// tiers + on_cast cues anchor (`R_wrist_joint`). Rotated by the caster's yaw and passed as
-/// obelisk's `PendingCast.muzzle_offset` (consumed ONLY at window spawn) — AIM acquisition
-/// raycasts keep the camera-accurate EYE origin, so the crosshair stays truthful and only the
-/// launch point carries the slight hand parallax (the standard FPS muzzle trade-off). Lateral
-/// 0.32 stays inside the bolt-radius + hurtbox-radius overlap band so a centered flat aim
-/// still lands (the net-test's firebolt depends on it).
-pub const CAST_HAND_OFFSET: bevy::prelude::Vec3 = bevy::prelude::Vec3::new(0.32, 0.55, -0.25);
+// `CAST_HAND_OFFSET` lives in `arena_sim::tuning` (shared with the editor host) and is
+// re-exported above with the other tuning constants.
 
 /// The world-space hand launch point offset for a caster at `yaw` (the aim frame's yaw only —
 /// pitch does not tilt the body).

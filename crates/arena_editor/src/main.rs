@@ -100,6 +100,9 @@ fn main() {
             yaw: std::f32::consts::FRAC_PI_2,
             // Baseline pose — without it every seeded clip stays muted and the rig T-poses.
             idle_clip: Some("character::idle".to_string()),
+            // Preview casts launch from the GAME's casting hand (rotated to the stage aim and
+            // passed as PendingCast.muzzle_offset) — same constant the server cast pipeline uses.
+            hand_offset: arena_sim::tuning::CAST_HAND_OFFSET,
         })
         // character.glb ships EVERY part variant stacked; hide non-selected ones with the GAME's
         // own default selection (arena_sim::parts — the same rules arena_game's customizer uses).

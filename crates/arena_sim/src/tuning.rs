@@ -30,6 +30,16 @@ pub const GRAVITY: f32 = 20.0;
 /// Y±0.59 = feet→head, so the eye-height muzzle fires from inside the body span and a level shot lands.
 pub const ARENA_EYE_HEIGHT: f32 = 0.5;
 
+/// The CASTING-HAND launch offset, in the caster's LOCAL aim frame (+X = right, +Y = up from
+/// the body center, -Z = forward): where projectiles/windows SPAWN — matching the rig socket
+/// (`R_wrist_joint`) the charge tiers + on_cast cues anchor to. Rotated by the caster's yaw and
+/// passed as obelisk's `PendingCast.muzzle_offset` (consumed only at window spawn). AIM
+/// acquisition keeps the camera-accurate EYE origin; the launch carries the standard FPS muzzle
+/// parallax. Lateral 0.32 stays inside the bolt-radius + hurtbox-radius overlap band so a
+/// centered flat aim still lands (the net-test's firebolt depends on it). Shared here so the
+/// EDITOR's preview casts launch from the identical point.
+pub const CAST_HAND_OFFSET: bevy::math::Vec3 = bevy::math::Vec3::new(0.32, 0.55, -0.25);
+
 /// Player body capsule dimensions, used IDENTICALLY by all three spawns — the server authoritative
 /// body, the server hurtbox child, and the client predicted body — so they can never desync (a
 /// mismatch breaks prediction/hurtbox alignment). `capsule(radius, length)` ⇒ half-height =
