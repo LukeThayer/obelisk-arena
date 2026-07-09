@@ -56,7 +56,9 @@ fn main() {
         // (arena_game::client::present RIG_FOOT_OFFSET -0.62 + π gltf import yaw).
         .register_gltf_library("character.glb")
         .insert_resource(bevy_modal_editor::PreviewCasterRig {
-            scene_key: "character::scene0".to_string(),
+            // The glb's single scene is NAMED "Scene" (SceneLibrary key = "{stem}::{name}"); the
+            // index fallback would be "character::scene_0".
+            scene_key: "character::Scene".to_string(),
             offset: bevy::math::Vec3::new(0.0, -0.62, 0.0),
             yaw: std::f32::consts::PI,
         })
