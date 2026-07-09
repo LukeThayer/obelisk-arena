@@ -29,9 +29,9 @@ use std::collections::HashMap;
 use crate::net::input::ArenaInput;
 use crate::net::protocol::NetworkedPlayer;
 use crate::portals_shared::{
-    collect_pairs, in_floor_slab, map_through_pair, pair_preserves_heading, player_crossing,
-    portal_virtual_transform, projectile_crossing, velocity_rotation, yaw_from_forward,
-    PortalPose, EXIT_STAND_OFFSET, LOCKOUT_RADIUS,
+    collect_pairs, in_floor_slab, map_through_pair, player_crossing, portal_virtual_transform,
+    projectile_crossing, velocity_rotation, yaw_from_forward, PortalPose, EXIT_STAND_OFFSET,
+    LOCKOUT_RADIUS,
 };
 use crate::trace;
 
@@ -174,22 +174,15 @@ pub(crate) fn portal_teleport(
                     // Wall→floor: stand the capsule on the disc instead of clipping the floor.
                     out_pos.y = exit.position.y + EXIT_STAND_OFFSET * exit.normal.y.signum();
                 }
-                // Horizontal↔horizontal keeps the traveler's heading + momentum untouched
-                // (dropping through floor portals must not spin the player); wall pairs get
-                // the full redirect.
-                let preserve = pair_preserves_heading(entry, exit);
-                let out_vel = if preserve {
-                    vel.0
-                } else {
-                    velocity_rotation(entry, exit) * vel.0
-                };
+                // Full pair mapping for EVERY pair (Portal's seamlessness invariant: the
+                // teleport IS the through-view transform — `teleport_continues_the_through_view`
+                // in portals_shared pins it). No special cases: velocity and view both carry
+                // through the pair.
                 pos.0 = out_pos;
-                vel.0 = out_vel;
+                vel.0 = velocity_rotation(entry, exit) * vel.0;
                 travelers.lockout.insert(e, exit.position);
                 travelers.prev.insert(e, out_pos);
-                let new_yaw = (!preserve)
-                    .then(|| yaw_from_forward(virt.rotation * Vec3::NEG_Z))
-                    .flatten();
+                let new_yaw = yaw_from_forward(virt.rotation * Vec3::NEG_Z);
                 trace::event(
                     "portal_teleport",
                     json!({ "traveler": "player",

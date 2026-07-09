@@ -92,14 +92,12 @@ pub fn anti_parallel(entry: &PortalPose, exit: &PortalPose) -> bool {
     entry.normal.dot(exit.normal) < -0.5
 }
 
-/// Horizontal↔horizontal traversal (floor/ceiling to floor/ceiling) PRESERVES the traveler's
-/// world heading: our discs are canonically oriented (`disc_rotation` — no placement-driven
-/// spin), so the mathematical Z-π "out of the exit" flip would read as an arbitrary 180° turn
-/// when dropping through floor portals. Keep the camera yaw and the horizontal velocity as they
-/// are; the exit-side clamp + gravity handle the vertical. Pairs involving a WALL keep the full
-/// rotation (emerging out of a wall demands the redirect — that's the Portal fling).
-pub fn pair_preserves_heading(entry: &PortalPose, exit: &PortalPose) -> bool {
-    entry.is_horizontal() && exit.is_horizontal()
+/// The camera pitch matching a world forward vector (asin of the vertical component, clamped
+/// to the controller's ±85° limit) — with [`yaw_from_forward`], how a teleport hands the mapped
+/// view to the yaw+pitch camera.
+pub fn pitch_from_forward(forward: Vec3) -> f32 {
+    const PITCH_LIMIT: f32 = 85.0 * std::f32::consts::PI / 180.0;
+    forward.y.clamp(-1.0, 1.0).asin().clamp(-PITCH_LIMIT, PITCH_LIMIT)
 }
 
 /// The VELOCITY mapping through the pair (wisp's `q_vel`): anti-parallel pairs flip about local
@@ -434,17 +432,39 @@ mod tests {
         .is_none());
     }
 
-    /// Floor↔floor (and any horizontal pair) preserves heading; wall pairs don't.
+    /// THE seamlessness invariant (Portal's defining property): the TELEPORT mapping and the
+    /// THROUGH-VIEW camera mapping are the same transform at the disc plane — a traveler
+    /// crossing the entry emerges with exactly the perspective the portal was showing.
+    /// `portal_virtual_transform` and `portal_camera_transform` share the rotation everywhere
+    /// (only the position mirrors), and their positions coincide for a point ON the plane.
     #[test]
-    fn heading_preserved_only_for_horizontal_pairs() {
-        let f1 = floor_at(Vec3::ZERO);
-        let f2 = floor_at(Vec3::new(6.0, 0.0, 0.0));
-        let ceiling = PortalPose::new(Vec3::new(0.0, 4.0, 0.0), disc_rotation(Vec3::NEG_Y));
-        let wall = wall_at(Vec3::new(3.0, 1.0, 0.0), Vec3::Z);
-        assert!(pair_preserves_heading(&f1, &f2));
-        assert!(pair_preserves_heading(&f1, &ceiling));
-        assert!(!pair_preserves_heading(&f1, &wall));
-        assert!(!pair_preserves_heading(&wall, &f1));
+    fn teleport_continues_the_through_view() {
+        let pairs = [
+            (wall_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Z), wall_at(Vec3::new(10.0, 1.0, 5.0), Vec3::X)),
+            (wall_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Z), wall_at(Vec3::new(0.0, 1.0, 10.0), Vec3::NEG_Z)),
+            (floor_at(Vec3::ZERO), floor_at(Vec3::new(8.0, 0.0, 0.0))),
+            (wall_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Z), floor_at(Vec3::new(8.0, 0.0, 0.0))),
+        ];
+        for (entry, exit) in pairs {
+            // A viewer ON the entry plane, looking through it at an odd angle.
+            let on_plane = entry.position + entry.rotation * Vec3::new(0.4, 0.0, 0.2);
+            let fwd = (entry.rotation * Vec3::new(0.2, -1.0, 0.1)).normalize();
+            let viewer = Transform::from_translation(on_plane).looking_to(fwd, Vec3::Y);
+            let virt = portal_virtual_transform(viewer, &entry, &exit);
+            let cam = portal_camera_transform(viewer, &entry, &exit);
+            assert!(
+                (virt.translation - cam.translation).length() < 1e-3,
+                "positions coincide on the plane: virt={:?} cam={:?}",
+                virt.translation,
+                cam.translation
+            );
+            let virt_fwd = virt.rotation * Vec3::NEG_Z;
+            let cam_fwd = cam.rotation * Vec3::NEG_Z;
+            assert!(
+                virt_fwd.dot(cam_fwd) > 0.999,
+                "rotations agree: virt={virt_fwd:?} cam={cam_fwd:?}"
+            );
+        }
     }
 
     /// Only complete per-owner pairs collect; two owners = two independent pairs.
