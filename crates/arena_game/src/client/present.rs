@@ -116,6 +116,11 @@ fn attach_rig_to_players(
                 ))
                 .id()
         };
+        // Bone-socket index for the cue layers (CueAttach::Bone / charge tiers) — filled as the
+        // glb's named joints stream in (sockets::index_rig_sockets).
+        commands
+            .entity(body)
+            .insert(super::sockets::RigSockets::default());
         commands
             .entity(player)
             .insert((LocalAnimBlend::default(), RigAttached))

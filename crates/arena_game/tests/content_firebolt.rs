@@ -23,6 +23,16 @@ fn firebolt_timelines_parse_as_v2() {
     ));
     // vfx_cues must be populated (slot==value) or the cues never fire.
     assert!(fb.vfx_cues.contains_key("on_cast") && fb.cues.contains_key("on_cast"));
+    // Charge-hold tiers: embers gather from the first held tick, igniting at 60% — both
+    // bone-anchored on the casting hand (the charge driver + editor bone picker key off these).
+    assert_eq!(fb.charge_cues.len(), 2, "gather + ignite tiers");
+    assert_eq!(fb.charge_cues[1].threshold, 0.6);
+    assert!(fb.charge_cues.iter().all(|t| matches!(
+        &t.cue.attach,
+        obelisk_bevy::assets::CueAttach::Bone { socket, .. } if socket == "R_wrist_joint"
+    )));
+    assert!(fb.charge_cues[0].cue.anim.is_some(), "charge pose authored");
+    obelisk_bevy::assets::validate_timeline(&fb).expect("firebolt validates with tiers");
 
     let expl: CastTimeline = ron::from_str(&read("assets/skills/firebolt_explosion.cast.ron"))
         .expect("firebolt_explosion.cast.ron parses");

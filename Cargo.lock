@@ -5547,7 +5547,7 @@ dependencies = [
 [[package]]
 name = "obelisk-bevy"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy-obelisk?branch=main#e96110afb0fbfea5518665d7454b6ecce842cf33"
+source = "git+https://github.com/LukeThayer/bevy-obelisk?branch=main#79882ce266ceb10e3a58b60db27c2013446834d0"
 dependencies = [
  "avian3d",
  "bevy",

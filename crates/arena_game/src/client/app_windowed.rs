@@ -144,6 +144,17 @@ pub fn run_windowed_client() {
         Update,
         (spawn_cue_cosmetics, fly_cosmetic_projectiles, age_lifetimes),
     );
+    // Charge-hold presentation (designer charge tiers, `CastTimeline::charge_cues`): the per-rig
+    // bone-socket index + the tier driver (local ChargeState + the remote's predicted
+    // ActionState.charging telegraph) + one-shot cast-anim overlay expiry.
+    app.add_systems(
+        Update,
+        (
+            super::sockets::index_rig_sockets,
+            super::charge_cues::drive_charge_cues,
+            rig::expire_cue_anim_overlays,
+        ),
+    );
 
     if let Some(frames) = std::env::var("ARENA_SMOKE_FRAMES")
         .ok()
@@ -195,7 +206,9 @@ pub fn run_windowed_client() {
     // `net::CastIntent` → `send_cast_requests` ships a `CastRequestMessage`). This is the same wire
     // cast the headless AUTOCAST uses. Lets a windowed client script firebolt for the visual gate.
     if std::env::var("ARENA_AUTOCAST").ok().as_deref() == Some("1") {
-        app.add_systems(Update, autocast);
+        // AFTER the cast-hold bridge: the bridge writes ChargeState from the real mouse every
+        // frame, which would clobber a scripted ARENA_AUTOCAST_HOLD charge.
+        app.add_systems(Update, autocast.after(bridge_windowed_cast_hold));
     }
 
     // AUTOEQUIP harness (ARENA_AUTOEQUIP=<weapon_id>): the headless equip hook, available
@@ -305,6 +318,12 @@ fn bridge_windowed_cast_hold(
         charge.secs = (charge.secs + time.delta_secs()).min(net::MAX_CHARGE_SECS);
         charge.charging = true;
     } else {
+        // A scripted charge hold (ARENA_AUTOCAST_HOLD, visual probes) owns ChargeState while
+        // active — the idle mouse must not zero its in-flight hold (autocast runs after this
+        // bridge and releases it itself).
+        if charge.charging && std::env::var("ARENA_AUTOCAST_HOLD").is_ok() {
+            return;
+        }
         // Reset — the falling edge in the sampled input stream carries the cast.
         charge.secs = 0.0;
         charge.charging = false;

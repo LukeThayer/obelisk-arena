@@ -186,6 +186,22 @@ pub(super) fn autocast(
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(0.8);
+    // ARENA_AUTOCAST_HOLD=<secs>: CHARGED casts — hold the charge this long each pulse, then
+    // release (the falling edge fires the cast with the accumulated charge byte). Drives the
+    // charge-tier presentation exactly like a held mouse button. Windowed callers register
+    // autocast AFTER the input bridge so the scripted hold wins over the (idle) real button.
+    let hold = std::env::var("ARENA_AUTOCAST_HOLD")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok());
+    if let Some(hold_secs) = hold {
+        if charge.charging {
+            charge.secs += time.delta_secs();
+            if charge.secs >= hold_secs {
+                charge.charging = false; // release → cast edge next input tick
+            }
+            return;
+        }
+    }
     *accum += time.delta_secs();
     if *accum >= period {
         *accum = 0.0;
@@ -196,7 +212,13 @@ pub(super) fn autocast(
             }
         }
         *pulses += 1;
-        charge.tap_latch = true; // one charging tick, then release → edge on both peers
+        if hold.is_some() {
+            // Begin a HELD charge; the block above accumulates + releases it.
+            charge.secs = 0.0;
+            charge.charging = true;
+        } else {
+            charge.tap_latch = true; // one charging tick, then release → edge on both peers
+        }
     }
 }
 

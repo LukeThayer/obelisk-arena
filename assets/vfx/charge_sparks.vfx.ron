@@ -1,0 +1,68 @@
+// Charge tier 0: a warm ember glow gathering around the casting hand. Small, tight, additive —
+// designed to sit ON a bone socket (CueAttach::Bone "R_wrist_joint") and loop for the whole
+// hold; the charge-tier driver streams the live charge into "scale" so it visibly swells.
+(
+    emitters: [
+        (
+            name: "Ember Gather",
+            enabled: true,
+            capacity: 64,
+            spawn: Rate(50.0),
+            init: [
+                SetLifetime(Random(0.2, 0.45)),
+                SetPosition(Sphere(
+                    center: (0.0, 0.0, 0.0),
+                    radius: Random(0.05, 0.16),
+                )),
+                SetVelocity(Random(
+                    speed: Random(0.2, 0.6),
+                )),
+            ],
+            update: [
+                Drag(3.0),
+                ColorByLife((
+                    keys: [
+                        (
+                            time: 0.0,
+                            color: (
+                                red: 5.0,
+                                green: 2.2,
+                                blue: 0.6,
+                                alpha: 1.0,
+                            ),
+                        ),
+                        (
+                            time: 0.6,
+                            color: (
+                                red: 3.2,
+                                green: 1.1,
+                                blue: 0.25,
+                                alpha: 0.8,
+                            ),
+                        ),
+                        (
+                            time: 1.0,
+                            color: (
+                                red: 1.2,
+                                green: 0.3,
+                                blue: 0.05,
+                                alpha: 0.0,
+                            ),
+                        ),
+                    ],
+                )),
+            ],
+            render: Billboard((
+                orient: FaceCamera,
+                texture: Some("textures/particles/light_01.png"),
+                flipbook: None,
+                soft_particle_distance: 0.0,
+            )),
+            sim_space: Local,
+            alpha_mode: Additive,
+        ),
+    ],
+    params: [],
+    duration: 0.0,
+    looping: true,
+)

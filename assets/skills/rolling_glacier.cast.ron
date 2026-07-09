@@ -14,6 +14,14 @@
   acquisition: Aim,
   chargeable: true,
   max_hold: 1.5,
+  // Charge-hold presentation: frost gathers on the casting hand for the whole hold (single
+  // tier); "scale" streams the live charge so the gather visibly grows.
+  charge_cues: [
+    ( threshold: 0.0, cue: ( effect: Some("blizzard_frost"),
+        attach: Bone( socket: "R_wrist_joint", offset: (0.0, 0.05, 0.0) ),
+        anim: Some("casting_idle"),
+        params: [ ( param: "scale", source: Charge ) ] ) ),
+  ],
   vfx_cues: {
     "on_cast": "on_cast",
     "on_window_ball": "on_window_ball",

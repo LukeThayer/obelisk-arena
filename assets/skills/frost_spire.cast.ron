@@ -17,6 +17,13 @@
   acquisition: GroundPoint( range: 60.0, fallback: Fizzle ),
   chargeable: true,
   max_hold: 1.5,
+  // Charge-hold presentation: frost gathers on the casting hand while aiming the tile.
+  charge_cues: [
+    ( threshold: 0.0, cue: ( effect: Some("blizzard_frost"),
+        attach: Bone( socket: "R_wrist_joint", offset: (0.0, 0.05, 0.0) ),
+        anim: Some("casting_idle"),
+        params: [ ( param: "scale", source: Charge ) ] ) ),
+  ],
   vfx_cues: { "on_cast": "on_cast", "on_window_spike": "on_window_spike" },
   cues: {
     "on_cast": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],

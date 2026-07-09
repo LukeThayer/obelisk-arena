@@ -16,6 +16,20 @@
   acquisition: Aim,
   chargeable: true,
   max_hold: 1.5,
+  // Charge-hold presentation (charge_cues, host-driven — both peers see it via the input
+  // stream): embers gather on the casting hand from the first held tick; at 60% charge the
+  // gather IGNITES (the tier crossing drains the old loop, starts the storm). "scale" streams
+  // the LIVE charge fraction into the running loop so the glow swells within a tier too.
+  charge_cues: [
+    ( threshold: 0.0, cue: ( effect: Some("charge_sparks"),
+        attach: Bone( socket: "R_wrist_joint", offset: (0.0, 0.05, 0.0) ),
+        anim: Some("casting_idle"),
+        params: [ ( param: "scale", source: Charge ) ] ) ),
+    ( threshold: 0.6, cue: ( effect: Some("charge_storm"),
+        attach: Bone( socket: "R_wrist_joint", offset: (0.0, 0.05, 0.0) ),
+        anim: Some("casting_idle"),
+        params: [ ( param: "scale", source: Charge ) ] ) ),
+  ],
   vfx_cues: {
     "on_cast": "on_cast",
     "on_window_bolt": "on_window_bolt",

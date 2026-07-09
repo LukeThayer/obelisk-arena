@@ -277,7 +277,7 @@ fn vfx_scale_color(em: &mut bevy_vfx::EmitterDef, mult: f32) {
 /// authoring param onto the `bevy_vfx` module stack: `"scale"` → `SetSize`, `"emission"` →
 /// `SpawnModule::Rate`, `"color"` → scaled `SetColor` RGB. An unrecognized param name, or an
 /// emitter-less system, is a no-op — never a panic.
-fn apply_modulated_param(system: &mut VfxSystem, param: &str, value: f32) {
+pub(crate) fn apply_modulated_param(system: &mut VfxSystem, param: &str, value: f32) {
     let Some(em) = system.emitters.first_mut() else {
         return;
     };
@@ -363,6 +363,7 @@ fn spawn_cue_effect(
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_cue_cosmetics(
     mut msgs: MessageReader<LocalCue>,
+    time: Res<Time>,
     handles: Res<CastTimelineHandles>,
     timelines: Res<Assets<CastTimeline>>,
     effects: Option<Res<EffectLibrary>>,
@@ -374,6 +375,9 @@ pub fn spawn_cue_cosmetics(
         &mut Transform,
         &mut ParticleLifetime,
     )>,
+    players_by_oid: Query<(Entity, &crate::net::protocol::ObeliskNetId)>,
+    children: Query<&Children>,
+    bodies: Query<(Entity, Option<&super::sockets::RigSockets>), With<super::rig::ArenaBody>>,
     mut warned: Local<HashSet<String>>,
 ) {
     for LocalCue(m) in msgs.read() {
@@ -447,6 +451,47 @@ pub fn spawn_cue_cosmetics(
             spawn_pos,
             &mut warned,
         );
+
+        // `CueAttach::Bone`: re-parent the spawned effect onto the CASTER's named rig socket
+        // (offset in the bone's local frame) — a muzzle flash that rides the animated hand. The
+        // caster resolves via the wire's own `source_id` (`ObeliskNetId`); an unknown socket
+        // falls back to the rig root (sockets::resolve_socket's contract).
+        if let CueAttach::Bone { socket, offset } = &binding.attach {
+            if let Some(caster) = players_by_oid
+                .iter()
+                .find(|(_, oid)| oid.0 == m.source_id)
+                .map(|(e, _)| e)
+            {
+                let parent = super::sockets::resolve_socket(caster, socket, &children, &bodies);
+                commands
+                    .entity(spawned)
+                    .insert((ChildOf(parent), Transform::from_translation(*offset)));
+            }
+        }
+
+        // Authored cast anim (`CueBinding.anim`, the designer's clip pick): overlay the caster's
+        // casting layer for the cast's windup+active span — one-shot, expired by
+        // `expire_cue_anim_overlays`. OnCast only (the charge tiers drive their own overlays).
+        if let (Some(clip), crate::net::cue::CueKind::OnCast) = (&binding.anim, m.kind) {
+            if let Some(caster) = players_by_oid
+                .iter()
+                .find(|(_, oid)| oid.0 == m.source_id)
+                .map(|(e, _)| e)
+            {
+                let span = handles
+                    .0
+                    .get(&m.skill_id)
+                    .and_then(|h| timelines.get(h))
+                    .map(|tl| tl.phase_durations.windup + tl.phase_durations.active)
+                    .unwrap_or(0.5)
+                    .max(0.2);
+                commands.entity(caster).insert(super::rig::CueAnimOverlay {
+                    clip: clip.clone(),
+                    until: Some(time.elapsed_secs() + span),
+                    looping: false,
+                });
+            }
+        }
 
         // `CueAttach::Follow` is only ever authored on `on_window_*`/`emit_*` slots (world-anchored
         // slots — on_cast/on_hit/on_end_* — have no motion to follow).
@@ -587,6 +632,7 @@ mod cue_binding_resolution_tests {
             chargeable: false,
             max_hold: 1.0,
             cues,
+            charge_cues: Vec::new(),
         }
     }
 

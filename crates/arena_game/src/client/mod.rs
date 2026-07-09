@@ -17,6 +17,7 @@
 
 mod app_headless;
 mod app_windowed;
+pub mod charge_cues;
 pub mod controller;
 pub mod cosmetics;
 pub mod customization;
@@ -32,6 +33,7 @@ pub mod parts;
 pub mod present;
 pub mod rig;
 mod scene;
+pub mod sockets;
 
 pub use app_headless::run_headless_client;
 pub use app_windowed::run_windowed_client;

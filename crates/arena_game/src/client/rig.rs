@@ -59,6 +59,9 @@ pub struct ArenaBody;
 pub struct RigAssets {
     gltf: Handle<Gltf>,
     pub(crate) graph: Option<Handle<AnimationGraph>>,
+    /// EVERY named clip's graph node (superset of the named fields below) — the lookup the
+    /// cue-anim overlay resolves designer-authored clip names against.
+    pub(crate) named: std::collections::HashMap<String, AnimationNodeIndex>,
     pub(crate) idle: Option<AnimationNodeIndex>,
     pub(crate) walk_f: Option<AnimationNodeIndex>,
     pub(crate) walk_b: Option<AnimationNodeIndex>,
@@ -107,11 +110,13 @@ pub fn build_graph_when_loaded(
 
     let mut graph = AnimationGraph::new();
     let root = graph.root;
-    let mut add = |name: &str| -> Option<AnimationNodeIndex> {
-        gltf.named_animations
-            .get(name)
-            .map(|clip| graph.add_clip(clip.clone(), 1.0, root))
-    };
+    // EVERY named clip gets a node (the cue-anim overlay can play any of them); the fixed
+    // locomotion/casting fields below just alias into this map.
+    let mut named = std::collections::HashMap::new();
+    for (name, clip) in gltf.named_animations.iter() {
+        named.insert(name.to_string(), graph.add_clip(clip.clone(), 1.0, root));
+    }
+    let add = |name: &str| -> Option<AnimationNodeIndex> { named.get(name).copied() };
 
     rig.idle = add(IDLE_CLIP);
     rig.walk_f = add(WALK_F_CLIP);
@@ -124,6 +129,7 @@ pub fn build_graph_when_loaded(
     rig.cast_walk_b = add(CAST_WALK_B_CLIP);
     rig.cast_walk_l = add(CAST_WALK_L_CLIP);
     rig.cast_walk_r = add(CAST_WALK_R_CLIP);
+    rig.named = named;
 
     if rig.idle.is_none() {
         warn!("character.glb is missing animation \"{IDLE_CLIP}\"");
@@ -161,22 +167,7 @@ pub fn attach_animation_graph(
         // Start every clip looping muted-at-rest so the per-frame `drive_animation`
         // blend can set weights without first having to `play` each one. `play` is
         // idempotent (entry-or-default), so every clip is started exactly once here.
-        for node in [
-            rig.idle,
-            rig.walk_f,
-            rig.walk_b,
-            rig.walk_l,
-            rig.walk_r,
-            rig.falling,
-            rig.cast_idle,
-            rig.cast_walk_f,
-            rig.cast_walk_b,
-            rig.cast_walk_l,
-            rig.cast_walk_r,
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for node in rig.named.values().copied() {
             player.play(node).repeat().set_weight(0.0);
         }
         // Seed idle at full weight so the character isn't a T-pose for the single
@@ -197,6 +188,49 @@ pub struct LocalAnimBlend {
     /// 0 = plain locomotion, 1 = full casting layer. Eased toward the
     /// phase-driven target each frame by [`step_casting_blend`].
     pub casting: f32,
+    /// The overlay node that held the casting layer LAST frame (if any) — animation-player
+    /// weights persist, so when the overlay changes/ends its old node must be re-zeroed or the
+    /// stale pose keeps blending in.
+    pub(crate) last_override: Option<AnimationNodeIndex>,
+}
+
+/// A cue-authored animation override for the CASTING layer of one player's rig: while present
+/// (and its clip resolves in the rig's named-clip map), the casting layer plays THIS clip
+/// instead of the default `casting_idle`/`casting_walk_*` set — the designer's
+/// `CueBinding.anim` made real. Inserted by the charge-cue driver (looping, removed on release)
+/// and by the cue cosmetics layer for one-shot `on_cast` anims (expires at `until`).
+#[derive(Component, Debug, Clone)]
+pub struct CueAnimOverlay {
+    /// Clip name. Editor-authored names may be library-qualified (`"character::casting_idle"`)
+    /// — resolution takes the last `::` segment against the glb's named clips.
+    pub clip: String,
+    /// `None` = hold until the component is removed (charge loops). `Some(t)` = expire once
+    /// `Time::elapsed_secs()` passes `t` (one-shot cast anims) — `expire_cue_anim_overlays`.
+    pub until: Option<f32>,
+    /// `true` = loop the clip while the overlay holds; `false` = play it once.
+    pub looping: bool,
+}
+
+/// Resolve an authored clip name (possibly `lib::clip`-qualified) against the rig's named-clip
+/// nodes.
+pub(crate) fn resolve_overlay_node(rig: &RigAssets, clip: &str) -> Option<AnimationNodeIndex> {
+    let short = clip.rsplit("::").next().unwrap_or(clip);
+    rig.named.get(short).copied()
+}
+
+/// Drop expired one-shot overlays (`until` passed). Looping overlays (`until: None`) are
+/// removed by whoever inserted them (the charge-cue driver, on release).
+pub fn expire_cue_anim_overlays(
+    time: Res<Time>,
+    q: Query<(Entity, &CueAnimOverlay)>,
+    mut commands: Commands,
+) {
+    let now = time.elapsed_secs();
+    for (e, overlay) in &q {
+        if overlay.until.is_some_and(|t| now >= t) {
+            commands.entity(e).remove::<CueAnimOverlay>();
+        }
+    }
 }
 
 /// Per-frame exponential follow toward the target casting blend. `ALPHA` 0.2
@@ -224,6 +258,7 @@ fn locomotion_blend(
     world_velocity: Vec3,
     yaw: f32,
     casting_blend: f32,
+    cast_override: Option<AnimationNodeIndex>,
     sink: &mut impl FnMut(AnimationNodeIndex, f32),
 ) {
     let mut emit = |node: Option<AnimationNodeIndex>, w: f32| {
@@ -236,20 +271,25 @@ fn locomotion_blend(
     let cast_factor = casting_blend;
     let plain_factor = 1.0 - casting_blend;
 
+    // A cue-authored overlay clip REPLACES the whole casting side (one clip, no directional
+    // variants — the charge pose / authored cast anim).
+    let cast_idle = cast_override.or(rig.cast_idle);
+    let overriding = cast_override.is_some();
+
     let planar = Vec3::new(world_velocity.x, 0.0, world_velocity.z);
     let speed = planar.length();
 
     if speed < WALK_MIN_SPEED {
         // Standing: all weight on idle / casting_idle.
         emit(rig.idle, plain_factor);
-        emit(rig.cast_idle, cast_factor);
+        emit(cast_idle, cast_factor);
         return;
     }
 
     let locomotion = (speed / LOCOMOTION_REF_SPEED).clamp(0.0, 1.0);
-    let idle_share = 1.0 - locomotion;
-    emit(rig.idle, idle_share * plain_factor);
-    emit(rig.cast_idle, idle_share * cast_factor);
+    let idle_share = if overriding { 1.0 } else { 1.0 - locomotion };
+    emit(rig.idle, (1.0 - locomotion) * plain_factor);
+    emit(cast_idle, idle_share * cast_factor);
 
     // World velocity → local frame (character forward = -Z in the body's frame).
     let local = (Quat::from_axis_angle(Vec3::Y, -yaw) * planar) / speed;
@@ -299,6 +339,8 @@ pub fn drive_animation(
         Option<&Rotation>,
         &mut LocalAnimBlend,
         Has<LocalNetPlayer>,
+        Option<&CueAnimOverlay>,
+        Option<&lightyear::prelude::input::native::ActionState<crate::net::input::ArenaInput>>,
     )>,
     yaw: Res<super::controller::CameraYaw>,
     charge: Res<ChargeState>,
@@ -314,7 +356,9 @@ pub fn drive_animation(
         let Some(root) = rig_root_of(anim_entity, &parents, &body_marker, &roots) else {
             continue;
         };
-        let Ok((cast_state, lin_vel, rotation, mut blend, is_local)) = roots.get_mut(root) else {
+        let Ok((cast_state, lin_vel, rotation, mut blend, is_local, overlay, action)) =
+            roots.get_mut(root)
+        else {
             continue;
         };
         let cast_phase = cast_state.map(|c| c.cast_phase).unwrap_or(0);
@@ -322,19 +366,33 @@ pub fn drive_animation(
         // Map the cast state to a casting-layer blend target (guide §4). Both local + remote read
         // the replicated `NetworkedCastState.cast_phase` the server stamps (1 windup / 2 active →
         // 1.0, 3 recovery → 0.5, 0 none → 0.0 — this is what makes A's cast animate on B's screen).
-        // For the LOCAL player, a charge hold also drives the blend to 1.0 as a pre-release wind-up
-        // (the server-side `ActiveCast`, hence cast_phase, only starts on release).
+        // A charge hold ALSO drives the blend to 1.0 as a pre-release wind-up on BOTH peers —
+        // the local player from its own `ChargeState`, the REMOTE from its predicted
+        // `ActionState.charging` (the input-stream charging telegraph: you see the enemy wind up
+        // while they hold).
         let phase_target = match cast_phase {
             1 | 2 => 1.0,
             3 => 0.5,
             _ => 0.0,
         };
-        let casting_target = if is_local && charge.charging {
-            1.0
+        let charging_here = if is_local {
+            charge.charging
         } else {
-            phase_target
+            action.map(|a| a.0.charging).unwrap_or(false)
         };
+        let casting_target = if charging_here { 1.0 } else { phase_target };
         blend.casting = step_casting_blend(blend.casting, casting_target);
+
+        // Cue-authored casting-layer override (charge pose / authored cast anim). Weights
+        // persist on the player, so a changed/ended override's old node is re-zeroed.
+        let override_node = overlay.and_then(|o| resolve_overlay_node(&rig, &o.clip));
+        let override_loops = overlay.map(|o| o.looping).unwrap_or(true);
+        if blend.last_override != override_node {
+            if let Some(old) = blend.last_override {
+                player.play(old).set_weight(0.0);
+            }
+            blend.last_override = override_node;
+        }
 
         // Per-rig locomotion (Bug 2): the LOCAL player uses the camera yaw + zero velocity (it's
         // first-person/hidden, so its walk clip is never seen). Each REMOTE rig uses ITS OWN yaw
@@ -353,8 +411,14 @@ pub fn drive_animation(
             rig_velocity,
             rig_yaw,
             blend.casting,
+            override_node,
             &mut |node, weight| {
-                player.play(node).repeat().set_weight(weight);
+                let anim = player.play(node);
+                // One-shot overrides play through once; everything else loops.
+                if override_node != Some(node) || override_loops {
+                    anim.repeat();
+                }
+                anim.set_weight(weight);
             },
         );
     }
@@ -380,6 +444,8 @@ fn rig_root_of(
         Option<&Rotation>,
         &mut LocalAnimBlend,
         Has<LocalNetPlayer>,
+        Option<&CueAnimOverlay>,
+        Option<&lightyear::prelude::input::native::ActionState<crate::net::input::ArenaInput>>,
     )>,
 ) -> Option<Entity> {
     // Single upward pass: return the nearest ancestor carrying a `LocalAnimBlend` (the player root,

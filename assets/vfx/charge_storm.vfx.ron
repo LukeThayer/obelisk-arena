@@ -1,0 +1,117 @@
+// Charge tier 1+ (high charge): the gathered ember IGNITES — a bright hot core + spitting
+// sparks. Bone-anchored like charge_sparks; the tier driver streams live charge into "scale".
+(
+    emitters: [
+        (
+            name: "Hot Core",
+            enabled: true,
+            capacity: 96,
+            spawn: Rate(90.0),
+            init: [
+                SetLifetime(Random(0.15, 0.3)),
+                SetPosition(Sphere(
+                    center: (0.0, 0.0, 0.0),
+                    radius: Random(0.02, 0.12),
+                )),
+                SetVelocity(Random(
+                    speed: Random(0.3, 0.9),
+                )),
+            ],
+            update: [
+                Drag(2.0),
+                ColorByLife((
+                    keys: [
+                        (
+                            time: 0.0,
+                            color: (
+                                red: 8.0,
+                                green: 4.5,
+                                blue: 1.4,
+                                alpha: 1.0,
+                            ),
+                        ),
+                        (
+                            time: 0.5,
+                            color: (
+                                red: 6.0,
+                                green: 2.4,
+                                blue: 0.5,
+                                alpha: 0.9,
+                            ),
+                        ),
+                        (
+                            time: 1.0,
+                            color: (
+                                red: 2.0,
+                                green: 0.5,
+                                blue: 0.1,
+                                alpha: 0.0,
+                            ),
+                        ),
+                    ],
+                )),
+            ],
+            render: Billboard((
+                orient: FaceCamera,
+                texture: Some("textures/particles/light_01.png"),
+                flipbook: None,
+                soft_particle_distance: 0.0,
+            )),
+            sim_space: Local,
+            alpha_mode: Additive,
+        ),
+        (
+            name: "Spit Sparks",
+            enabled: true,
+            capacity: 80,
+            spawn: Rate(40.0),
+            init: [
+                SetLifetime(Random(0.25, 0.5)),
+                SetPosition(Sphere(
+                    center: (0.0, 0.0, 0.0),
+                    radius: Random(0.05, 0.1),
+                )),
+                SetVelocity(Random(
+                    speed: Random(1.2, 2.6),
+                )),
+            ],
+            update: [
+                Gravity((0.0, -3.0, 0.0)),
+                Drag(1.2),
+                ColorByLife((
+                    keys: [
+                        (
+                            time: 0.0,
+                            color: (
+                                red: 6.5,
+                                green: 3.0,
+                                blue: 0.8,
+                                alpha: 1.0,
+                            ),
+                        ),
+                        (
+                            time: 1.0,
+                            color: (
+                                red: 1.5,
+                                green: 0.35,
+                                blue: 0.05,
+                                alpha: 0.0,
+                            ),
+                        ),
+                    ],
+                )),
+            ],
+            render: Billboard((
+                orient: FaceCamera,
+                texture: Some("textures/particles/light_01.png"),
+                flipbook: None,
+                soft_particle_distance: 0.0,
+            )),
+            sim_space: World,
+            alpha_mode: Additive,
+        ),
+    ],
+    params: [],
+    duration: 0.0,
+    looping: true,
+)
