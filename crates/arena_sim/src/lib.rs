@@ -7,6 +7,7 @@ pub mod obelisk;
 pub mod preview;
 pub mod shared_controller;
 pub mod spawn;
+pub mod parts;
 pub mod tuning;
 
 pub const ARENA_SIM_TICK_HZ: u32 = 60;

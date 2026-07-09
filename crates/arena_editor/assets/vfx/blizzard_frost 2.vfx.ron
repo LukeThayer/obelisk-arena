@@ -1,0 +1,160 @@
+(
+    emitters: [
+        (
+            name: "Frost Core",
+            enabled: true,
+            capacity: 1,
+            spawn: Once(
+                count: 1,
+                offset: 0.0,
+            ),
+            init: [
+                SetLifetime(Random(0.15, 3.0)),
+                SetPosition(Sphere(
+                    center: (0.0, 0.0, 0.0),
+                    radius: Random(0.0, 1.0),
+                )),
+            ],
+            update: [
+                ColorByLife((
+                    keys: [
+                        (
+                            time: 0.0,
+                            color: (
+                                red: 1.2,
+                                green: 3.6,
+                                blue: 6.0,
+                                alpha: 1.0,
+                            ),
+                        ),
+                        (
+                            time: 0.5,
+                            color: (
+                                red: 0.6,
+                                green: 2.2,
+                                blue: 4.2,
+                                alpha: 0.9,
+                            ),
+                        ),
+                        (
+                            time: 1.0,
+                            color: (
+                                red: 0.2,
+                                green: 0.9,
+                                blue: 2.4,
+                                alpha: 0.0,
+                            ),
+                        ),
+                    ],
+                )),
+                SizeByLife((
+                    keys: [
+                        (
+                            time: 0.0,
+                            value: 0.5,
+                            interp: EaseOut,
+                        ),
+                        (
+                            time: 0.5,
+                            value: 0.38,
+                            interp: Linear,
+                        ),
+                        (
+                            time: 1.0,
+                            value: 0.52718747,
+                            interp: EaseIn,
+                        ),
+                    ],
+                )),
+                Gravity((0.0, -9.8, 0.0)),
+            ],
+            render: Billboard((
+                orient: FaceCamera,
+                texture: Some("textures/particles/light_01.png"),
+                flipbook: None,
+                soft_particle_distance: 0.0,
+            )),
+            sim_space: Local,
+            alpha_mode: Additive,
+        ),
+        (
+            name: "Frost Mist",
+            enabled: true,
+            capacity: 80,
+            spawn: Once(
+                count: 1,
+                offset: 0.0,
+            ),
+            init: [
+                SetLifetime(Random(0.5, 1.0)),
+                SetPosition(Sphere(
+                    center: (0.0, 0.0, 0.0),
+                    radius: Random(0.1, 0.45),
+                )),
+                SetVelocity(Random(
+                    speed: Random(0.1, 0.5),
+                )),
+            ],
+            update: [
+                Drag(2.0),
+                ColorByLife((
+                    keys: [
+                        (
+                            time: 0.0,
+                            color: (
+                                red: 0.5,
+                                green: 0.8,
+                                blue: 1.0,
+                                alpha: 0.0,
+                            ),
+                        ),
+                        (
+                            time: 0.3,
+                            color: (
+                                red: 0.6,
+                                green: 0.85,
+                                blue: 1.0,
+                                alpha: 0.5,
+                            ),
+                        ),
+                        (
+                            time: 1.0,
+                            color: (
+                                red: 0.7,
+                                green: 0.9,
+                                blue: 1.0,
+                                alpha: 0.0,
+                            ),
+                        ),
+                    ],
+                )),
+                SizeByLife((
+                    keys: [
+                        (
+                            time: 0.0,
+                            value: 0.4,
+                            interp: EaseOut,
+                        ),
+                        (
+                            time: 1.0,
+                            value: 0.9,
+                            interp: Linear,
+                        ),
+                    ],
+                )),
+                Gravity((0.0, -9.8, 0.0)),
+            ],
+            render: Billboard((
+                orient: FaceCamera,
+                texture: Some("textures/particles/smoke_04.png"),
+                flipbook: None,
+                soft_particle_distance: 0.0,
+            )),
+            sim_space: World,
+            alpha_mode: Blend,
+        ),
+    ],
+    params: [],
+    duration: 0.0,
+    looping: true,
+)

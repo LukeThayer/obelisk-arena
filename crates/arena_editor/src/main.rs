@@ -12,6 +12,39 @@ use bevy_modal_editor::skill::RegisterObeliskContentExt; // register_obelisk_con
 use bevy_modal_editor::{recommended_image_plugin, EditorPlugin, EditorPluginConfig, GamePlugin};
 use obelisk_bevy::prelude::ObeliskConfigExt; // add_obelisk_effects
 
+/// Deconflict the preview rig's stacked part variants: `character.glb` ships EVERY variant mesh
+/// (all hats/tops/hairs at once); the GAME hides non-selected ones per `arena_sim::parts`. Apply
+/// the same DEFAULT selection to named nodes under the editor's preview rig — the caster reads
+/// as the default in-game witch instead of a heap of outfits. Visibility inherits, so hiding the
+/// named node hides its mesh subtree; `Added<Name>` covers the glb scene streaming in.
+fn deconflict_preview_rig_parts(
+    new_names: Query<(Entity, &Name), Added<Name>>,
+    parents: Query<&ChildOf>,
+    rig_scenes: Query<(), With<bevy_modal_editor::skill::preview::rig::PreviewCasterRigScene>>,
+    mut commands: Commands,
+) {
+    let selection = arena_sim::parts::PartSelection::default();
+    for (entity, name) in &new_names {
+        let mut cur = entity;
+        let mut under = rig_scenes.contains(cur);
+        while !under {
+            match parents.get(cur) {
+                Ok(p) => {
+                    cur = p.0;
+                    under = rig_scenes.contains(cur);
+                }
+                Err(_) => break,
+            }
+        }
+        if !under {
+            continue;
+        }
+        if !selection.is_visible(name.as_str()) {
+            commands.entity(entity).insert(Visibility::Hidden);
+        }
+    }
+}
+
 /// Gizmo for a placed [`ArenaSpawnPoint`]: a lime sphere at the point + an arrow showing the
 /// spawn FACING (players spawn looking along the marker's forward).
 fn draw_spawn_point_gizmo(gizmos: &mut Gizmos, transform: &GlobalTransform) {
@@ -61,7 +94,12 @@ fn main() {
             scene_key: "character::Scene".to_string(),
             offset: bevy::math::Vec3::new(0.0, -0.62, 0.0),
             yaw: std::f32::consts::PI,
+            // Baseline pose — without it every seeded clip stays muted and the rig T-poses.
+            idle_clip: Some("character::idle".to_string()),
         })
+        // character.glb ships EVERY part variant stacked; hide non-selected ones with the GAME's
+        // own default selection (arena_sim::parts — the same rules arena_game's customizer uses).
+        .add_systems(Update, deconflict_preview_rig_parts)
         // register_obelisk_content loads the skill triad (rules TOML + .cast.ron + cues) + the
         // assets/effects + assets/vfx presets — but NOT the stat_core AILMENT effects
         // (config/effects/*.toml, e.g. `burn`), which previews that apply an ailment need.
