@@ -25,8 +25,9 @@ use std::collections::HashMap;
 use crate::net::input::ArenaInput;
 use crate::net::protocol::{NetworkedPlayer, NetworkedSkillObject};
 use crate::portals_shared::{
-    collect_pairs, in_floor_slab, player_crossing, portal_virtual_transform, velocity_rotation,
-    yaw_from_forward, PortalPose, EXIT_STAND_OFFSET, LOCKOUT_RADIUS,
+    collect_pairs, in_floor_slab, pair_preserves_heading, player_crossing,
+    portal_virtual_transform, velocity_rotation, yaw_from_forward, PortalPose,
+    EXIT_STAND_OFFSET, LOCKOUT_RADIUS,
 };
 use crate::trace;
 
@@ -152,13 +153,19 @@ pub fn predicted_portal_teleport(
                 if exit.is_horizontal() && !entry.is_horizontal() {
                     out_pos.y = exit.position.y + EXIT_STAND_OFFSET * exit.normal.y.signum();
                 }
+                // Horizontal↔horizontal keeps heading + momentum (must match the server's
+                // rule exactly); wall pairs get the full redirect.
+                let preserve = pair_preserves_heading(entry, exit);
                 pos.0 = out_pos;
-                vel.0 = velocity_rotation(entry, exit) * vel.0;
+                if !preserve {
+                    vel.0 = velocity_rotation(entry, exit) * vel.0;
+                }
                 travelers.lockout.insert(e, exit.position);
                 travelers.prev.insert(e, out_pos);
-                // Camera continuity (local player only): carry the view through the pair — the
-                // next buffered input ships the new yaw, turning the server body to match.
-                if is_local {
+                // Camera continuity (local player only, wall pairs only): carry the view
+                // through the pair — the next buffered input ships the new yaw, turning the
+                // server body to match. Horizontal pairs keep the camera untouched.
+                if is_local && !preserve {
                     if let (Some(cam), Some(new_yaw)) = (
                         cam_yaw.as_deref_mut(),
                         yaw_from_forward(virt.rotation * Vec3::NEG_Z),

@@ -21,15 +21,23 @@ pub struct ArenaPresentPlugin;
 
 impl Plugin for ArenaPresentPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (attach_rig_to_players, hide_local_player_body));
+        app.add_systems(
+            Update,
+            (
+                attach_rig_to_players,
+                hide_local_player_body,
+                disable_skinned_mesh_culling,
+            ),
+        );
     }
 }
 
 /// Marker on the LOCAL player's `ArenaBody` scene root. Used to:
-///   - Set `Visibility::Hidden` so the first-person camera is never inside the
-///     local player's head mesh (`hide_local_player_body`).
+///   - Keep the local body's meshes on [`SELF_BODY_LAYER`] (`hide_local_player_body`) so the
+///     layer-0 first-person camera never renders them — while the PORTAL cameras (layers
+///     [0, SELF_BODY_LAYER]) do, so you can see your own character through a portal.
 ///   - Skip the spine aim-pitch lean on the local body (the controller only
-///     leans REMOTE opponents, since the local body is never seen).
+///     leans REMOTE opponents, since the local body is never seen first-person).
 ///
 /// Only attached to the body spawned for the entity carrying [`LocalNetPlayer`];
 /// remote (opponent) bodies carry no such marker and stay fully visible.
@@ -53,9 +61,9 @@ const RIG_FOOT_OFFSET: f32 = -0.62;
 /// `Mesh3d`), so the only visible thing is the rig. Polls for new replicas, so the second
 /// (late-joining) player gets a rig too.
 ///
-/// LOCAL player bodies are tagged [`LocalPlayerBody`] and spawned with `Visibility::Hidden` so the
-/// first-person camera is never inside the local player's head. REMOTE (opponent) bodies are
-/// `Visibility::default()` (inherited → visible).
+/// LOCAL player bodies are tagged [`LocalPlayerBody`]; their meshes are moved onto
+/// [`SELF_BODY_LAYER`] by `hide_local_player_body` so the layer-0 first-person camera never
+/// sees them while the portal cameras do. REMOTE (opponent) bodies stay on layer 0 (visible).
 #[allow(clippy::type_complexity)]
 fn attach_rig_to_players(
     new_players: Query<
@@ -90,8 +98,11 @@ fn attach_rig_to_players(
                     LocalPlayerBody,
                     SceneRoot(scene),
                     base_tf,
-                    // Hidden: the local player's body is never seen in first-person.
-                    Visibility::Hidden,
+                    // VISIBLE, but its meshes live on SELF_BODY_LAYER (layer_local_player_body)
+                    // — the first-person main camera renders layer 0 only, so the local body is
+                    // invisible to it, while the PORTAL cameras render [0, SELF_BODY_LAYER] and
+                    // show your own character through a portal (wisp's SELF_BODY_LAYER).
+                    Visibility::default(),
                 ))
                 .id()
         } else {
@@ -112,22 +123,61 @@ fn attach_rig_to_players(
     }
 }
 
-/// Enforce `Visibility::Hidden` on every [`LocalPlayerBody`] each frame. This
-/// is idempotent insurance: `apply_arena_part_visibility` (in `parts.rs`) sets
-/// per-mesh visibility (some to `Inherited`) which propagates correctly from the
-/// `Hidden` root, but if any other system resets the root visibility this restores
-/// it. Cheap — at most one entity is tagged `LocalPlayerBody` at any time.
-fn hide_local_player_body(
-    mut local_bodies: Query<&mut Visibility, With<LocalPlayerBody>>,
-    customization: Option<Res<crate::client::customization::CustomizationOpen>>,
+/// The render layer the LOCAL player's meshes live on (wisp `SELF_BODY_LAYER`): excluded from
+/// the first-person main camera (which renders layer 0 only) but INCLUDED by the portal render
+/// cameras, so you can see your own character through a portal.
+pub const SELF_BODY_LAYER: usize = 1;
+
+/// Disable CPU frustum culling on every skinned mesh (wisp `disable_skinned_mesh_culling`).
+/// A skinned mesh's `Aabb` is the BIND pose in the mesh node's local space — the visual pose
+/// comes from joint matrices the culling test never sees, so a camera near/inside the model
+/// (the first-person body, anything seen through a portal camera's oblique frustum) culls
+/// meshes that are actually on screen. The shadow pass has its own wider test, which is why a
+/// culled body still cast a shadow.
+pub(super) fn disable_skinned_mesh_culling(
+    pending: Query<
+        Entity,
+        (
+            With<bevy::mesh::skinning::SkinnedMesh>,
+            Without<bevy::camera::visibility::NoFrustumCulling>,
+        ),
+    >,
+    mut commands: Commands,
 ) {
-    // While the customizer is open, the body is shown for the third-person preview.
-    if customization.map(|c| c.open).unwrap_or(false) {
-        return;
+    for entity in &pending {
+        commands
+            .entity(entity)
+            .insert(bevy::camera::visibility::NoFrustumCulling);
     }
-    for mut vis in &mut local_bodies {
-        if *vis != Visibility::Hidden {
-            *vis = Visibility::Hidden;
+}
+
+/// Keep the LOCAL body's meshes on [`SELF_BODY_LAYER`] (portal-era replacement for the old
+/// root `Visibility::Hidden`): the layer-0 first-person camera never renders them, while the
+/// portal cameras (layers [0, SELF_BODY_LAYER]) do — you can see your own character through a
+/// portal. While the customizer is open the meshes go back to layer 0 so the third-person
+/// preview shows them. Re-asserted every frame: the glb scene streams its mesh entities in
+/// asynchronously (and a scene swap would spawn fresh unlayered ones). Cheap — at most one
+/// entity is tagged `LocalPlayerBody`, and the insert only fires on a layer mismatch.
+fn hide_local_player_body(
+    local_bodies: Query<Entity, With<LocalPlayerBody>>,
+    children: Query<&Children>,
+    meshes: Query<(Entity, Option<&bevy::camera::visibility::RenderLayers>), With<Mesh3d>>,
+    customization: Option<Res<crate::client::customization::CustomizationOpen>>,
+    mut commands: Commands,
+) {
+    let preview = customization.map(|c| c.open).unwrap_or(false);
+    let target = if preview {
+        bevy::camera::visibility::RenderLayers::layer(0)
+    } else {
+        bevy::camera::visibility::RenderLayers::layer(SELF_BODY_LAYER)
+    };
+    for root in &local_bodies {
+        for node in std::iter::once(root).chain(children.iter_descendants(root)) {
+            if let Ok((mesh, layers)) = meshes.get(node) {
+                if layers != Some(&target) {
+                    commands.entity(mesh).insert(target.clone());
+                }
+            }
         }
     }
 }

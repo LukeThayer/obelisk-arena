@@ -185,7 +185,9 @@ fn attach_skill_object_visuals(
                     ..default()
                 }),
                 Transform::default(),
-                RenderLayers::layer(0),
+                // Include SELF_BODY_LAYER: the local player's own (first-person-hidden) body
+                // renders through portals — you can see yourself (wisp behavior).
+                RenderLayers::from_layers(&[0, super::present::SELF_BODY_LAYER]),
             ));
             continue;
         }

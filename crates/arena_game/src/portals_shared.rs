@@ -92,6 +92,16 @@ pub fn anti_parallel(entry: &PortalPose, exit: &PortalPose) -> bool {
     entry.normal.dot(exit.normal) < -0.5
 }
 
+/// Horizontal↔horizontal traversal (floor/ceiling to floor/ceiling) PRESERVES the traveler's
+/// world heading: our discs are canonically oriented (`disc_rotation` — no placement-driven
+/// spin), so the mathematical Z-π "out of the exit" flip would read as an arbitrary 180° turn
+/// when dropping through floor portals. Keep the camera yaw and the horizontal velocity as they
+/// are; the exit-side clamp + gravity handle the vertical. Pairs involving a WALL keep the full
+/// rotation (emerging out of a wall demands the redirect — that's the Portal fling).
+pub fn pair_preserves_heading(entry: &PortalPose, exit: &PortalPose) -> bool {
+    entry.is_horizontal() && exit.is_horizontal()
+}
+
 /// The VELOCITY mapping through the pair (wisp's `q_vel`): anti-parallel pairs flip about local
 /// Z (mirror cancel + into→out-of); every other pair flips about local X (into→out-of only,
 /// world-X component preserved — an unconditional Z flip is what broke wisp's ground portals).
@@ -422,6 +432,19 @@ mod tests {
             &wall
         )
         .is_none());
+    }
+
+    /// Floor↔floor (and any horizontal pair) preserves heading; wall pairs don't.
+    #[test]
+    fn heading_preserved_only_for_horizontal_pairs() {
+        let f1 = floor_at(Vec3::ZERO);
+        let f2 = floor_at(Vec3::new(6.0, 0.0, 0.0));
+        let ceiling = PortalPose::new(Vec3::new(0.0, 4.0, 0.0), disc_rotation(Vec3::NEG_Y));
+        let wall = wall_at(Vec3::new(3.0, 1.0, 0.0), Vec3::Z);
+        assert!(pair_preserves_heading(&f1, &f2));
+        assert!(pair_preserves_heading(&f1, &ceiling));
+        assert!(!pair_preserves_heading(&f1, &wall));
+        assert!(!pair_preserves_heading(&wall, &f1));
     }
 
     /// Only complete per-owner pairs collect; two owners = two independent pairs.
