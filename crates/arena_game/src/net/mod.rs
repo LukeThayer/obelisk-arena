@@ -130,6 +130,24 @@ pub const NETCODE_KEY: [u8; 32] = [0u8; 32];
 // `present::RIG_FOOT_OFFSET`, `cosmetics::MUZZLE_HEIGHT_OFFSET`, and `rig::LOCOMOTION_REF_SPEED`
 // are client-presentation-only; they live next to the rig/cosmetic systems that consume them.
 
+// --- casting presentation ---
+
+/// The CASTING-HAND launch offset, in the caster's LOCAL aim frame (+X = right, +Y = up from
+/// the body center, -Z = forward): where projectiles/windows SPAWN, matching where the charge
+/// tiers + on_cast cues anchor (`R_wrist_joint`). Rotated by the caster's yaw and passed as
+/// obelisk's `PendingCast.muzzle_offset` (consumed ONLY at window spawn) — AIM acquisition
+/// raycasts keep the camera-accurate EYE origin, so the crosshair stays truthful and only the
+/// launch point carries the slight hand parallax (the standard FPS muzzle trade-off). Lateral
+/// 0.32 stays inside the bolt-radius + hurtbox-radius overlap band so a centered flat aim
+/// still lands (the net-test's firebolt depends on it).
+pub const CAST_HAND_OFFSET: bevy::prelude::Vec3 = bevy::prelude::Vec3::new(0.32, 0.55, -0.25);
+
+/// The world-space hand launch point offset for a caster at `yaw` (the aim frame's yaw only —
+/// pitch does not tilt the body).
+pub fn hand_launch_offset(yaw: f32) -> bevy::prelude::Vec3 {
+    bevy::prelude::Quat::from_axis_angle(bevy::prelude::Vec3::Y, yaw) * CAST_HAND_OFFSET
+}
+
 // --- skill objects (wisp weapon ports) ---
 
 /// Portal disc radius (wisp PORTAL_RADIUS) — shared: the server's crossing test and the client's

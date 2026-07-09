@@ -26,7 +26,7 @@
   ],
   vfx_cues: { "on_cast": "on_cast", "on_window_spike": "on_window_spike" },
   cues: {
-    "on_cast": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],
+    "on_cast": ( effect: Some("blizzard_frost"), attach: Bone( socket: "R_wrist_joint", offset: (0.0, 0.05, 0.0) ), anim: None, params: [],
       duration: Some(0.25) ),
     "on_window_spike": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],
       duration: Some(0.4) ),

@@ -221,7 +221,10 @@ pub(crate) fn detect_cast_edges(
             skill_id,
             aim,
             charge: Some(charge),
-            muzzle_offset,
+            // The LAUNCH point (obelisk consumes muzzle_offset only at window spawn): the
+            // casting HAND, not the aim eye — the bolt visibly leaves the hand the charge
+            // gathered on. The eye offset above stays the ACQUISITION origin (crosshair-true).
+            muzzle_offset: crate::net::hand_launch_offset(action.0.yaw),
         });
     }
 }

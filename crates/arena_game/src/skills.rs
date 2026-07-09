@@ -313,7 +313,11 @@ fn tick_predicted_cues(
     time: Res<Time>,
     mut queue: ResMut<PredictedCueQueue>,
     local: Query<
-        (&avian3d::prelude::Position, &crate::net::protocol::ObeliskNetId),
+        (
+            &avian3d::prelude::Position,
+            &crate::net::protocol::ObeliskNetId,
+            &lightyear::prelude::input::native::ActionState<crate::net::input::ArenaInput>,
+        ),
         With<crate::client::net::LocalNetPlayer>,
     >,
     mut out: MessageWriter<crate::client::cosmetics::LocalCue>,
@@ -321,8 +325,13 @@ fn tick_predicted_cues(
     if queue.0.is_empty() {
         return;
     }
-    let live: Option<(bevy::prelude::Vec3, String)> =
-        local.iter().next().map(|(p, id)| (p.0, id.0.clone()));
+    let live: Option<(bevy::prelude::Vec3, String)> = local
+        .iter()
+        .next()
+        // The HAND launch point — the same offset the server spawns the authoritative window
+        // at (net::CAST_HAND_OFFSET), so the predicted trail leaves the hand the charge
+        // gathered on, not the eye.
+        .map(|(p, id, a)| (p.0 + crate::net::hand_launch_offset(a.0.yaw), id.0.clone()));
     queue.0.retain_mut(|s| {
         s.fire_in.tick(time.delta());
         if !s.fire_in.is_finished() {
@@ -331,7 +340,7 @@ fn tick_predicted_cues(
         let mut cue = s.cue.clone();
         if let Some((pos, ref id)) = live {
             if *id == s.source_id {
-                cue.position = pos + bevy::prelude::Vec3::Y * crate::net::ARENA_EYE_HEIGHT;
+                cue.position = pos;
             }
         }
         crate::trace::event(

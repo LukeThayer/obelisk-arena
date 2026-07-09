@@ -29,7 +29,7 @@
     "on_end_ball": "on_end_ball",
   },
   cues: {
-    "on_cast": ( effect: Some("blizzard_frost"), attach: World, anim: None,
+    "on_cast": ( effect: Some("blizzard_frost"), attach: Bone( socket: "R_wrist_joint", offset: (0.0, 0.05, 0.0) ), anim: None,
       params: [ ( param: "scale", source: Charge ) ], duration: Some(0.3) ),
     "on_window_ball": ( effect: Some("blizzard_frost"), attach: Follow, anim: None, params: [] ),
     "on_hit": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],

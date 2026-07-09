@@ -37,7 +37,9 @@
     "on_end_bolt": "on_end_bolt",
   },
   cues: {
-    "on_cast": ( effect: Some("Fire"), attach: World, anim: None,
+    // The muzzle flash rides the SAME hand the charge gathered on (and the projectile now
+    // launches from — net::CAST_HAND_OFFSET).
+    "on_cast": ( effect: Some("Fire"), attach: Bone( socket: "R_wrist_joint", offset: (0.0, 0.05, 0.0) ), anim: None,
       params: [ ( param: "scale", source: Charge ) ] ),
     "on_window_bolt": ( effect: Some("firebolt_trail"), attach: Follow, anim: None, params: [] ),
     "on_hit": ( effect: Some("Sparks"), attach: World, anim: None, params: [] ),

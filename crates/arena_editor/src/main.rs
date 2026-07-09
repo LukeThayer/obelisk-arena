@@ -93,7 +93,11 @@ fn main() {
             // index fallback would be "character::scene_0".
             scene_key: "character::Scene".to_string(),
             offset: bevy::math::Vec3::new(0.0, -0.62, 0.0),
-            yaw: std::f32::consts::PI,
+            // The preview duel line runs along +X (caster at SPAWN_MARKERS[0] = -4, dummy at
+            // +4) and the caster body carries an identity Rotation — the GAME's π import yaw
+            // (which pairs with a live aim-driven body rotation) reads 90° off here. π/2 faces
+            // the model down the duel line at the dummy.
+            yaw: std::f32::consts::FRAC_PI_2,
             // Baseline pose — without it every seeded clip stays muted and the rig T-poses.
             idle_clip: Some("character::idle".to_string()),
         })
