@@ -74,6 +74,13 @@ pub fn make_arena_combatant(
             AngularVelocity::default(),
             RigidBody::Dynamic,
             Collider::capsule(PLAYER_CAPSULE_RADIUS, PLAYER_CAPSULE_LENGTH),
+            // Player layer with ALL filters — the portal floor pass-through toggles the Ground
+            // bit off while the body stands in a floor-portal slab (must stay identical to the
+            // client's predicted body layers or prediction desyncs).
+            avian3d::prelude::CollisionLayers::new(
+                crate::GameLayer::Player,
+                avian3d::prelude::LayerMask::ALL,
+            ),
             LockedAxes::default()
                 .lock_rotation_x()
                 .lock_rotation_y()

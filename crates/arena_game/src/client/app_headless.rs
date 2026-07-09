@@ -203,7 +203,7 @@ pub(super) fn autocast(
 /// [H] `ARENA_AUTOEQUIP=<weapon_id>`: send `EquipWeaponMessage` once per lobby visit, as soon as
 /// the local player exists — the headless stand-in for the lobby's I panel (mirrors
 /// `autostart_level`'s once-per-lobby re-arm so soaks re-equip after each match).
-fn autoequip_weapon(
+pub(super) fn autoequip_weapon(
     state: Res<super::level::ClientLevel>,
     local: Query<(), LocalPlayerFilter>,
     sender: Option<
@@ -343,7 +343,7 @@ fn trace_replicated_round_state(
 /// fires along the same axis, keeping a moving caster on the firing line). The resulting avian
 /// `Position` change is what the movement-replication check asserts on (server pose changes + the
 /// OTHER client observes the interpolated pose move).
-fn automove_input(
+pub(super) fn automove_input(
     mut input: ResMut<net::LocalInput>,
     yaw: Res<controller::CameraYaw>,
     pitch: Res<controller::AimPitch>,

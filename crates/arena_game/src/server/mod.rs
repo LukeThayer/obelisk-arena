@@ -92,8 +92,16 @@ impl Plugin for ArenaServerPlugin {
                     verbs::settle_spires,
                 ),
             )
-            // Skill-object teleport verbs: portal crossings run in FixedUpdate AFTER the physics
-            // step + projectile motion moved every traveler this tick.
+            // Portal traversal (server half of the shared pipeline): BEFORE the physics step,
+            // open the floor under players standing in a floor-portal slab + publish the discs
+            // into arena_sim's world-hit exemptions (projectiles fly through portal surfaces);
+            // AFTER the step + projectile motion, run the authoritative teleport.
+            .add_systems(
+                FixedUpdate,
+                (portals::portal_floor_passthrough, portals::refresh_portal_passthrough)
+                    .before(avian3d::prelude::PhysicsSystems::Prepare)
+                    .before(obelisk_bevy::prelude::ObeliskSet::Projectiles),
+            )
             .add_systems(
                 FixedUpdate,
                 portals::portal_teleport

@@ -20,7 +20,7 @@ pub struct ArenaSpawnPoint {
 
 use std::path::{Path, PathBuf};
 
-use avian3d::prelude::{Collider, Position, RigidBody, Rotation};
+use avian3d::prelude::{Collider, CollisionLayers, LayerMask, Position, RigidBody, Rotation};
 use bevy::ecs::entity::EntityHashMap;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::reflect::AppTypeRegistry;
@@ -372,6 +372,9 @@ pub fn spawn_level(
             Name::new(s.name.clone()),
             RigidBody::Static,
             scaled_collider(&s.shape, s.scale),
+            // Level statics are the GROUND layer: portal floor pass-through drops exactly this
+            // layer from a player standing in a floor-portal slab (crate::GameLayer).
+            CollisionLayers::new(crate::GameLayer::Ground, LayerMask::ALL),
             Position(s.translation),
             Rotation(s.rotation),
         ));

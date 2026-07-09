@@ -1,18 +1,19 @@
-// Orange Portal (wisp portal-weapon port): mark a surface point; the server spawns/replaces
-// the caster's ORANGE portal disc there (server/verbs.rs, cue "on_window_portal_mark" — it
-// re-raycasts eye->mark for the surface NORMAL, which the flat GroundPoint aim doesn't carry).
-// The mark window is strikes:false — pure cue emission, no hits, no damage. GroundPoint 15
-// falls back to SelfPoint: an into-the-sky aim drops the portal at the caster's feet rather
-// than fizzling (wisp lets you place at your own position).
+// Orange Portal (wisp portal-weapon port): fire-and-place. Acquisition is plain Aim — the
+// SERVER VERB does the wisp placement itself (server/verbs.rs, cue "on_window_portal_mark"):
+// raycast from the caster's eye along its aim, stick the disc to ANY hit surface
+// (wall/floor/ceiling, inset off it), or float it in the air at a fixed distance facing back
+// on a miss. The mark window is strikes:false — pure cue emission at the caster (no cast
+// point under Aim), no hits, no damage. Traversal is server/portals.rs + the client's
+// predicted mirror; the see-through rendering is client/skill_objects.rs.
 (
   skill_id: "portal_orange",
   phase_durations: ( windup: 0.15, active: 0.05, recovery: 0.15 ),
   collision_windows: [
-    ( id: "portal_mark", spawn: Scheduled( phase: Active, offset: 0.0 ), anchor: CastPoint,
+    ( id: "portal_mark", spawn: Scheduled( phase: Active, offset: 0.0 ),
       strikes: false, active_duration: 0.05, shape: Sphere( radius: 0.1 ), motion: Static,
       hit_filter: Enemies, hit_mode: OncePerTarget ),
   ],
-  acquisition: GroundPoint( range: 15.0, fallback: Then(SelfPoint) ),
+  acquisition: Aim,
   vfx_cues: { "on_window_portal_mark": "on_window_portal_mark" },
   cues: {
     "on_window_portal_mark": ( effect: Some("Portal"), attach: World, anim: None, params: [],

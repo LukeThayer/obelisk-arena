@@ -63,6 +63,9 @@ pub fn add_obelisk_sim(app: &mut App, resolve_hits: bool) {
     app.add_plugins(net::ObeliskNetPlugin)
         .add_plugins(vfx::ObeliskCuePlugin)
         .add_plugins(loot::ObeliskLootPlugin);
+    // World-hit exemption regions (portal discs) — the game fills it, `report_world_hits`
+    // consults it. Defaults empty (editor/preview compositions never touch it).
+    app.init_resource::<PortalPassthrough>();
 
     app.configure_sets(
         FixedUpdate,
@@ -210,8 +213,35 @@ pub fn add_obelisk_sim_client(app: &mut App) {
 /// The previous tick's hitbox position — inserted by [`report_world_hits`] on first sight of a
 /// projectile, then updated each tick. Gives the world-hit check the MOVEMENT SEGMENT to cast
 /// (point-in-collider checks alone would tunnel through thin walls at projectile speeds).
+/// `pub` field: the game's portal teleport rewrites it after warping a projectile so the next
+/// segment doesn't span the teleport (a cross-map segment would fire a spurious world hit).
 #[derive(Component)]
 pub struct LastHitboxPos(pub Vec3);
+
+/// World-hit EXEMPTION regions (the game's portal discs): a projectile whose impact point lands
+/// inside one of these discs is NOT reported as a world hit — it flies on through the surface so
+/// the game's portal teleport can catch the plane crossing instead of the wall ending the bolt.
+/// The GAME owns the contents (arena_game refreshes it from its active portal pairs each tick);
+/// arena_sim only consults it. Empty = no exemptions (the editor/preview never fills it).
+#[derive(Resource, Default)]
+pub struct PortalPassthrough {
+    /// `(center, unit normal, radius)` per disc.
+    pub discs: Vec<(Vec3, Vec3, f32)>,
+}
+
+impl PortalPassthrough {
+    /// Is `point` (a world-hit impact on some surface) within `slack` of a disc's plane and
+    /// inside its radius? The disc sits `SURFACE_INSET` off its wall, so impacts on the wall
+    /// BEHIND the disc register with a small positive plane distance.
+    pub fn covers(&self, point: Vec3, slack: f32) -> bool {
+        self.discs.iter().any(|(center, normal, radius)| {
+            let rel = point - *center;
+            let along = rel.dot(*normal);
+            let radial = (rel - *normal * along).length();
+            along.abs() <= slack && radial <= *radius
+        })
+    }
+}
 
 /// Kill plane: a projectile below this world Y has left every conceivable level — end it as a
 /// world hit so its window can't fly forever.
@@ -240,6 +270,7 @@ fn report_world_hits(
     combatants: Query<(), With<obelisk_bevy::prelude::Combatant>>,
     sensors: Query<(), With<avian3d::prelude::Sensor>>,
     spatial: avian3d::prelude::SpatialQuery,
+    passthrough: Res<PortalPassthrough>,
     mut commands: Commands,
 ) {
     for (e, tf, last) in &mut q {
@@ -278,6 +309,13 @@ fn report_world_hits(
         );
         if let Some(hit) = hit {
             let position = prev + *dir * hit.distance;
+            // Portal pass-through: an impact inside an active portal disc is NOT a world hit —
+            // the projectile flies through the surface and the game's portal teleport warps it
+            // when its segment crosses the disc plane. Slack 0.25: covers the disc's own
+            // surface inset + a tick of penetration.
+            if passthrough.covers(position, 0.25) {
+                continue;
+            }
             commands.trigger(obelisk_bevy::events::HitboxWorldHit {
                 hitbox: e,
                 position,

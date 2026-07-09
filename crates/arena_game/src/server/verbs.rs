@@ -47,12 +47,12 @@ const SPIRE_RISE_SECS: f32 = 0.15;
 /// Spire lifetime (wisp `FROST_SPIKE_LIFETIME`).
 const SPIRE_LIFETIME: f32 = 180.0;
 
-// --- Portal tuning (ported from wisp's portal.rs) ---
+// --- Portal tuning: lives in `crate::portals_shared` (shared with the client's predicted
+// teleport + render cameras) ---
 
-/// Portal disc radius — the SHARED tuning const (client mesh + server crossing test agree).
-pub(crate) use crate::net::PORTAL_RADIUS;
-/// Placement offset off the hit surface (wisp `SURFACE_INSET`, widened for our thicker discs).
-const PORTAL_SURFACE_INSET: f32 = 0.06;
+use crate::portals_shared::{
+    disc_rotation, AIR_PORTAL_DISTANCE, PORTAL_RAYCAST_RANGE, SURFACE_INSET,
+};
 
 /// A rising frost spire: kinematic until `settle_at`, then Static terrain (wisp's
 /// `settle_frost_spike`). While rising its collider physically shoves dynamic bodies.
@@ -79,6 +79,7 @@ pub(crate) fn skill_verbs_on_cue(
     client_map: Res<ClientPlayerMap>,
     spatial: avian3d::prelude::SpatialQuery,
     children: Query<&Children>,
+    actions: Query<&lightyear::prelude::input::native::ActionState<crate::net::input::ArenaInput>>,
     mut commands: Commands,
 ) {
     let ev = cue.event();
@@ -98,52 +99,59 @@ pub(crate) fn skill_verbs_on_cue(
     });
 
     match (ev.skill_id.as_str(), ev.cue_id.as_str()) {
-        // --- Portals: place/replace the slot's disc at the cast point, oriented to the surface.
+        // --- Portals: wisp's placement — raycast from the caster's eye along its CURRENT aim
+        // and stick the disc to the hit surface (any wall/floor/ceiling), or float it in the
+        // air at a fixed distance facing back at the caster on a miss. The cue's own position
+        // is ignored (acquisition is plain `Aim`); the ray excludes the caster, its child
+        // hurtbox, and every skill object (never stick a portal to a portal/spire).
         ("portal_orange", "on_window_portal_mark") | ("portal_blue", "on_window_portal_mark") => {
             let kind = if ev.skill_id == "portal_orange" {
                 KIND_PORTAL_ORANGE
             } else {
                 KIND_PORTAL_BLUE
             };
-            // Recover the surface normal: cast a short ray from the caster's eye toward the
-            // mark (the acquisition already proved line-of-sight to the point). Exclude the
-            // caster AND its child hurtbox (same as `grounded_by_ray`) — the SelfPoint-fallback
-            // mark sits at the caster's feet and an unfiltered eye→feet ray hits its own
-            // hurtbox. A miss faces the disc up.
-            let normal = positions
+            let Ok(caster_pos) = positions.get(ev.source) else {
+                return;
+            };
+            let eye = caster_pos.0 + Vec3::Y * arena_sim::tuning::ARENA_EYE_HEIGHT;
+            let fwd = actions
                 .get(ev.source)
-                .ok()
-                .and_then(|caster| {
-                    let eye = caster.0 + Vec3::Y * arena_sim::tuning::ARENA_EYE_HEIGHT;
-                    let to = ev.position - eye;
-                    let dir = Dir3::new(to).ok()?;
-                    let mut exclude = vec![ev.source];
-                    if let Ok(kids) = children.get(ev.source) {
-                        exclude.extend(kids.iter());
-                    }
-                    spatial
-                        .cast_ray(
-                            eye,
-                            dir,
-                            to.length() + 0.5,
-                            true,
-                            &avian3d::prelude::SpatialQueryFilter::default()
-                                .with_excluded_entities(exclude),
-                        )
-                        .map(|hit| hit.normal)
-                })
-                .filter(|n| n.length_squared() > 0.5)
-                .unwrap_or(Vec3::Y);
-            let position = ev.position + normal * PORTAL_SURFACE_INSET;
-            // Disc local +Y = surface normal (wisp's disc_rotation).
-            let rotation = Quat::from_rotation_arc(Vec3::Y, normal);
+                .map(|a| crate::net::aim_dir(a.0.yaw, a.0.pitch))
+                .unwrap_or(Vec3::NEG_Z);
+            let mut exclude = vec![ev.source];
+            if let Ok(kids) = children.get(ev.source) {
+                exclude.extend(kids.iter());
+            }
+            exclude.extend(objects.iter().map(|(e, _)| e));
+            let hit = Dir3::new(fwd).ok().and_then(|dir| {
+                spatial.cast_ray(
+                    eye,
+                    dir,
+                    PORTAL_RAYCAST_RANGE,
+                    true,
+                    &avian3d::prelude::SpatialQueryFilter::default()
+                        .with_excluded_entities(exclude),
+                )
+            });
+            let (position, normal) = match hit {
+                Some(hit) => (
+                    eye + fwd * hit.distance + hit.normal * SURFACE_INSET,
+                    hit.normal,
+                ),
+                None => (eye + fwd * AIR_PORTAL_DISTANCE, -fwd),
+            };
+            // Disc local +Y = surface normal, local −Z held toward world-up (wisp's
+            // disc_rotation — an arbitrary-roll arc rotation would roll the through-view).
+            let rotation = disc_rotation(normal);
             spawn_skill_object(
                 &mut commands, &objects, now, kind, owner_id, position, rotation, None, None,
             );
             trace::event(
                 "portal_placed",
                 json!({ "slot": kind, "owner": owner_id,
-                        "pos": [position.x, position.y, position.z] }),
+                        "pos": [position.x, position.y, position.z],
+                        "normal": [normal.x, normal.y, normal.z],
+                        "surface": hit.is_some() }),
             );
         }
 

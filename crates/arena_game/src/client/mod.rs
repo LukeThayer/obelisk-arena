@@ -22,6 +22,7 @@ pub mod cosmetics;
 pub mod customization;
 mod harness;
 pub mod level;
+pub mod portals;
 pub mod radial;
 pub mod skill_objects;
 pub mod weapon_select;

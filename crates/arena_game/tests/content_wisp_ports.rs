@@ -62,7 +62,9 @@ fn spire_and_portals_keep_the_verb_cue_slots() {
 
     for id in ["portal_orange", "portal_blue"] {
         let p = timeline(id);
-        assert!(matches!(p.acquisition, Acquisition::GroundPoint { .. }));
+        // Plain Aim: the server VERB does the wisp placement raycast itself (surface stick or
+        // air float) — no acquisition point involved.
+        assert!(matches!(p.acquisition, Acquisition::Aim));
         assert!(p.vfx_cues.contains_key("on_window_portal_mark"));
         let w = &p.collision_windows[0];
         assert!(!w.strikes, "the mark is pure cue emission — no hits, no damage");

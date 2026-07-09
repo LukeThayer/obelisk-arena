@@ -12,6 +12,7 @@ use std::path::PathBuf;
 pub mod cast_assets;
 pub mod client;
 pub mod net;
+pub mod portals_shared;
 pub mod server;
 pub mod shared_controller;
 pub mod skills;

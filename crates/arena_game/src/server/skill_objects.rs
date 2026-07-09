@@ -29,8 +29,7 @@ pub(crate) struct SkillObject {
 }
 
 /// Kind ids (the cross-layer contract: server behavior, client visuals, trace fields).
-pub(crate) const KIND_PORTAL_ORANGE: &str = "portal_orange";
-pub(crate) const KIND_PORTAL_BLUE: &str = "portal_blue";
+pub(crate) use crate::portals_shared::{KIND_PORTAL_BLUE, KIND_PORTAL_ORANGE};
 pub(crate) const KIND_FROST_TILE: &str = "frost_tile";
 pub(crate) const KIND_FROST_SPIRE: &str = "frost_spire";
 

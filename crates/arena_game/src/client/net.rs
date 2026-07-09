@@ -163,6 +163,20 @@ impl Plugin for ClientNetPlayerPlugin {
                 FixedUpdate,
                 (client_apply_yaw, client_apply_movement, local_cast_edge).chain(),
             )
+            // Portal traversal, predicted half (client/portals.rs): floor pass-through BEFORE
+            // the physics step, the predicted teleport AFTER it — mirrors the server's own
+            // ordering so both peers compute identical crossings. Rollback-guarded inside.
+            .init_resource::<super::portals::PredictedPortalTravelers>()
+            .add_systems(
+                FixedUpdate,
+                super::portals::predicted_floor_passthrough
+                    .before(avian3d::prelude::PhysicsSystems::Prepare),
+            )
+            .add_systems(
+                FixedUpdate,
+                super::portals::predicted_portal_teleport
+                    .after(avian3d::prelude::PhysicsSystems::StepSimulation),
+            )
             .add_systems(
                 Update,
                 (
@@ -300,6 +314,12 @@ fn materialize_predicted_players(
             // hurtbox: the client never resolves combat (Stage A) — that stays server-authoritative.
             RigidBody::Dynamic,
             Collider::capsule(PLAYER_CAPSULE_RADIUS, PLAYER_CAPSULE_LENGTH),
+            // Same layers as the server body (arena_sim::make_arena_combatant) — the portal
+            // floor pass-through toggles the Ground bit on BOTH peers and must agree.
+            avian3d::prelude::CollisionLayers::new(
+                arena_sim::GameLayer::Player,
+                avian3d::prelude::LayerMask::ALL,
+            ),
             LockedAxes::default()
                 .lock_rotation_x()
                 .lock_rotation_y()

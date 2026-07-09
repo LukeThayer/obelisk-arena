@@ -198,6 +198,12 @@ pub fn run_windowed_client() {
         app.add_systems(Update, autocast);
     }
 
+    // AUTOEQUIP harness (ARENA_AUTOEQUIP=<weapon_id>): the headless equip hook, available
+    // windowed too so visual probes can script a non-starter weapon (e.g. the portal pair).
+    if std::env::var("ARENA_AUTOEQUIP").is_ok() {
+        app.add_systems(Update, super::app_headless::autoequip_weapon);
+    }
+
     // Net-driven player layer: attach the predicted local body + interpolated remote bodies, buffer
     // native input, predict movement (the shared force controller, re-run during rollback). The
     // windowed controller's CameraYaw/AimPitch + WASD feed `LocalInput` → `buffer_arena_input`.
@@ -240,6 +246,16 @@ pub fn run_windowed_client() {
         )
             .chain(),
     );
+
+    // AUTOMOVE harness (ARENA_AUTOMOVE=1): the headless constant-forward hook, available
+    // windowed too for visual probes. AFTER the bridge so its movement deterministically wins
+    // over the (idle) keyboard state; it writes the same yaw/pitch the bridge does.
+    if std::env::var("ARENA_AUTOMOVE").ok().as_deref() == Some("1") {
+        app.add_systems(
+            Update,
+            super::app_headless::automove_input.after(bridge_windowed_input_to_local_input),
+        );
+    }
 
     app.run();
 }
