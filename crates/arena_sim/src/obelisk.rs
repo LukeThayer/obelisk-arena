@@ -59,6 +59,10 @@ pub fn add_obelisk_sim(app: &mut App, resolve_hits: bool) {
         // ObeliskCombatPlugin is server-only — Stage-A: the client NEVER runs the resolve funnel /
         // RNG. Inserted between Core and Net to match `ObeliskSimPlugin::build`'s ordering.
         app.add_plugins(combat::ObeliskCombatPlugin);
+        // Surfaces (ground effects) BEHAVIOR is server-only like combat (Stage A): paint /
+        // standing / contact / decay run beside the resolve funnel. Clients only load the
+        // registry (add_obelisk_surfaces — data, [visuals]) and render replicated mirrors.
+        app.add_plugins(obelisk_bevy::surfaces::ObeliskSurfacesPlugin);
     }
     app.add_plugins(net::ObeliskNetPlugin)
         .add_plugins(vfx::ObeliskCuePlugin)

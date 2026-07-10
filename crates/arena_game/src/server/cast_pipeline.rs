@@ -323,6 +323,9 @@ mod tests {
         let acq = Acquisition::GroundPoint {
             range: 20.0,
             fallback: AcqFallback::Fizzle,
+            // obelisk cd860e2 added an optional surface gate; None = the pre-surfaces behavior
+            // this test pins (any in-range ground point accepted).
+            on_surface: None,
         };
         let p = Vec3::new(1.0, 0.0, 2.0);
         let aim = resolve_cast_aim(&acq, Dir3::NEG_Z, |_r| None, |_r| Some(p));

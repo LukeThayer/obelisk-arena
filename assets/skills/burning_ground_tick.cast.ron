@@ -1,0 +1,12 @@
+// The burning surface's standing tick (spec §4): a triggered-only instant blast at the victim's
+// position — the firebolt_explosion pattern. SelfPoint + CastPoint = "detonate at the payload
+// position" (the sim passes the victim's position as the execution payload).
+( skill_id: "burning_ground_tick",
+  phase_durations: ( windup: 0.0, active: 0.05, recovery: 0.0 ),
+  collision_windows: [
+    ( id: "tick", spawn: Scheduled( phase: Active, offset: 0.0 ), anchor: CastPoint,
+      active_duration: 0.05, shape: Sphere( radius: 0.6 ), motion: Static,
+      hit_filter: Enemies, hit_mode: OncePerTarget ),
+  ],
+  acquisition: SelfPoint,
+)

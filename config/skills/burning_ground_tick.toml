@@ -1,0 +1,11 @@
+id = "burning_ground_tick"
+name = "Burning Ground"
+tags = ["spell", "fire"]
+targeting = "single_enemy"
+delivery = "projectile"
+mana_cost = 0.0
+
+# TRIGGERED-ONLY (never on a weapon): the burning surface's standing tick — executed AT each
+# victim standing in the scorch (obelisk apply_standing_payloads), attributed to the painter.
+[damage]
+base_damages = [{ type = "fire", min = 4.0, max = 6.0 }]

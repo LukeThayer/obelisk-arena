@@ -66,6 +66,10 @@ pub fn run_headless_client() {
     app.add_obelisk_config_constants_default();
     app.add_obelisk_effects(&root.join("config/effects"));
     app.add_obelisk_skills(SkillSource::Dir(root.join("config/skills")));
+    // Surface types (config/surfaces) — AFTER add_obelisk_skills so the loader validates tick_skill
+    // refs against the SkillRegistry. The client only LOADS the registry (for [visuals] / render
+    // mirrors); surface BEHAVIOR is server-only (ObeliskSurfacesPlugin is omitted from the client sim).
+    app.add_obelisk_surfaces(&root.join("config/surfaces"));
     // Client-side RNG is seeded but NEVER drawn (Stage A) — same as the windowed client.
     app.seed_combat_rng(1);
 

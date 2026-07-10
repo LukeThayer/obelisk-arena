@@ -1,0 +1,9 @@
+id = "frost"
+lifetime = 180.0
+merge_radius = 0.25
+max_patches = 64
+patch_radius = 0.45
+
+[visuals]
+decal = "textures/decal_splat.png"
+color = [0.55, 0.85, 1.0, 0.85]

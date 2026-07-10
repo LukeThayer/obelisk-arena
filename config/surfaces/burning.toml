@@ -1,0 +1,15 @@
+id = "burning"
+lifetime = 8.0
+merge_radius = 0.3
+max_patches = 32
+patch_radius = 1.2
+
+[standing]
+filter = "enemies"
+tick_skill = "burning_ground_tick"
+rehit_interval = 0.5
+
+[visuals]
+decal = "textures/decal_splat.png"
+color = [1.0, 0.45, 0.1, 0.85]
+vfx = "Embers"

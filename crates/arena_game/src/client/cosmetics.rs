@@ -722,6 +722,9 @@ mod cue_binding_resolution_tests {
             hit_mode: HitMode::FirstOnly,
             rehit_interval: None,
             emitter: None,
+            // obelisk cd860e2 added window surface-painting; this cosmetic-preview test window
+            // paints nothing (painting is server-authoritative, never client cosmetics).
+            paints: None,
         };
         let mut tl = minimal_timeline(HashMap::new());
         tl.collision_windows.push(window);

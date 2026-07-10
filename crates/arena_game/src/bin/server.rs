@@ -47,6 +47,10 @@ fn main() {
     app.add_obelisk_config_constants_default();
     app.add_obelisk_effects(&root.join("config/effects"));
     app.add_obelisk_skills(SkillSource::Dir(root.join("config/skills")));
+    // Surface types (config/surfaces) — AFTER add_obelisk_skills so the loader validates each
+    // surface's tick_skill/trigger_skill refs against the SkillRegistry. The server also RUNS the
+    // surface behavior (ObeliskSurfacesPlugin, added inside add_obelisk_sim_headless).
+    app.add_obelisk_surfaces(&root.join("config/surfaces"));
     app.seed_combat_rng(arena_game::net::session_seed());
 
     // 4. Egress bridge: convert obelisk CueEvents → CueWireMessage + broadcast the authoritative
