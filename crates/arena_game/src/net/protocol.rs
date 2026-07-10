@@ -64,6 +64,11 @@ impl Plugin for ProtocolPlugin {
         // visuals from `kind` (see client/skill_objects.rs).
         app.register_component::<NetworkedSkillObject>();
 
+        // --- Surface patches (replicated ground effects — spec §7). Discrete + static:
+        // plain registration, no prediction (server-authoritative; visuals ≤ ~50ms late is
+        // fine for ground state, and the client never simulates surfaces — Stage A).
+        app.register_component::<NetworkedSurfacePatch>();
+
         // --- Equipped weapon (replicated per-player). Carries the obelisk item id + the skill
         // list it grants, in slot order: the input stream's `skill_slot` indexes THIS list on
         // both peers (the client's wheel/selection maps into it; the server's cast pipeline
@@ -235,6 +240,17 @@ pub struct EquippedWeapon {
 pub struct NetworkedSkillObject {
     pub kind: String,
     pub owner: u64,
+}
+
+/// A replicated surface PATCH (obelisk ground effects, spec §7): one painted splat. `surface`
+/// keys the client visual recipe (SurfaceRegistry `[visuals]`); `owner` = painting client id
+/// (0 = none); `radius` sizes the decal. Pose rides the replicated avian `Position` (static —
+/// set once at attach). The sim entity IS the replicated entity (the skill-object pattern).
+#[derive(Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NetworkedSurfacePatch {
+    pub surface: String,
+    pub owner: u64,
+    pub radius: f32,
 }
 
 // ---------------------------------------------------------------------------------------------

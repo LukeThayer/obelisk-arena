@@ -26,6 +26,7 @@ pub mod level;
 pub mod portals;
 pub mod radial;
 pub mod skill_objects;
+pub(crate) mod surfaces;
 pub mod weapon_select;
 pub mod hud;
 pub mod net;

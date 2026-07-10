@@ -248,6 +248,9 @@ pub fn run_windowed_client() {
     // Predicted own-cast: play the local on_cast + cosmetic projectile INSTANTLY on cast,
     // with NO ResolveHits / Hitbox / CombatRng (Stage-A invariant). Damage arrives from the server.
     crate::skills::register_predicted_sim(&mut app);
+    // Surfaces (spec §7): trace every replicated patch as it materializes (headless-safe — the
+    // same signal both client roots register; Task 3 adds the windowed visuals alongside).
+    app.add_systems(Update, crate::client::surfaces::trace_replicated_patches);
     // HUD: hp bars driven by replicated NetworkedHealth, floating damage + hit flash
     // from DamageResolved, and the round/score banner from RoundStateMessage. Windowed-only.
     app.add_plugins(hud::ArenaHudPlugin);

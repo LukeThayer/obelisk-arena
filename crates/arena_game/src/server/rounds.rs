@@ -27,6 +27,7 @@ use bevy::prelude::*;
 use lightyear::prelude::server::ClientOf;
 use lightyear::prelude::{Connected, MessageSender, RemoteId};
 use obelisk_bevy::prelude::*;
+use obelisk_bevy::surfaces::SurfacePatch;
 use serde_json::json;
 
 use crate::net::protocol::{
@@ -336,6 +337,7 @@ pub(crate) fn run_round_machine(
     client_map: Res<ClientPlayerMap>,
     spawns: Res<LevelSpawns>,
     mut pending: ResMut<PendingLevelSwitch>,
+    surface_patches: Query<Entity, With<SurfacePatch>>,
 ) {
     let dt = time.delta_secs();
     let player_count = players.iter().count();
@@ -395,6 +397,11 @@ pub(crate) fn run_round_machine(
             // On the rising edge into Active, reset + respawn both players for the new round.
             if round.needs_round_reset {
                 round.needs_round_reset = false;
+                // Spec D9: a new round starts on clean ground — despawn every surface patch
+                // (replication mirrors the despawn to clients; frost fuel + scorches all reset).
+                for patch in &surface_patches {
+                    commands.entity(patch).despawn();
+                }
                 reset_for_new_round(&mut players, &mut commands, &client_map, &spawns);
                 trace::event("round_reset", json!({ "players": player_count }));
             }

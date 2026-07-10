@@ -32,6 +32,7 @@ mod portals;
 mod rounds;
 mod skill_objects;
 mod spawn;
+pub(crate) mod surfaces;
 mod verbs;
 
 use cast_pipeline::detect_cast_edges;
@@ -90,6 +91,10 @@ impl Plugin for ArenaServerPlugin {
                     skill_objects::reap_skill_objects,
                     verbs::drop_glacier_trail,
                     verbs::settle_spires,
+                    // Surfaces (ground effects — spec §7): attach replication to freshly-painted
+                    // patches (the skill-object pattern — the sim entity IS the replicated entity;
+                    // lightyear despawn-replication mirrors every removal path to clients).
+                    surfaces::attach_patch_replication,
                 ),
             )
             // Portal traversal (server half of the shared pipeline): BEFORE the physics step,
@@ -112,6 +117,9 @@ impl Plugin for ArenaServerPlugin {
             // The verb observer: obelisk CueEvents -> arena game verbs (portal placement, spire
             // eruption). See server/verbs.rs's table.
             .add_observer(verbs::skill_verbs_on_cue)
+            // Surfaces (spec §7): trace the paint/remove stream for the net-test harness.
+            .add_observer(surfaces::trace_surface_painted)
+            .add_observer(surfaces::trace_surface_removed)
             .add_systems(
                 Update,
                 (

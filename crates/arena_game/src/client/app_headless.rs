@@ -111,6 +111,9 @@ pub fn run_headless_client() {
             trace_replicated_players,
             trace_replicated_health,
             trace_replicated_round_state,
+            // Surfaces (spec §7): trace every replicated patch as it materializes — the net-test
+            // asserts replication reached every observer (headless included).
+            crate::client::surfaces::trace_replicated_patches,
         ),
     );
 
