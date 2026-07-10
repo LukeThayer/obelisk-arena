@@ -140,6 +140,23 @@ def main() -> int:
                 f"{name} received no DamageResolved(caster={caster_id}, "
                 f"target={target_id}, skill=firebolt_explosion)")
 
+    # --- (7) surfaces: the explosion scorches the ground — the server paints a `burning` patch
+    #         (firebolt_explosion's blast window paints OnEnd; spec §4/§7). ---
+    server_painted = [e for e in server
+                      if e.get("kind") == "surface_painted"
+                      and e.get("surface") == "burning"]
+    if not server_painted:
+        failures.append(
+            "server painted no burning surface (firebolt_explosion paints OnEnd)")
+
+    # --- (8) ...and the burning patch REPLICATED to BOTH observers (wire v6) ---
+    for name, evs in (("observer-0", obs0), ("observer-1", obs1)):
+        got_patch = [e for e in evs
+                     if e.get("kind") == "replicated_surface_patch"
+                     and e.get("surface") == "burning"]
+        if not got_patch:
+            failures.append(f"{name} received no replicated burning surface patch")
+
     # --- verdict ---
     print()
     print("M2 gate assertions:")
@@ -149,6 +166,7 @@ def main() -> int:
     print(f"  server DamageResolved caster->target:       {len(server_dmgs)} event(s)")
     print(f"  server authoritative damage value:          {server_dmg_value}")
     print(f"  server DamageResolved firebolt_explosion (trigger):  {len(server_expl)} event(s)")
+    print(f"  server surface_painted burning (OnEnd):     {len(server_painted)} event(s)")
     for name, evs in (("observer-0", obs0), ("observer-1", obs1)):
         n_cast = sum(1 for e in evs if e.get("kind") == "client_net_cast_began"
                      and e.get("caster") == caster_id)

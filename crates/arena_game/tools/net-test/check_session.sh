@@ -27,6 +27,10 @@ dmg=$(jq -rs --arg c "$caster" --arg t "$target" '[.[] | select(.kind=="server_n
 n=$(jq -s --arg c "$caster" --arg t "$target" '[.[] | select(.kind=="server_net_damage_resolved" and .skill_id=="firebolt_explosion" and .caster==$c and .target==$t)] | length' "$server")
 [[ "$n" -ge 1 ]] || note "server emitted no DamageResolved(firebolt_explosion)"
 
+# (7) surfaces: the explosion scorches the ground (server paints burning)...
+n=$(jq -s '[.[] | select(.kind=="surface_painted" and .surface=="burning")] | length' "$server")
+[[ "$n" -ge 1 ]] || note "server painted no burning surface (firebolt_explosion paints OnEnd)"
+
 # (3)+(4)+(6) per observer: echoed cast + damage (matching value) + explosion
 for name in observer-0 observer-1; do
     f="$session/$name.jsonl"
@@ -39,6 +43,10 @@ for name in observer-0 observer-1; do
     fi
     n=$(jq -s --arg c "$caster" --arg t "$target" '[.[] | select(.kind=="client_net_damage_resolved" and .skill_id=="firebolt_explosion" and .caster==$c and .target==$t)] | length' "$f")
     [[ "$n" -ge 1 ]] || note "$name received no DamageResolved(firebolt_explosion)"
+
+    # (8) ...and the patch replicated to this observer.
+    n=$(jq -s '[.[] | select(.kind=="replicated_surface_patch" and .surface=="burning")] | length' "$f")
+    [[ "$n" -ge 1 ]] || note "$name received no replicated burning surface patch"
 done
 
 echo "caster=$caster target=$target server_damage=$dmg"
