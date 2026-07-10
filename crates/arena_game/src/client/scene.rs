@@ -28,6 +28,11 @@ pub(super) fn setup_scene(mut commands: Commands) {
         // component in Bevy 0.18 (not a `Camera` field), matching how the editor enables it.
         bevy::render::view::Hdr,
         FollowCamera,
+        // ForwardDecal (surface patches, `client/surfaces.rs`) samples the depth prepass to
+        // project onto whatever geometry sits under the decal volume. Main camera ONLY — the
+        // portal render cameras (`client/skill_objects.rs`) don't get it, so patches don't show
+        // through portals (accepted v1; noted in spec §6).
+        bevy::core_pipeline::prepass::DepthPrepass,
         // The main camera renders LAYER 0 ONLY (implicit default) — the local player's own
         // body lives on `present::SELF_BODY_LAYER`, visible only to the portal cameras.
         Transform::from_xyz(0.0, 2.0, 4.0).looking_at(Vec3::new(0.0, 1.5, 0.0), Vec3::Y),

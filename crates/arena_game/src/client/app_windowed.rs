@@ -134,6 +134,10 @@ pub fn run_windowed_client() {
     app.add_plugins(radial::RadialWheelPlugin);
     // Replicated skill-object visuals (wisp weapon ports: portals, frost tiles, spires).
     app.add_plugins(skill_objects::SkillObjectVisualsPlugin);
+    // Replicated surface-patch visuals (spec §6/D10: tinted ForwardDecal + optional looping vfx
+    // per NetworkedSurfacePatch). Windowed-only — decals need PbrPlugin's render infra + the
+    // camera DepthPrepass (added in scene.rs); the headless observer never renders.
+    app.add_plugins(crate::client::surfaces::SurfaceVisualsPlugin);
     app.add_systems(
         Update,
         (

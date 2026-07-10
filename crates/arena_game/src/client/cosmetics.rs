@@ -289,6 +289,29 @@ pub(crate) fn apply_modulated_param(system: &mut VfxSystem, param: &str, value: 
     }
 }
 
+/// The `bevy_vfx` [`VfxLibrary`] spawn TIER, resolved to a ready-to-insert component: clone the
+/// preset named `name`, bake each `ParamSource::Charge` param into it ([`apply_modulated_param`]),
+/// and return the [`VfxSystem`] — or `None` when the library has no such preset (the caller warns /
+/// no-ops). The single point that turns a library name into a live effect component, shared by cue
+/// cosmetics ([`spawn_cue_effect`] — which wraps it in a two-phase [`ParticleLifetime`] drain) and
+/// the surface visuals (`client/surfaces.rs` — which parents it under the patch with NO lifetime,
+/// so it loops for the patch's life and dies with the parent). Surfaces author no `CueParam`s, so
+/// they pass `&[]`/`0.0`.
+pub(crate) fn resolve_vfx_effect(
+    vfx: &VfxLibrary,
+    name: &str,
+    params: &[CueParam],
+    charge: f32,
+) -> Option<VfxSystem> {
+    let mut system = vfx.effects.get(name).cloned()?;
+    for p in params {
+        match p.source {
+            ParamSource::Charge => apply_modulated_param(&mut system, &p.param, charge),
+        }
+    }
+    Some(system)
+}
+
 /// Spawn one cue cosmetic at `translation` (always a world-space root, mirroring the editor's
 /// `CueAttach::World` handling — see its own doc comment: `CueBinding`'s v2 schema carries no
 /// per-binding socket to parent a `Follow` attachment to either, so the caller re-homes a `Follow`
@@ -330,12 +353,7 @@ fn spawn_cue_effect(
                 ..default()
             },
         ));
-    } else if let Some(mut system) = vfx.and_then(|lib| lib.effects.get(name)).cloned() {
-        for p in params {
-            match p.source {
-                ParamSource::Charge => apply_modulated_param(&mut system, &p.param, charge),
-            }
-        }
+    } else if let Some(system) = vfx.and_then(|lib| resolve_vfx_effect(lib, name, params, charge)) {
         base.insert(system);
     } else if (effects.is_some() || vfx.is_some()) && warned.insert(name.to_string()) {
         warn!(
