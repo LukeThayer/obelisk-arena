@@ -44,7 +44,7 @@ stat_core = { git = "ssh://git@github.com/vothuul/obelisk.git", rev = "bf9f026" 
 # above applies identically — a mismatched source id would duplicate Item/StatBlock types).
 loot_core = { git = "ssh://git@github.com/vothuul/obelisk.git", rev = "bf9f026" }
 # bevy_vfx (the editor's GPU particle engine) — the live-game particle upgrade: replaces the M1
-# emissive-billboard stand-in so authored `.skillfx.ron` effects render in-game as they do in the
+# emissive-billboard stand-in so authored skill VFX cues (`.cast.ron` `cues` → `.vfx.ron` presets) render in-game as they do in the
 # skill-designer preview. Windowed-client-only at runtime (VfxPlugin is added only in the windowed
 # build); the headless server/observer compile it but never add the plugin. Same crate the editor +
 # arena_editor use (Bevy 0.18).

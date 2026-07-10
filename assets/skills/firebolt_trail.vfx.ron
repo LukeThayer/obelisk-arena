@@ -1,5 +1,5 @@
 // The firebolt's in-flight VFX: a `bevy_vfx` preset attached to the flying cosmetic projectile
-// (see firebolt.skillfx.ron `projectile.effect`). The "Bolt Core" rides the bolt (Local sim
+// (referenced from firebolt.cast.ron `cues.on_window_bolt`, attach: Follow). The "Bolt Core" rides the bolt (Local sim
 // space); "Flame Trail" + "Sparks" simulate in World space, so they linger along the ballistic
 // arc as the bolt flies — the trail IS the visible arc.
 //
