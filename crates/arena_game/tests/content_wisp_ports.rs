@@ -35,11 +35,15 @@ fn glacier_timelines_parse_and_chain_hugs_the_ground() {
     assert!(matches!(w.anchor, WindowAnchor::CastPoint));
     assert!(matches!(w.motion, VolumeMotion::Linear { .. }));
     assert!(matches!(w.motion_direction, MotionDirection::Horizontal));
-    assert!(
-        w.emitter.is_none(),
-        "the tile trail is the ARENA poller (drop_glacier_trail), not an emitter — Template \
-         windows would share the skill's lifecycle triggers and re-fire the burst per tile"
-    );
+    // The tile trail is now the authored surfaces painter (spec §8) — the old ARENA poller
+    // (drop_glacier_trail) is deleted; painting is a window PROPERTY, so it composes without
+    // the Template-lifecycle trap that forced the poller.
+    let paints = w.paints.as_ref().expect("roll paints the frost trail");
+    assert_eq!(paints.surface, "frost");
+    assert!(matches!(
+        paints.mode,
+        obelisk_bevy::assets::PaintMode::Trail { step } if step == 0.8
+    ));
 
     let burst = timeline("glacier_burst");
     assert!(matches!(
@@ -58,6 +62,12 @@ fn spire_and_portals_keep_the_verb_cue_slots() {
     // (skill_id, cue slot) pairs; renaming a window renames its slot and silently kills the verb.
     let spire = timeline("frost_spire");
     assert!(matches!(spire.acquisition, Acquisition::GroundPoint { .. }));
+    let Acquisition::GroundPoint { on_surface, .. } = &spire.acquisition else {
+        unreachable!()
+    };
+    let req = on_surface.as_ref().expect("spire gates on frost (spec §5.1)");
+    assert_eq!(req.surface, "frost");
+    assert!(req.snap && req.consume, "snap to the patch center; consume the fuel at accept");
     assert!(spire.vfx_cues.contains_key("on_window_spike"));
 
     for id in ["portal_orange", "portal_blue"] {

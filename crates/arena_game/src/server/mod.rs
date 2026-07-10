@@ -86,10 +86,10 @@ impl Plugin for ArenaServerPlugin {
                 (
                     crate::cast_assets::poll_cast_timelines,
                     trace_server_net_events,
-                    // Skill-object housekeeping (wisp weapon ports): lifetime reaping, glacier
-                    // trail drops (polled off the live roll hitbox), spire rise settling.
+                    // Skill-object housekeeping (wisp weapon ports): lifetime reaping + spire
+                    // rise settling. (The glacier trail is painted by the surfaces core now —
+                    // the old drop_glacier_trail poller is gone.)
                     skill_objects::reap_skill_objects,
-                    verbs::drop_glacier_trail,
                     verbs::settle_spires,
                     // Surfaces (ground effects — spec §7): attach replication to freshly-painted
                     // patches (the skill-object pattern — the sim entity IS the replicated entity;

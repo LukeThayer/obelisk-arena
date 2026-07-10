@@ -103,15 +103,6 @@ fn portal_texture_size(window: &Window) -> (u32, u32) {
 /// The per-kind visual recipe for NON-portal kinds (portals take the material+camera path).
 fn recipe(kind: &str) -> Option<(Mesh, StandardMaterial)> {
     match kind {
-        "frost_tile" => Some((
-            Cylinder::new(0.45, 0.06).into(),
-            StandardMaterial {
-                base_color: Color::srgba(0.55, 0.85, 1.0, 0.55),
-                emissive: LinearRgba::rgb(0.1, 0.35, 0.6),
-                alpha_mode: AlphaMode::Blend,
-                ..Default::default()
-            },
-        )),
         "frost_spire" => Some((
             Cuboid::new(0.55, 1.6, 0.55).into(),
             StandardMaterial {

@@ -1,10 +1,11 @@
-// Frost Spire (potted-spring port): erupt a spire out of a frost tile the glacier dropped.
-// GroundPoint aims the tile; the ARENA validator (cast_pipeline::validate_arena_aim) rejects
-// any point not on a tile and snaps hits to the tile's center — Fizzle here is the paid
-// rejection for the rare point that outranges obelisk's own check. The damage window is a
-// capsule the size of the rising spire (anchor_offset lifts its center to half-height); the
-// PHYSICAL spire is a server skill object spawned on the "on_window_spike" cue
-// (server/verbs.rs), which also consumes the aimed tile.
+// Frost Spire (potted-spring port): erupt a spire out of a frost patch the glacier painted.
+// GroundPoint's on_surface gate (obelisk surfaces core) requires the aimed point to land on a
+// frost patch, SNAPS the cast point to the patch center, and CONSUMES the patch at cast-accept —
+// all authored data now; cast_pipeline::validate_arena_aim no longer has a frost arm. Fizzle is
+// the paid rejection for a point off any frost patch. The damage window is a capsule the size of
+// the rising spire (anchor_offset lifts its center to half-height); the PHYSICAL spire is a
+// server skill object spawned on the "on_window_spike" cue (server/verbs.rs), which erupts at
+// the cue position (already the snapped patch center) and consumes nothing.
 (
   skill_id: "frost_spire",
   phase_durations: ( windup: 0.25, active: 0.1, recovery: 0.25 ),
@@ -14,7 +15,8 @@
       shape: Capsule( radius: 0.45, height: 1.6 ), motion: Static,
       hit_filter: Enemies, hit_mode: OncePerTarget ),
   ],
-  acquisition: GroundPoint( range: 60.0, fallback: Fizzle ),
+  acquisition: GroundPoint( range: 60.0, fallback: Fizzle,
+    on_surface: Some(( surface: "frost", snap: true, consume: true )) ),
   chargeable: true,
   max_hold: 1.5,
   // Charge-hold presentation: frost gathers on the casting hand while aiming the tile.

@@ -30,7 +30,6 @@ pub(crate) struct SkillObject {
 
 /// Kind ids (the cross-layer contract: server behavior, client visuals, trace fields).
 pub(crate) use crate::portals_shared::{KIND_PORTAL_BLUE, KIND_PORTAL_ORANGE};
-pub(crate) const KIND_FROST_TILE: &str = "frost_tile";
 pub(crate) const KIND_FROST_SPIRE: &str = "frost_spire";
 
 /// Per-kind instance cap (GLOBAL, wisp semantics: portals are shared world state, one per slot;
@@ -38,7 +37,6 @@ pub(crate) const KIND_FROST_SPIRE: &str = "frost_spire";
 fn max_instances(kind: &str) -> usize {
     match kind {
         KIND_PORTAL_ORANGE | KIND_PORTAL_BLUE => 1,
-        KIND_FROST_TILE => 64,
         KIND_FROST_SPIRE => 12,
         _ => 32,
     }

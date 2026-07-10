@@ -8,36 +8,27 @@
 //! | skill                    | moment                   | verb                                |
 //! |--------------------------|--------------------------|-------------------------------------|
 //! | `portal_orange`/`_blue`  | `on_window_portal_mark`  | place/replace that portal slot      |
-//! | `frost_spire`            | `on_window_spike`        | consume nearest frost tile → spire  |
-//! | `glacier_roll` (window)  | (polled, not cue)        | drop a frost tile every 0.8m        |
+//! | `frost_spire`            | `on_window_spike`        | erupt spire at the (pre-snapped) cue position |
 //!
 //! Everything spawned here is a [`super::skill_objects`] object (limits/lifetime/replication).
 
 use avian3d::prelude::{Collider, Position, RigidBody};
 use bevy::prelude::*;
 use obelisk_bevy::events::{CueEvent, CueKind};
-use obelisk_bevy::prelude::Hitbox;
 use serde_json::json;
 
 use crate::trace;
 
 use super::skill_objects::{
-    spawn_skill_object, SkillObject, KIND_FROST_SPIRE, KIND_FROST_TILE, KIND_PORTAL_BLUE,
-    KIND_PORTAL_ORANGE,
+    spawn_skill_object, SkillObject, KIND_FROST_SPIRE, KIND_PORTAL_BLUE, KIND_PORTAL_ORANGE,
 };
 use super::spawn::ClientPlayerMap;
 
-// --- Frost tuning (ported from wisp's ice.rs, adapted where noted) ---
+// --- Frost spire tuning (ported from wisp's ice.rs, adapted where noted). The frost-PATCH
+// numbers (patch radius, lifetime, trail step, spire match slack) live in
+// `config/surfaces/frost.toml` + obelisk's `SURFACE_MATCH_SLACK` now — the surfaces core owns
+// them. ---
 
-/// Frost tile radius (wisp `GLACIER_TRAIL_RADIUS`).
-pub(crate) const FROST_TILE_RADIUS: f32 = 0.45;
-/// Distance the glacier roll travels between tile drops (wisp `GLACIER_TRAIL_STEP`).
-const TRAIL_STEP: f32 = 0.8;
-/// Tile lifetime (wisp `FROZEN_GROUND_LIFETIME`).
-const FROST_TILE_LIFETIME: f32 = 180.0;
-/// How close (XZ) the frost_spire cast point must be to a tile to consume it — the tile radius
-/// plus wisp's `FROST_SPIRE_MATCH_SLACK`.
-pub(crate) const SPIRE_MATCH_RANGE: f32 = FROST_TILE_RADIUS + 0.3;
 /// Spire body (wisp `FROST_SPIKE_BASE_WIDTH`/`_HEIGHT`); v1 fixed scale (no tile-size scaling,
 /// no spire chaining — documented deferrals).
 const SPIRE_WIDTH: f32 = 0.55;
@@ -60,10 +51,6 @@ use crate::portals_shared::{
 pub(crate) struct SpireRise {
     pub settle_at: f32,
 }
-
-/// Per-roll-window trail bookkeeping: where the last tile dropped.
-#[derive(Default)]
-pub(crate) struct TrailMemory(pub std::collections::HashMap<Entity, Vec3>);
 
 /// THE verb observer: match `(skill_id, cue_id)` on every server-side obelisk `CueEvent` and run
 /// the arena action. Cues were designed as the presentation channel; they are equally the
@@ -155,31 +142,17 @@ pub(crate) fn skill_verbs_on_cue(
             );
         }
 
-        // --- Frost spire: consume the nearest tile at the cast point, erupt a spire there.
+        // --- Frost spire: erupt at the cue position. The position IS the consumed frost
+        // patch's center — obelisk's on_surface acquisition (snap: true, consume: true)
+        // gated the cast, snapped the cast point, and spent the fuel at cast-accept; this
+        // verb only spawns the PHYSICAL spire (a collider-bearing world object stays host
+        // territory — spec §8).
         ("frost_spire", "on_window_spike") => {
-            let mark = ev.position;
-            let nearest_tile = objects
-                .iter()
-                .filter(|(_, o)| o.kind == KIND_FROST_TILE)
-                .filter_map(|(e, _)| positions.get(e).ok().map(|p| (e, p.0)))
-                .map(|(e, p)| (e, p, Vec2::new(p.x - mark.x, p.z - mark.z).length()))
-                .filter(|(_, _, d)| *d <= SPIRE_MATCH_RANGE)
-                .min_by(|a, b| a.2.total_cmp(&b.2));
-            let Some((tile, tile_pos, _)) = nearest_tile else {
-                // The aim validator makes this near-impossible (a tile expired in the windup
-                // window) — the obelisk damage window still fired; no spire grows.
-                trace::event("spire_fizzled_no_tile", json!({ "owner": owner_id }));
-                return;
-            };
-            // Consume the fuel (wisp: tile despawns).
-            if let Ok(mut ec) = commands.get_entity(tile) {
-                ec.despawn();
-            }
-            // Erupt: kinematic riser buried one height below the tile, rising at height/0.15
-            // (wisp's exact emergence); `settle_spires` freezes it into Static terrain — which
-            // our raycast grounding and wall-aware projectiles then treat as real level
-            // geometry (bolts burst on spires for free).
-            let rest = tile_pos + Vec3::Y * (SPIRE_HEIGHT * 0.5 - 0.08);
+            // Erupt: kinematic riser buried one height below the patch center, rising at
+            // height/0.15 (wisp's exact emergence); `settle_spires` freezes it into Static
+            // terrain — which our raycast grounding and wall-aware projectiles then treat as
+            // real level geometry (bolts burst on spires for free).
+            let rest = ev.position + Vec3::Y * (SPIRE_HEIGHT * 0.5 - 0.08);
             let start = rest - Vec3::Y * SPIRE_HEIGHT;
             let spire = spawn_skill_object(
                 &mut commands,
@@ -204,7 +177,7 @@ pub(crate) fn skill_verbs_on_cue(
             trace::event(
                 "spire_erupted",
                 json!({ "owner": owner_id,
-                        "pos": [tile_pos.x, tile_pos.y, tile_pos.z] }),
+                        "pos": [ev.position.x, ev.position.y, ev.position.z] }),
             );
         }
 
@@ -239,76 +212,4 @@ pub(crate) fn settle_spires(
             ec.insert(RigidBody::Static);
         }
     }
-}
-
-/// Drop a frost tile behind every live `glacier_roll` "roll" window each `TRAIL_STEP` meters of
-/// travel (wisp's `drop_glacier_trail`, distance-based). Polled off the live obelisk hitbox
-/// TRANSFORM (obelisk projectiles fly on `Transform`) rather than a cue: an emitter-based trail
-/// would make the tile Templates share the roll skill's lifecycle triggers (every tile expiry
-/// would re-fire the on_expire burst) — the polling system sidesteps that schema constraint and
-/// matches wisp's per-distance semantics exactly.
-#[allow(clippy::type_complexity)]
-pub(crate) fn drop_glacier_trail(
-    time: Res<Time>,
-    rolls: Query<(Entity, &Hitbox, &Transform)>,
-    objects: Query<(Entity, &SkillObject)>,
-    positions: Query<&Position>,
-    owners: Query<&crate::net::protocol::NetworkOwner>,
-    spatial: avian3d::prelude::SpatialQuery,
-    mut memory: Local<TrailMemory>,
-    mut commands: Commands,
-) {
-    let now = time.elapsed_secs();
-    let mut live: Vec<Entity> = Vec::new();
-    for (e, hitbox, tf) in &rolls {
-        if hitbox.skill_id != "glacier_roll" {
-            continue;
-        }
-        live.push(e);
-        let pos = tf.translation;
-        let last = memory.0.get(&e).copied();
-        let moved = last.map(|l| (pos - l).length()).unwrap_or(f32::INFINITY);
-        if moved < TRAIL_STEP {
-            continue;
-        }
-        memory.0.insert(e, pos);
-        // Ground-snap the tile (wisp raycasts down up to 4m).
-        let ground_y = spatial
-            .cast_ray(
-                pos + Vec3::Y * 0.2,
-                Dir3::NEG_Y,
-                4.0,
-                true,
-                &avian3d::prelude::SpatialQueryFilter::default(),
-            )
-            .map(|hit| pos.y + 0.2 - hit.distance)
-            .unwrap_or(pos.y - 0.3);
-        let tile_pos = Vec3::new(pos.x, ground_y + 0.04, pos.z);
-        // Dedup vs nearby tiles (wisp GLACIER_TILE_DEDUP_DIST = 0.25 XZ).
-        let too_close = objects
-            .iter()
-            .filter(|(_, o)| o.kind == KIND_FROST_TILE)
-            .filter_map(|(te, _)| positions.get(te).ok())
-            .any(|p| Vec2::new(p.0.x - tile_pos.x, p.0.z - tile_pos.z).length() < 0.25);
-        if too_close {
-            continue;
-        }
-        let owner_id = owners.get(hitbox.caster).map(|o| o.0).unwrap_or(0);
-        spawn_skill_object(
-            &mut commands,
-            &objects,
-            now,
-            KIND_FROST_TILE,
-            owner_id,
-            tile_pos,
-            Quat::IDENTITY,
-            Some(FROST_TILE_LIFETIME),
-            None,
-        );
-        trace::event(
-            "glacier_tile_drop",
-            json!({ "pos": [tile_pos.x, tile_pos.y, tile_pos.z] }),
-        );
-    }
-    memory.0.retain(|e, _| live.contains(e));
 }
