@@ -10,8 +10,12 @@
 #   (6) the glacier chain ran (>= 2 rolling_glacier casts).
 #   (7) the chain actually DAMAGED the target (>= 1 server_net_damage_resolved caster->target — guards
 #       against a silently pacifist session: the roll must reach the stationary target, not just paint).
-#   (8) D9: a mid-session round reset CLEARED painted ground (>= 1 surfaces_reset_cleared) — proof that
-#       a death happened and the reset wiped the frost (see server/rounds.rs::run_round_machine).
+#   (8) D9: a Countdown->Active round reset CLEARED painted ground end-to-end (>= 1 surfaces_reset_cleared
+#       — the reset's patch-clear loop wiped the frost; see server/rounds.rs::run_round_machine). NOTE:
+#       satisfiable by the match-start clear ALONE (needs_round_reset is set on EVERY Countdown->Active
+#       edge, including initial match start) — the death cycle is (9)'s job to pin.
+#   (9) someone actually died (>= 1 server_net_entity_died) — pins that (8)'s reset-clear came from a
+#       death cycle, not just match start.
 #
 # This jq script IS the contract: there is NO summarize.py twin for the glacier gate (this shell is
 # python3-free, and summarize.py encodes the firebolt contract). Keep the assertions; tune only the
@@ -58,10 +62,13 @@ n=$(jq -s --arg c "$caster" '[.[] | select(.kind=="server_net_cast_began" and .s
 # (7) the glacier chain actually damages the target (guards against a silently pacifist session).
 damage=$(jq -s --arg c "$caster" --arg t "$target" '[.[] | select(.kind=="server_net_damage_resolved" and .caster==$c and .target==$t)] | length' "$server")
 [[ "$damage" -ge 1 ]] || note "the glacier chain dealt no damage (session regressed to pacifist)"
-# (8) D9: a mid-session round reset cleared the painted ground.
+# (8) D9: a Countdown->Active round reset cleared the painted ground end-to-end (match-start OR death cycle).
 reset_clears=$(jq -s '[.[] | select(.kind=="surfaces_reset_cleared")] | length' "$server")
-[[ "$reset_clears" -ge 1 ]] || note "no round reset cleared surfaces (D9 unproven — did anyone die?)"
+[[ "$reset_clears" -ge 1 ]] || note "no round reset cleared surfaces (the reset's patch-clear loop wiped nothing)"
+# (9) someone actually died — pins that (8)'s reset-clear came from a death cycle, not just match start.
+deaths=$(jq -s '[.[] | select(.kind=="server_net_entity_died")] | length' "$server")
+[[ "$deaths" -ge 1 ]] || note "no entity died ((8) alone is satisfiable by the match-start clear)"
 
-echo "caster=$caster target=$target frost_paints=$paints spire_accepted=$accepted consumed=$consumed spires=$ok off_ground=$bad damage=$damage reset_clears=$reset_clears"
+echo "caster=$caster target=$target frost_paints=$paints spire_accepted=$accepted consumed=$consumed spires=$ok off_ground=$bad damage=$damage reset_clears=$reset_clears deaths=$deaths"
 if [[ "$fail" -ne 0 ]]; then echo FAIL; exit 1; fi
 echo PASS

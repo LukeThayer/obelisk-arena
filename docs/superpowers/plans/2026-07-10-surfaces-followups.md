@@ -20,7 +20,10 @@ conditioned on filing these — the coverage gap must not live only in the SDD l
    round-1 kill), which cycles a mid-session round reset. `server/rounds.rs::run_round_machine` now
    traces `surfaces_reset_cleared{count}` when the reset's patch-clear loop actually wipes patches, and
    the glacier gate asserts it (`check_glacier_session.sh` (8): ≥1) alongside the chain-damage guard
-   ((7): ≥1 `server_net_damage_resolved` caster→target). The 1:1 roll:spire rotation was retuned 3:1
+   ((7): ≥1 `server_net_damage_resolved` caster→target) AND a death-cycle pin ((9): ≥1
+   `server_net_entity_died` — (8) alone is satisfiable by the match-start reset-clear, since
+   `needs_round_reset` is set on EVERY Countdown→Active edge; (9)'s deaths≥1 pins that (8)'s clear
+   came from a death cycle, not just match start). The 1:1 roll:spire rotation was retuned 3:1
    (roll-heavy) so a two-hit kill reliably lands in round 1's clear-lane window before a frost_spire's
    own spire walls off the lane — verified damage≥2 & reset_clears≥1 across runs; glacier gate PASS ×2.
    The one real bug of the increment (the spire Y-float) is pinned e2e by assertion (5).

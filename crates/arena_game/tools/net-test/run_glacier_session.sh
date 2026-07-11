@@ -146,7 +146,7 @@ trap cleanup EXIT INT TERM
     #   ARENA_AUTOSTART (the host holds its start until its own equip round-trips), so it is set on
     #   BOTH observers (whichever the server elected host must pace its own equip).
     # ARENA_AUTOCAST_SKILL rotates one entry per pulse: THREE rolling_glacier, then frost_spire, then …
-    #   The 3:1 roll:spire ratio is the DAMAGE-RELIABILITY lever (see the DAMAGE + D9 note below): a
+    #   The 3:1 roll:spire ratio is the DAMAGE-RELIABILITY lever (see the DAMAGE + D9 note above): a
     #   frost_spire lands its spire ON the roll's z-line (~x -1, z 0.32) and settle_spires freezes it
     #   into Static terrain that later rolls burst on ~1 m out — so damage only lands in round 1's
     #   CLEAR-LANE window before the first spire. A kill needs two 28-dmg roll hits (target 50 hp);
