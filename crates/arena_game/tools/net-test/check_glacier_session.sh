@@ -29,8 +29,8 @@ target=$(jq -rs '[.[] | select(.kind=="player_spawned" and .client_id==2)][0].ob
 [[ -n "$caster" && -n "$target" ]] || note "server did not spawn both players (caster='$caster' target='$target')"
 
 # (1) the roll painted the frost trail (server) ...
-n=$(jq -s '[.[] | select(.kind=="surface_painted" and .surface=="frost")] | length' "$server")
-[[ "$n" -ge 3 ]] || note "server painted fewer than 3 frost patches (trail)"
+paints=$(jq -s '[.[] | select(.kind=="surface_painted" and .surface=="frost")] | length' "$server")
+[[ "$paints" -ge 3 ]] || note "server painted fewer than 3 frost patches (trail)"
 # (2) ... and it replicated to both observers.
 for name in observer-0 observer-1; do
     f="$session/$name.jsonl"
@@ -38,11 +38,11 @@ for name in observer-0 observer-1; do
     [[ "$n" -ge 3 ]] || note "$name received fewer than 3 replicated frost patches"
 done
 # (3) a frost_spire cast was ACCEPTED (the on_surface gate matched a trail patch).
-n=$(jq -s --arg c "$caster" '[.[] | select(.kind=="server_net_cast_began" and .skill_id=="frost_spire" and .caster==$c)] | length' "$server")
-[[ "$n" -ge 1 ]] || note "no frost_spire cast was accepted (gate never matched the trail)"
+accepted=$(jq -s --arg c "$caster" '[.[] | select(.kind=="server_net_cast_began" and .skill_id=="frost_spire" and .caster==$c)] | length' "$server")
+[[ "$accepted" -ge 1 ]] || note "no frost_spire cast was accepted (gate never matched the trail)"
 # (4) the accepted cast CONSUMED its fuel patch.
-n=$(jq -s '[.[] | select(.kind=="surface_removed" and .surface=="frost" and .reason=="Consumed")] | length' "$server")
-[[ "$n" -ge 1 ]] || note "no frost patch was consumed"
+consumed=$(jq -s '[.[] | select(.kind=="surface_removed" and .surface=="frost" and .reason=="Consumed")] | length' "$server")
+[[ "$consumed" -ge 1 ]] || note "no frost patch was consumed"
 # (5) the spire erupted GROUND-FLUSH (anchor y ~ 0 — the Task-4 regression's e2e pin).
 bad=$(jq -s '[.[] | select(.kind=="spire_erupted") | select((.pos[1] > 0.25) or (.pos[1] < -0.25))] | length' "$server")
 ok=$(jq -s '[.[] | select(.kind=="spire_erupted")] | length' "$server")
@@ -52,6 +52,6 @@ ok=$(jq -s '[.[] | select(.kind=="spire_erupted")] | length' "$server")
 n=$(jq -s --arg c "$caster" '[.[] | select(.kind=="server_net_cast_began" and .skill_id=="rolling_glacier" and .caster==$c)] | length' "$server")
 [[ "$n" -ge 2 ]] || note "fewer than 2 rolling_glacier casts"
 
-echo "caster=$caster target=$target"
+echo "caster=$caster target=$target frost_paints=$paints spire_accepted=$accepted consumed=$consumed spires=$ok off_ground=$bad"
 if [[ "$fail" -ne 0 ]]; then echo FAIL; exit 1; fi
 echo PASS

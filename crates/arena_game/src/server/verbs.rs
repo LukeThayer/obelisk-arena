@@ -180,8 +180,9 @@ pub(crate) fn skill_verbs_on_cue(
         // detaches). So EXCLUDE the caster + its child hurtbox and every skill object (built like
         // the portal arm's `exclude`), PLUS every combatant body and its hurtbox children (the
         // material addition over that poller's default filter). With nobody on the patch the floor
-        // is still the first hit — identical to before. (The e2e ground-flush proof — target
-        // standing in the trail area — lands in Task 3's glacier gate.)
+        // is still the first hit — identical to before. (The glacier net-test gate proves the
+        // GROUND-FLUSH eruption e2e; the combatant-exclusion path itself is covered by inspection
+        // only — no scripted scenario places a body under an eruption.)
         ("frost_spire", "on_window_spike") => {
             // Exclude the caster + its child hurtbox and every skill object (the portal arm's
             // set), then ADD every combatant body + its hurtbox children — so the ground ray only

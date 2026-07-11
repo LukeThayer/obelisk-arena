@@ -40,8 +40,8 @@ conditioned on filing these — the coverage gap must not live only in the SDD l
    excludes the caster + its hurtbox child, every skill object, AND every combatant body + its
    hurtbox children, so the ground ray only ever hits LEVEL geometry — a body standing on the fuel
    patch can no longer float the visual spire; damage capsule was always CastPoint-anchored). The
-   glacier gate's assertion (5) (`spire_erupted` `|pos[1]| ≤ 0.25` with the target standing in the
-   trail area) is the e2e proof.
+   glacier gate's assertion (5) proves ground-flush eruptions e2e; the combatant-exclusion
+   branch is inspection-covered — no scripted scenario puts a body under an eruption).
 7. Cache one `ForwardDecalMaterial` per surface type — BOTH copies: the arena's
    `client/surfaces.rs` AND the editor's `skill/preview/surfaces.rs::attach_patch_visuals`
    (same per-patch `materials.add` pattern; flagged again by the editor increment's final review).
