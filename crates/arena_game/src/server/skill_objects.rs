@@ -31,6 +31,10 @@ pub(crate) struct SkillObject {
 /// Kind ids (the cross-layer contract: server behavior, client visuals, trace fields).
 pub(crate) use crate::portals_shared::{KIND_PORTAL_BLUE, KIND_PORTAL_ORANGE};
 pub(crate) const KIND_FROST_SPIRE: &str = "frost_spire";
+/// The rolling-glacier boulder: a kinematic ice sphere spawned by `glacier_roll`'s roll-window
+/// verb, travelling in lockstep with the (authoritative) obelisk roll hitbox and despawned by the
+/// roll's end cue. Client visuals key off this string in `client/skill_objects.rs`.
+pub(crate) const KIND_GLACIER_BALL: &str = "glacier_ball";
 
 /// Per-kind instance cap (GLOBAL, wisp semantics: portals are shared world state, one per slot;
 /// tiles/spires are capped to keep long matches bounded). Exceeding the cap despawns the OLDEST.
@@ -38,6 +42,9 @@ fn max_instances(kind: &str) -> usize {
     match kind {
         KIND_PORTAL_ORANGE | KIND_PORTAL_BLUE => 1,
         KIND_FROST_SPIRE => 12,
+        // A roll lasts up to 6.5 s; the gate's 3:1 rotation can leave ~3 rolls (hence balls) alive
+        // per caster at once. Cap 4, replace-oldest — a stale orphan (missed end cue) is evicted.
+        KIND_GLACIER_BALL => 4,
         _ => 32,
     }
 }

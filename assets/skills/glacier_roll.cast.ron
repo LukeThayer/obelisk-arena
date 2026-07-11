@@ -16,7 +16,12 @@
       paints: Some(( surface: "frost", radius: 0.45, mode: Trail( step: 0.8 ) )) ),
   ],
   acquisition: SelfPoint,
-  vfx_cues: { "on_hit": "on_hit" },
+  // on_window_roll / on_end_roll are the ROLLING-BOULDER verb channel (server/verbs.rs): the roll
+  // window's open cue SPAWNS the kinematic ice ball (lockstep with the roll), its end cue DESPAWNS
+  // it where the roll stops (wall / fuse). Listing them in vfx_cues is what makes obelisk EMIT
+  // them; they are deliberately NOT bound in `cues:` below — the ball itself is the visual, so the
+  // client leaves them cosmetically unbound (a one-time `cue_unbound` warn each, by design).
+  vfx_cues: { "on_hit": "on_hit", "on_window_roll": "on_window_roll", "on_end_roll": "on_end_roll" },
   cues: {
     "on_hit": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],
       duration: Some(0.3) ),

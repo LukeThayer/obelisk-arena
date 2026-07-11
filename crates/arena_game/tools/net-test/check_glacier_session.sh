@@ -16,6 +16,8 @@
 #       edge, including initial match start) — the death cycle is (9)'s job to pin.
 #   (9) someone actually died (>= 1 server_net_entity_died) — pins that (8)'s reset-clear came from a
 #       death cycle, not just match start.
+#  (10) the rolling boulder actually spawned (>= 2 skill_object_spawned{glacier_ball} — the roll's
+#       visible physical companion; server/verbs.rs spawns one per roll window in lockstep with it).
 #
 # This jq script IS the contract: there is NO summarize.py twin for the glacier gate (this shell is
 # python3-free, and summarize.py encodes the firebolt contract). Keep the assertions; tune only the
@@ -68,7 +70,10 @@ reset_clears=$(jq -s '[.[] | select(.kind=="surfaces_reset_cleared")] | length' 
 # (9) someone actually died — pins that (8)'s reset-clear came from a death cycle, not just match start.
 deaths=$(jq -s '[.[] | select(.kind=="server_net_entity_died")] | length' "$server")
 [[ "$deaths" -ge 1 ]] || note "no entity died ((8) alone is satisfiable by the match-start clear)"
+# (10) the rolling boulder spawned (>= 2 glacier_ball skill objects — the roll's visible companion).
+balls=$(jq -s '[.[] | select(.kind=="skill_object_spawned" and .object_kind=="glacier_ball")] | length' "$server")
+[[ "$balls" -ge 2 ]] || note "no rolling boulder spawned (glacier_ball skill objects missing)"
 
-echo "caster=$caster target=$target frost_paints=$paints spire_accepted=$accepted consumed=$consumed spires=$ok off_ground=$bad damage=$damage reset_clears=$reset_clears deaths=$deaths"
+echo "caster=$caster target=$target frost_paints=$paints spire_accepted=$accepted consumed=$consumed spires=$ok off_ground=$bad damage=$damage reset_clears=$reset_clears deaths=$deaths balls=$balls"
 if [[ "$fail" -ne 0 ]]; then echo FAIL; exit 1; fi
 echo PASS

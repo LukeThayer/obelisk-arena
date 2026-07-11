@@ -70,6 +70,15 @@ fn spire_and_portals_keep_the_verb_cue_slots() {
     assert!(req.snap && req.consume, "snap to the patch center; consume the fuel at accept");
     assert!(spire.vfx_cues.contains_key("on_window_spike"));
 
+    // glacier_roll drives the ROLLING-BOULDER skill-object verbs (server/verbs.rs): the roll
+    // window's OPEN cue (`on_window_roll`) spawns the kinematic ice ball in lockstep with the
+    // roll; its END cue (`on_end_roll`) despawns the ball where the roll stops (wall / fuse).
+    // Both slots must be listed in `vfx_cues` — that is what makes obelisk EMIT them (the verb
+    // channel); renaming the "roll" window renames both slots and silently kills the boulder.
+    let roll = timeline("glacier_roll");
+    assert!(roll.vfx_cues.contains_key("on_window_roll"));
+    assert!(roll.vfx_cues.contains_key("on_end_roll"));
+
     for id in ["portal_orange", "portal_blue"] {
         let p = timeline(id);
         // Plain Aim: the server VERB does the wisp placement raycast itself (surface stick or
