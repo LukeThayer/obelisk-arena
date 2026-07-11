@@ -1,6 +1,6 @@
 //! Client-side surfaces (spec §6-§7). This module carries the HEADLESS-SAFE trace system
-//! (both client roots register it — the net-test asserts replication reached every observer);
-//! Task 3 adds the windowed visuals plugin alongside.
+//! (both client roots register it — the net-test asserts replication reached every observer) and
+//! the windowed-only visuals plugin (`SurfaceVisualsPlugin`: decals + optional looping vfx).
 use avian3d::prelude::{RigidBody, SpatialQuery, SpatialQueryFilter};
 use bevy::pbr::decal::{ForwardDecal, ForwardDecalMaterial, ForwardDecalMaterialExt};
 use bevy::prelude::*;
@@ -129,9 +129,14 @@ fn attach_surface_visuals(
                 50.0,
                 true,
                 &SpatialQueryFilter::default(),
-                // STATIC level geometry ONLY — never a combatant / skill-object capsule the patch
-                // happens to sit under (predicate `true` = a hit to consider, `false` = skip and
-                // keep travelling). Patches carry no collider, so they never catch the ray either.
+                // STATIC bodies only: a Dynamic combatant standing on the paint point is rejected
+                // by the predicate (`false` = skip, keep travelling). Skill objects (including
+                // settled frost_spires, which ARE Static server-side) and patches are safe for a
+                // DIFFERENT reason — RigidBody/Collider never replicate, so client-side they have
+                // no collider to catch the ray at all. This marker-less heuristic trusts "nearest
+                // static below" (the editor uses a precise floor marker instead): on a multi-tier
+                // level the decal grounds on the platform top — where a ground decal belongs —
+                // but revisit if skill objects ever gain client colliders.
                 &|entity| static_bodies.get(entity).is_ok_and(|rb| rb.is_static()),
             )
             .map(|hit| origin.y - hit.distance)
