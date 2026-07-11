@@ -58,7 +58,8 @@ conditioned on filing these — the coverage gap must not live only in the SDD l
    ✅ **ARENA HALF DONE 2026-07-11** (Task 2) — grew the box: the decal child's Y scale is now
    `y_span = (pos.y.abs() * 2.0 + 1.0).max(1.0)`, so an elevated patch's ±half-Y box still spans
    down to the floor (+1 m margin). The EDITOR preview's matching `attach_patch_visuals` grows the
-   same way in **Task 3** — NOT done here.
+   same way — ✅ **EDITOR HALF DONE 2026-07-11** (bevy_modal_editor `0abe936`; both #7 and #8 are
+   now fully closed across both renderers).
 9. `python3 -m py_compile crates/arena_game/tools/net-test/summarize.py` on the next
    python3-capable run (edited in lockstep with the jq gate but unexecuted in this shell).
    **DEFERRED — python3 = CI-only.** This dev shell is python3-free, so the jq `check_*.sh` gates
@@ -67,11 +68,16 @@ conditioned on filing these — the coverage gap must not live only in the SDD l
     palette clicks accumulate identical entries — benign, merge-dedup collapses them);
     de-fragilize `stage_reset_rezeroes_surface_and_spawn_streams`' geometry-dependent
     `inside_prev` precondition (bevy_modal_editor tests/skill_preview.rs).
+    ✅ **DONE 2026-07-11** — `push_staged_dedup` pure fn + unit test; the reset test paints at
+    the caster's queried position (overlap by construction). bevy_modal_editor `0abe936`.
 
 ## Obelisk core (carried from the core's final review)
 
 10. Spec-§11 `.trace` golden once surfaces enter obelisk's `feature_matrix()` (the two-run
     determinism test locks reproducibility, not behavior).
+    ✅ **DONE 2026-07-11** — `surfaces_paint_stand_ignite` (feature_matrix #49: paint trail +
+    standing tick + contact ignite + consume), byte-stable, all 48 prior goldens untouched.
+    obelisk-bevy `1dc2a12`.
 11. Cross-OBSERVER burst-evict residual (same-tick OnEnd/PaintSurface paints at cap are
     snapshot-blind; the system path is guarded).
     **DEFERRED** — a real fix needs a shared-tick-scratch design decision (dedup across observers
