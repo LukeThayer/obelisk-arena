@@ -31,6 +31,11 @@ n=$(jq -s --arg c "$caster" --arg t "$target" '[.[] | select(.kind=="server_net_
 n=$(jq -s '[.[] | select(.kind=="surface_painted" and .surface=="burning")] | length' "$server")
 [[ "$n" -ge 1 ]] || note "server painted no burning surface (firebolt_explosion paints OnEnd)"
 
+# (9) burning standing tick: the scorch under the target resolves burning_ground_tick damage
+#     (painter-attributed), proving the standing-payload path end-to-end.
+n=$(jq -s --arg c "$caster" --arg t "$target" '[.[] | select(.kind=="server_net_damage_resolved" and .skill_id=="burning_ground_tick" and .caster==$c and .target==$t)] | length' "$server")
+[[ "$n" -ge 1 ]] || note "server resolved no burning_ground_tick standing damage"
+
 # (3)+(4)+(6) per observer: echoed cast + damage (matching value) + explosion
 for name in observer-0 observer-1; do
     f="$session/$name.jsonl"
@@ -47,6 +52,10 @@ for name in observer-0 observer-1; do
     # (8) ...and the patch replicated to this observer.
     n=$(jq -s '[.[] | select(.kind=="replicated_surface_patch" and .surface=="burning")] | length' "$f")
     [[ "$n" -ge 1 ]] || note "$name received no replicated burning surface patch"
+
+    # (10) ...and each observer echoes the standing-tick damage.
+    n=$(jq -s --arg c "$caster" --arg t "$target" '[.[] | select(.kind=="client_net_damage_resolved" and .skill_id=="burning_ground_tick" and .caster==$c and .target==$t)] | length' "$f")
+    [[ "$n" -ge 1 ]] || note "$name received no burning_ground_tick damage"
 done
 
 echo "caster=$caster target=$target server_damage=$dmg"

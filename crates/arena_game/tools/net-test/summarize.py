@@ -149,6 +149,16 @@ def main() -> int:
         failures.append(
             "server painted no burning surface (firebolt_explosion paints OnEnd)")
 
+    # --- (9) burning standing tick: the scorch under the target resolves burning_ground_tick
+    #         damage (painter-attributed), proving the standing-payload path end-to-end. ---
+    server_burn_tick = [e for e in server
+                        if e.get("kind") == "server_net_damage_resolved"
+                        and e.get("skill_id") == "burning_ground_tick"
+                        and e.get("caster") == caster_id
+                        and e.get("target") == target_id]
+    if not server_burn_tick:
+        failures.append("server resolved no burning_ground_tick standing damage")
+
     # --- (8) ...and the burning patch REPLICATED to BOTH observers (wire v6) ---
     for name, evs in (("observer-0", obs0), ("observer-1", obs1)):
         got_patch = [e for e in evs
@@ -156,6 +166,16 @@ def main() -> int:
                      and e.get("surface") == "burning"]
         if not got_patch:
             failures.append(f"{name} received no replicated burning surface patch")
+
+    # --- (10) ...and each observer echoes the standing-tick damage. ---
+    for name, evs in (("observer-0", obs0), ("observer-1", obs1)):
+        got_burn_tick = [e for e in evs
+                         if e.get("kind") == "client_net_damage_resolved"
+                         and e.get("skill_id") == "burning_ground_tick"
+                         and e.get("caster") == caster_id
+                         and e.get("target") == target_id]
+        if not got_burn_tick:
+            failures.append(f"{name} received no burning_ground_tick damage")
 
     # --- verdict ---
     print()
@@ -167,6 +187,7 @@ def main() -> int:
     print(f"  server authoritative damage value:          {server_dmg_value}")
     print(f"  server DamageResolved firebolt_explosion (trigger):  {len(server_expl)} event(s)")
     print(f"  server surface_painted burning (OnEnd):     {len(server_painted)} event(s)")
+    print(f"  server burning_ground_tick (standing):      {len(server_burn_tick)} event(s)")
     for name, evs in (("observer-0", obs0), ("observer-1", obs1)):
         n_cast = sum(1 for e in evs if e.get("kind") == "client_net_cast_began"
                      and e.get("caster") == caster_id)
