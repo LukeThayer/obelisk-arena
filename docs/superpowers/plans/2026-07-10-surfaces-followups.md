@@ -5,15 +5,24 @@ conditioned on filing these — the coverage gap must not live only in the SDD l
 
 ## Required (the merge condition)
 
-1. **Glacier/spire e2e net-test extension.** The gate only casts firebolt, so `Trail` painting,
-   `on_surface` gate/snap/CONSUME, and the spire eruption have no automated runtime coverage —
-   the one real bug of the increment (the spire Y-float) lived exactly in this blind spot.
-   Extend the net-test session (or add a second scripted session) to: equip `potted_spring`,
-   cast `rolling_glacier` (assert `surface_painted{frost}` on the server + replication on both
-   observers), cast `frost_spire` at the trail (assert `surface_removed{reason:"Consumed"}` +
-   a ground-flush `spire_erupted` — `pos[1] ≈ 0.0`), and one `burning_ground_tick`
-   `server_net_damage_resolved` from a victim standing in a scorch. Also assert the D9
-   round-reset clear when feasible.
+1. **Glacier/spire e2e net-test extension.** ✅ **DONE 2026-07-11** — added the GLACIER session
+   `crates/arena_game/tools/net-test/run_glacier_session.sh` + `check_glacier_session.sh` (a
+   second scripted session, sibling to the firebolt `run_session.sh`/`check_session.sh`): equips
+   `potted_spring` on both observers, alternates `rolling_glacier` (asserts ≥3 `surface_painted{frost}`
+   server + ≥3 `replicated_surface_patch{frost}` on both observers) and `frost_spire` at the trail
+   (asserts ≥1 `server_net_cast_began{frost_spire}` = the `on_surface` gate matched, ≥1
+   `surface_removed{frost, reason:"Consumed"}`, and every `spire_erupted` ground-flush `|pos[1]| ≤ 0.25`),
+   plus ≥2 `rolling_glacier` casts. 10/10 repeatable (jq gate; no summarize.py twin — python3-free).
+   The **`burning_ground_tick`** coverage (a victim standing in a scorch) was folded into the FIREBOLT
+   gate instead (Task 1 — `check_session.sh` assertions (9)/(10)), where the firebolt_explosion already
+   paints `burning` under the target. REMAINING (deliberately deferred): the D9 round-reset clear stays
+   unasserted — rounds only cycle on deaths, and scripting a deterministic kill into the glacier
+   session is a separate escalation (the session DOES incidentally reset once, but the clear is not pinned).
+   The one real bug of the increment (the spire Y-float) is now pinned e2e by assertion (5).
+
+   ~~The gate only casts firebolt, so `Trail` painting, `on_surface` gate/snap/CONSUME, and the spire
+   eruption have no automated runtime coverage — the one real bug of the increment (the spire Y-float)
+   lived exactly in this blind spot.~~
 
 ## Editor increment 6 (pre-warned footguns, fold into that plan)
 
@@ -26,8 +35,13 @@ conditioned on filing these — the coverage gap must not live only in the SDD l
 
 ## Hardening (post-merge, small)
 
-6. Exclude combatants from the spire ground-snap ray (`server/verbs.rs` — a body standing on
-   the fuel patch can float the visual spire; damage capsule unaffected).
+6. ✅ **DONE 2026-07-11** (Task 2) — Exclude combatants from the spire ground-snap ray
+   (`server/verbs.rs::skill_verbs_on_cue`, `frost_spire`/`on_window_spike` arm: the down-ray now
+   excludes the caster + its hurtbox child, every skill object, AND every combatant body + its
+   hurtbox children, so the ground ray only ever hits LEVEL geometry — a body standing on the fuel
+   patch can no longer float the visual spire; damage capsule was always CastPoint-anchored). The
+   glacier gate's assertion (5) (`spire_erupted` `|pos[1]| ≤ 0.25` with the target standing in the
+   trail area) is the e2e proof.
 7. Cache one `ForwardDecalMaterial` per surface type — BOTH copies: the arena's
    `client/surfaces.rs` AND the editor's `skill/preview/surfaces.rs::attach_patch_visuals`
    (same per-patch `materials.add` pattern; flagged again by the editor increment's final review).
