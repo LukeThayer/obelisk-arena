@@ -17,6 +17,7 @@
 use avian3d::prelude::{Collider, Position, RigidBody};
 use bevy::prelude::*;
 use obelisk_bevy::events::{CueEvent, CueKind};
+use obelisk_bevy::prelude::charge_mult;
 use obelisk_bevy::spatial::Hitbox;
 use serde_json::json;
 
@@ -53,8 +54,10 @@ const WINDOW_ANCHOR_OFFSET_Y: f32 = 0.8;
 
 /// Ball collider radius — mirrors the roll window's `shape: Sphere(radius: 0.32)`.
 const GLACIER_BALL_RADIUS: f32 = 0.32;
-/// Ball travel speed — mirrors the roll window's `motion: Linear(speed: 7.0)`. The gate casts with
-/// tap charge (`charge_mult(85) == 1.0×`), so the ball and the roll hitbox stay in exact lockstep.
+/// Ball travel BASE speed — mirrors the roll window's `motion: Linear(speed: 7.0)`. The ball and
+/// the roll hitbox stay in lockstep because BOTH scale this same base by the originating cast's
+/// `charge_mult` (obelisk on the hitbox at advance.rs's projectile advance; the ball at spawn,
+/// below) — a tap charge is ≈1.0×, a charged cast speeds both up identically.
 const GLACIER_BALL_SPEED: f32 = 7.0;
 /// The roll window's authored `active_duration` (its fuse). The ball's lifetime is this + a small
 /// margin, so the `on_end_roll` cue despawns it FIRST; the fuse only reaps a ball whose end cue was
@@ -330,7 +333,10 @@ pub(crate) fn skill_verbs_on_cue(
             // the query's mask (world-hit / portal-passthrough / grounded / decal ground-snap), and
             // it generates no contacts — it never pushes a player, and no projectile bursts on it.
             commands.entity(ball).insert((
-                avian3d::prelude::LinearVelocity(dir * GLACIER_BALL_SPEED),
+                // charge_mult(ev.charge) — obelisk scales the roll HITBOX's launch speed the same
+                // way (advance.rs's `speed * charge_mult(charge)`), so a charged roll and its
+                // visible ball stay in lockstep (matches client/cosmetics.rs's cue-follow scaling).
+                avian3d::prelude::LinearVelocity(dir * GLACIER_BALL_SPEED * charge_mult(ev.charge)),
                 avian3d::prelude::CollisionLayers::NONE,
             ));
         }
