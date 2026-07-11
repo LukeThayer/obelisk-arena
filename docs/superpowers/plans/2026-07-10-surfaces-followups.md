@@ -66,6 +66,13 @@ conditioned on filing these — the coverage gap must not live only in the SDD l
    down to the floor (+1 m margin). The EDITOR preview's matching `attach_patch_visuals` grows the
    same way — ✅ **EDITOR HALF DONE 2026-07-11** (bevy_modal_editor `0abe936`; both #7 and #8 are
    now fully closed across both renderers).
+   ⚠️ **CORRECTION 2026-07-11** (surfaces-decal-snap) — the `y_span` box-growth above was INERT.
+   bevy 0.18 `ForwardDecal` is a FLAT +Y quad with NO Y extent, so `scale.y` is never read: the
+   grown box never reached the floor, it only (harmlessly) stretched a flat quad. Both halves are
+   SUPERSEDED by the decal GROUND-SNAP (plan `2026-07-11-surfaces-decal-groundsnap-plan.md`): the
+   render child now raycasts DOWN to the static floor and lands its world Y flush on the ground
+   (+1 cm bias), `scale.y` pinned to 1.0 and `y_span` deleted — game `client/surfaces.rs` (this
+   task) + editor twin `skill/preview/surfaces.rs` (bevy_modal_editor `23a6e256`, Task 1).
 9. `python3 -m py_compile crates/arena_game/tools/net-test/summarize.py` on the next
    python3-capable run (edited in lockstep with the jq gate but unexecuted in this shell).
    **DEFERRED — python3 = CI-only.** This dev shell is python3-free, so the jq `check_*.sh` gates

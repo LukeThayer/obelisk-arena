@@ -749,7 +749,7 @@ dependencies = [
 [[package]]
 name = "bevy_channel_mat"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#350d25070959457f1786879bbf85de81739f6fb0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#23a6e256f23cf13c3959966943cad8e2eb68342e"
 dependencies = [
  "bevy",
 ]
@@ -901,7 +901,7 @@ dependencies = [
 [[package]]
 name = "bevy_editor_game"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#350d25070959457f1786879bbf85de81739f6fb0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#23a6e256f23cf13c3959966943cad8e2eb68342e"
 dependencies = [
  "bevy",
  "bevy_effect",
@@ -913,7 +913,7 @@ dependencies = [
 [[package]]
 name = "bevy_effect"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#350d25070959457f1786879bbf85de81739f6fb0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#23a6e256f23cf13c3959966943cad8e2eb68342e"
 dependencies = [
  "avian3d",
  "bevy",
@@ -1147,7 +1147,7 @@ dependencies = [
 [[package]]
 name = "bevy_grid_shader"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#350d25070959457f1786879bbf85de81739f6fb0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#23a6e256f23cf13c3959966943cad8e2eb68342e"
 dependencies = [
  "bevy",
  "bitflags 2.13.0",
@@ -1463,7 +1463,7 @@ checksum = "7ef8e4b7e61dfe7719bb03c884dc270cd46a82efb40f93e9933b990c5c190c59"
 [[package]]
 name = "bevy_modal_editor"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#350d25070959457f1786879bbf85de81739f6fb0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#23a6e256f23cf13c3959966943cad8e2eb68342e"
 dependencies = [
  "avian3d",
  "avian_rerecast",
@@ -1499,7 +1499,7 @@ dependencies = [
 [[package]]
 name = "bevy_outliner"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#350d25070959457f1786879bbf85de81739f6fb0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#23a6e256f23cf13c3959966943cad8e2eb68342e"
 dependencies = [
  "bevy",
  "bytemuck",
@@ -1619,7 +1619,7 @@ dependencies = [
 [[package]]
 name = "bevy_procedural"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#350d25070959457f1786879bbf85de81739f6fb0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#23a6e256f23cf13c3959966943cad8e2eb68342e"
 dependencies = [
  "avian3d",
  "bevy",
@@ -1883,7 +1883,7 @@ dependencies = [
 [[package]]
 name = "bevy_spline_3d"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#350d25070959457f1786879bbf85de81739f6fb0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#23a6e256f23cf13c3959966943cad8e2eb68342e"
 dependencies = [
  "avian3d",
  "bevy",
@@ -2162,7 +2162,7 @@ dependencies = [
 [[package]]
 name = "bevy_vfx"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#350d25070959457f1786879bbf85de81739f6fb0"
+source = "git+https://github.com/LukeThayer/bevy_modal_editor?branch=main#23a6e256f23cf13c3959966943cad8e2eb68342e"
 dependencies = [
  "avian3d",
  "bevy",
@@ -5195,7 +5195,7 @@ dependencies = [
 [[package]]
 name = "obelisk-bevy"
 version = "0.1.0"
-source = "git+https://github.com/LukeThayer/bevy-obelisk?branch=main#cd860e2aa29563a44e54d29dfc09f6ba3657d331"
+source = "git+https://github.com/LukeThayer/bevy-obelisk?branch=main#e2b2ffcd3ae01b64b45ade59739fd61931a340ff"
 dependencies = [
  "avian3d",
  "bevy",
