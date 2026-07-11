@@ -33,6 +33,11 @@ fn shell_boots_and_loads_the_arenas_skills() {
             library.skills.keys().collect::<Vec<_>>()
         );
     }
+
+    // Surfaces (increment 6): the content root's config/surfaces loads into the registry.
+    let surfaces = app.world().resource::<obelisk_bevy::surfaces::SurfaceRegistry>();
+    assert!(surfaces.0.contains_key("frost"), "frost surface loaded from the arena root");
+    assert!(surfaces.0.contains_key("burning"));
 }
 
 /// ArenaSpawnPoint must survive an editor scene save (it's in the SceneComponentRegistry via

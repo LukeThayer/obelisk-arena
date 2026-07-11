@@ -40,11 +40,14 @@ shapes **Sphere / Capsule / Cone** (all really simulate); motion **Static / Line
 and modes (FirstOnly / OncePerTarget / EveryTick+rehit — the last is a damage field); **point-anchored
 zones** (`WindowAnchor::CastPoint` + `anchor_offset`) and **carrier volumes** (`strikes:false`);
 **emitters** (rain child windows at rate/jitter); **authored acquisition** (Aim / SelfPoint /
-HitscanEntity / GroundPoint) with **fallback chains**; charge (byte → 0.5–2.0× speed **and** damage);
+HitscanEntity / GroundPoint) with **fallback chains**; **persistent painted surfaces** (a window
+`paints` frost/burning patches — `Trail`/`OnEnd`; a `GroundPoint` `on_surface` gate requires/snaps/
+consumes one; patches carry standing payloads + skill-contact reactions); charge (byte → 0.5–2.0× speed **and** damage);
 rich mitigation; **rules-driven trigger cascades** (a hit fires another skill's whole timeline at the hit
 position) and **rules-driven chain** (beam-only). This covers: firebolt-style lob-and-explode, chain
 lightning, blizzard/rain-of-shards, ground-targeted meteor, persistent lava field, cone flamethrower/
-cleave, PBAoE nova, proximity mine.
+cleave, PBAoE nova, proximity mine — plus, with surfaces: persistent frost/burning terrain, glacier-
+style paint trails, and surface-gated casts (frost spire erupts only on a frost patch).
 
 **CANNOT today (needs a sim increment, not authoring):**
 - **Any crowd control / displacement** — no knockback, pull/vortex, root, hard stun, taunt, silence,
@@ -56,7 +59,7 @@ cleave, PBAoE nova, proximity mine.
 - **Non-round shapes** — no box/wall/line (Cone is a circular sector around the aim axis, not a flat fan).
 - **Following/sweeping volumes** — volumes are world-frozen at spawn; no channeled cone that sweeps as you
   turn, no aura that trails the caster (point-anchored zones stay put, which is fine).
-- **Bespoke mechanics** (portals, teleport, terrain like frost tiles, spawned skill objects) are **arena
+- **Bespoke mechanics** (portals, teleport, spawned skill objects) are **arena
   server verbs** (`arena_game/src/server/verbs.rs`, keyed on `(skill_id, cue_id)`), NOT authorable in RON
   and invisible to the editor/preview. If the design needs one, that's an engineering task.
 
@@ -148,9 +151,16 @@ etc. — see `loot_core` `TriggerCondition`); `always`/`on_impact`/`on_expire` a
 | `hit_mode` | `FirstOnly` · `OncePerTarget` · `EveryTick` | FirstOnly=projectile (ends on 1st hit); EveryTick(+`rehit_interval`)=damage field |
 | `rehit_interval` | `Some(secs)` · `None` | |
 | `emitter` | `Some(( rate, jitter, window ))` · `None` | rains the named `Template` window at `rate`/s, xz-jitter `jitter` |
+| `paints` | `Some(( surface, radius, mode: Trail( step )\|OnEnd, lifetime: Some(secs)? ))` · `None` | paints a `config/surfaces/` patch (§3d) while alive (`Trail` = every `step` m of travel + once at spawn) or at end (`OnEnd`); `surface` must be a loaded id |
 
 Top-level: `acquisition` (§2), `chain_radius: 6.0` (beam chain search radius), `chargeable: bool`,
 `max_hold: secs`, plus the presentation maps (§3c).
+
+**Acquisition surface gate** (on `GroundPoint` only): `GroundPoint( range, fallback, on_surface: Some((
+surface, snap, consume )) )` requires the aimed point to land on a `surface` patch — `snap: true`
+(default) recenters the cast point on the matched patch, `consume: true` removes the patch at cast-accept
+(spent even if the cast is later interrupted). A point off any patch runs the normal `fallback` (paid
+`Fizzle`). See Archetype 5 + §3d.
 
 **Archetype 1 — projectile that triggers an AoE** (firebolt: the bolt is here, the boom is a *separate*
 skill fired by the rules conditions in §3a):
@@ -181,10 +191,14 @@ skill fired by the rules conditions in §3a):
 > `on_end_bolt` is in `vfx_cues` with NO `cues` binding on purpose: it's the teardown trigger that
 > despawns the `Follow` trail when the bolt ends. A `Follow` cue needs no matching `on_end` binding to
 > clean up — the window's end event does it.
+> The AoE this triggers can itself leave a **persistent surface**: firebolt_explosion's blast
+> `paints: OnEnd` a `burning` scorch (full line in Archetype 2; §3d), whose standing tick then hits
+> enemies in it. Painting is a window property, so it rides the trigger cascade for free — no extra
+> skill, no mana.
 
 **Archetype 2 — triggered sub-skill** (firebolt_explosion: the AoE that Archetype 1 fires). `SelfPoint`
 acquisition + a `CastPoint`-anchored window = "detonate at the position the trigger fired at". Never
-granted to a weapon; `mana_cost = 0`:
+granted to a weapon; `mana_cost = 0`. The blast also `paints` a lingering `burning` scorch on end (§3d):
 ```ron
 (
   skill_id: "firebolt_explosion",
@@ -192,7 +206,8 @@ granted to a weapon; `mana_cost = 0`:
   collision_windows: [
     ( id: "blast", spawn: Scheduled( phase: Active, offset: 0.0 ), anchor: CastPoint,
       active_duration: 0.05, shape: Sphere( radius: 1.5 ), motion: Static,
-      hit_filter: Enemies, hit_mode: OncePerTarget ),
+      hit_filter: Enemies, hit_mode: OncePerTarget,
+      paints: Some(( surface: "burning", radius: 1.2, mode: OnEnd, lifetime: Some(4.0) )) ),
   ],
   acquisition: SelfPoint,
   vfx_cues: { "on_window_blast": "on_window_blast" },
@@ -247,6 +262,31 @@ entity aimed) is a paid fizzle:
 )
 ```
 
+**Archetype 5 — surface-gated consumer** (frost_spire: erupt a spire only on a `frost` patch the
+glacier painted). The `GroundPoint` `on_surface` gate requires the aimed point to land on a `frost`
+patch, SNAPS the cast to that patch's center, and CONSUMES it at cast-accept; a point off any patch is a
+paid `Fizzle`. The damage window is a `CastPoint`-anchored capsule the size of the rising spire (the
+physical spire itself is an arena server verb on the `on_window_spike` cue — §1):
+```ron
+(
+  skill_id: "frost_spire",
+  phase_durations: ( windup: 0.25, active: 0.1, recovery: 0.25 ),
+  collision_windows: [
+    ( id: "spike", spawn: Scheduled( phase: Active, offset: 0.0 ), anchor: CastPoint,
+      anchor_offset: (0.0, 0.8, 0.0), active_duration: 0.25,
+      shape: Capsule( radius: 0.45, height: 1.6 ), motion: Static,
+      hit_filter: Enemies, hit_mode: OncePerTarget ),
+  ],
+  acquisition: GroundPoint( range: 60.0, fallback: Fizzle,
+    on_surface: Some(( surface: "frost", snap: true, consume: true )) ),
+  chargeable: true,
+  max_hold: 1.5,
+)
+```
+> `consume: true` spends the patch even if the cast is interrupted after accept. The gate only resolves
+> when a `frost` patch already exists under the aim — the glacier paints them in-game; in the designer,
+> stage one first (§4) or the cast always fizzles.
+
 Motion picker: `Static` (melee/nova/field), `Linear(speed)` (straight bolt/shard),
 `Ballistic(speed, gravity)` (lob — gravity NOT charge-scaled, so charged shots fly flatter), `Beam`
 (instant strike on the designated target; no target = paid fizzle). For a lob-and-explode use
@@ -279,6 +319,57 @@ params: [ ( param: "scale", source: Charge ) ], duration: Some(secs) )`.
 `assets/skills/*.vfx.ron` on a name collision — author presets in `assets/vfx/`). For a new in-flight
 look, author `assets/vfx/<id>_trail.vfx.ron` (copy `firebolt_trail.vfx.ron`).
 
+### 3d. Surfaces — `config/surfaces/<id>.toml` (`obelisk_bevy::surfaces::SurfaceType`)
+
+A **surface** is persistent painted ground: a window `paints` patches of it (§3b), a `GroundPoint`
+`on_surface` gate requires/consumes them, and each patch runs a payload on whoever stands in it. One TOML
+per surface id (the arena root ships `frost` + `burning`); the editor loads them into `SurfaceRegistry`
+the same way it loads skills. Copy `burning.toml`:
+
+```toml
+id = "burning"
+lifetime = 8.0
+merge_radius = 0.3
+max_patches = 32
+patch_radius = 1.2
+
+[standing]
+filter = "enemies"
+tick_skill = "burning_ground_tick"
+rehit_interval = 0.5
+
+[visuals]
+decal = "textures/decal_splat.png"
+color = [1.0, 0.45, 0.1, 0.85]
+vfx = "Embers"
+```
+
+- **Top level**: `id`; `lifetime` (patch seconds — a paint's own `lifetime` override wins); `merge_radius`
+  (a paint this close to a same-type patch is skipped); `max_patches` (per-type cap — exceeding it despawns
+  the OLDEST, the arena's replace-oldest tile feel); `patch_radius` (default radius for a paint that authors
+  none).
+- **`[standing]`** — payload for entities standing INSIDE a patch, attributed to the painter: `filter`
+  (`enemies`/`allies`/`all`, relative to the painter); `effect` (an obelisk effect id applied/refreshed
+  while standing — chill/burn); `tick_skill` (a triggered skill run AT the victim on the clock —
+  full-combat periodic damage, the `firebolt_explosion` pattern); `rehit_interval` (clock period);
+  `on_enter_only` (fire once per patch×visit instead of on the clock).
+- **`[[on_skill_contact]]`** (repeatable) — a reaction to a HITBOX touching the patch ("fire ignites oil"):
+  if the contacting skill's rules `tags` intersect `tags_any`, run `trigger_skill` at the contact point
+  (attributed to the contacting caster), optionally `consume` the patch.
+- **`[visuals]`** — sim-inert host render hints (like `cues`): `decal` texture key, `color` RGBA tint,
+  `vfx` looping preset. The sim never reads them.
+
+**Loader fails LOUD** (`load_surfaces_dir`, crate convention): numeric sanity (`lifetime > 0`,
+`max_patches >= 1`, `patch_radius > 0`, `rehit_interval > 0`), duplicate/empty ids, an `on_skill_contact`
+tag that isn't a real `SkillTag`, and any dangling `tick_skill` / `on_skill_contact.trigger_skill` /
+`standing.effect` ref each reject the WHOLE `config/surfaces/` directory. (The effect/skill checks fire
+only once `add_obelisk_effects` + the skills scan have run — the editor's content scan orders them for you.)
+
+**Editor**: the surface pickers in the behavior panel (the window `paints` row + the `on_surface` gate) are
+registry-fed — you can only pick ids loaded from `config/surfaces/` (an empty registry shows a muted "no
+surfaces loaded" note). To test a gated cast, stage a patch first: command palette → **"Stage: paint frost
+patch"** (a staged patch survives stage reset + scrub; **"Stage: clear staged paints"** removes them).
+
 ## 4. Verify — designer first, then headless
 
 1. `cd crates/arena_editor && cargo run --bin arena-editor` (own cargo workspace — never `-p
@@ -286,6 +377,8 @@ look, author `assets/vfx/<id>_trail.vfx.ron` (copy `firebolt_trail.vfx.ron`).
 2. **Scrub** the phase strip: each bound cue's vfx fires at its moment (no Play needed). Select a window
    to see its shape gizmo.
 3. **Play**: the caster casts at the dummy. Watch flight/impact/timing.
+   - **Surface-gated skills** (`on_surface`) fizzle on bare ground — first stage a patch: command palette
+     → **"Stage: paint frost patch"** (survives reset + scrub), then Play the gated cast (§3d).
 4. **Save** writes the `.cast.ron` (+ TOML when its tab is dirty) and hot-reloads.
 5. Headless: `cd crates/arena_editor && cargo test`. Game-side changes: the net-test
    (`pkill -f arena-server; pkill -f arena-client; sleep 1; bash crates/arena_game/tools/net-test/run_session.sh`).
@@ -324,6 +417,15 @@ look, author `assets/vfx/<id>_trail.vfx.ron` (copy `firebolt_trail.vfx.ron`).
   `EveryTick` + `rehit_interval` is a damage field.**
 - **Chaining is beam-only.** `can_chain` on a non-`Beam` skill silently never chains.
 - **Charge scales speed AND damage** (0.5–2.0×). Don't also inflate base damage for "charged" skills.
-- **Chained/emitted/triggered hits are mana-free and full-damage** — budget the totals on one victim.
+- **Chained/emitted/triggered/surface hits are mana-free and full-damage** — a `standing.tick_skill`, a
+  contact `trigger_skill`, and every chained/emitted/triggered hit cost the caster nothing; budget the
+  totals on one victim.
+- **Surface ids must be loaded.** A `paints`/`on_surface` `surface` absent from `config/surfaces/`: the
+  editor's picker only offers loaded ids (you can't select a missing one), but a hand-edited unknown id
+  warns-and-skips the paint at runtime, and an unknown `on_surface` id silently gates the cast (no patch
+  ever matches → it always fizzles). Keep them in `config/surfaces/` (§3d).
+- **`on_skill_contact` tags must be real `SkillTag`s.** The surface loader REJECTS the whole
+  `config/surfaces/` dir on an unknown contact tag (it would otherwise silently never match) — the same
+  fail-loud contract as a dangling skill ref.
 - **Cue lane keys are the slot names** (`on_window_bolt`, `on_end_bolt`, `emit_shard`), and a typo'd
   `effect` name renders nothing with no error — verify names against the `VfxLibrary` in the designer.
