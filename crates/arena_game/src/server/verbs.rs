@@ -86,6 +86,7 @@ pub(crate) fn skill_verbs_on_cue(
     client_map: Res<ClientPlayerMap>,
     spatial: avian3d::prelude::SpatialQuery,
     children: Query<&Children>,
+    players: Query<Entity, With<crate::net::protocol::NetworkedPlayer>>,
     actions: Query<&lightyear::prelude::input::native::ActionState<crate::net::input::ArenaInput>>,
     mut commands: Commands,
 ) {
@@ -172,11 +173,30 @@ pub(crate) fn skill_verbs_on_cue(
         // spire's base sits FLUSH with the ground (the detached-from-its-damage-capsule
         // regression); fall back to stripping the authored window offset if the ray misses.
         //
-        // Parity note: like that poller (which cast from the roll's own position), this keeps the
-        // DEFAULT filter — a player standing on the patch is under the ray and equally hittable.
-        // Obelisk hitboxes carry no colliders (the spire's own damage window can't be hit), and
-        // the floor is the nearest collider straight down in the common case.
+        // The ray wants LEVEL geometry ONLY (floor / settled spire-terrain) — the spire is AIMED
+        // at enemies, so a combatant standing on the fuel patch at cast time is directly under it
+        // and would be the nearest hit, floating the VISUAL spire on the body instead of seating
+        // it on the floor (the damage capsule stays CastPoint-anchored, so only the cosmetic
+        // detaches). So EXCLUDE the caster + its child hurtbox and every skill object (built like
+        // the portal arm's `exclude`), PLUS every combatant body and its hurtbox children (the
+        // material addition over that poller's default filter). With nobody on the patch the floor
+        // is still the first hit — identical to before. (The e2e ground-flush proof — target
+        // standing in the trail area — lands in Task 3's glacier gate.)
         ("frost_spire", "on_window_spike") => {
+            // Exclude the caster + its child hurtbox and every skill object (the portal arm's
+            // set), then ADD every combatant body + its hurtbox children — so the ground ray only
+            // ever hits LEVEL geometry, never a body on the fuel patch.
+            let mut exclude = vec![ev.source];
+            if let Ok(kids) = children.get(ev.source) {
+                exclude.extend(kids.iter());
+            }
+            exclude.extend(objects.iter().map(|(e, _)| e));
+            for player in &players {
+                exclude.push(player);
+                if let Ok(kids) = children.get(player) {
+                    exclude.extend(kids.iter());
+                }
+            }
             // Resolve the ground Y under the cue: cast down from just ABOVE the cue (origin lifted
             // 0.2 so a spire erupting on a step/another spire still finds the surface), converting
             // the hit distance back to a world Y. `None` on a miss → the fallback in the helper.
@@ -186,7 +206,8 @@ pub(crate) fn skill_verbs_on_cue(
                     Dir3::NEG_Y,
                     4.0,
                     true,
-                    &avian3d::prelude::SpatialQueryFilter::default(),
+                    &avian3d::prelude::SpatialQueryFilter::default()
+                        .with_excluded_entities(exclude),
                 )
                 .map(|hit| ev.position.y + 0.2 - hit.distance);
             let anchor = spire_eruption_anchor(ev.position, ground_hit);
