@@ -28,13 +28,18 @@ conditioned on filing these — the coverage gap must not live only in the SDD l
 
 6. Exclude combatants from the spire ground-snap ray (`server/verbs.rs` — a body standing on
    the fuel patch can float the visual spire; damage capsule unaffected).
-7. Cache one `ForwardDecalMaterial` per surface type (`client/surfaces.rs` currently allocates
-   per patch — a frost roll churns ~50 identical materials).
+7. Cache one `ForwardDecalMaterial` per surface type — BOTH copies: the arena's
+   `client/surfaces.rs` AND the editor's `skill/preview/surfaces.rs::attach_patch_visuals`
+   (same per-patch `materials.add` pattern; flagged again by the editor increment's final review).
 8. Decal projection depth (`Y scale 1.0`) vs elevated patches — a torso-hit/air-fuse burning
    patch can out-range the projection box (gameplay unaffected; `SURFACE_Y_TOLERANCE` covers
    standers). Grow the box or ground-snap paint positions.
 9. `python3 -m py_compile crates/arena_game/tools/net-test/summarize.py` on the next
    python3-capable run (edited in lockstep with the jq gate but unexecuted in this shell).
+9b. Editor increment's final-review small items: `StagedPaints` dedup-on-push guard (duplicate
+    palette clicks accumulate identical entries — benign, merge-dedup collapses them);
+    de-fragilize `stage_reset_rezeroes_surface_and_spawn_streams`' geometry-dependent
+    `inside_prev` precondition (bevy_modal_editor tests/skill_preview.rs).
 
 ## Obelisk core (carried from the core's final review)
 
