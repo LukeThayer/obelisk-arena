@@ -15,9 +15,11 @@ conditioned on filing these — the coverage gap must not live only in the SDD l
    plus ≥2 `rolling_glacier` casts. 10/10 repeatable (jq gate; no summarize.py twin — python3-free).
    The **`burning_ground_tick`** coverage (a victim standing in a scorch) was folded into the FIREBOLT
    gate instead (Task 1 — `check_session.sh` assertions (9)/(10)), where the firebolt_explosion already
-   paints `burning` under the target. REMAINING (deliberately deferred): the D9 round-reset clear stays
-   unasserted — rounds only cycle on deaths, and scripting a deterministic kill into the glacier
-   session is a separate escalation (the session DOES incidentally reset once, but the clear is not pinned).
+   paints `burning` under the target. REMAINING (deliberately deferred): the **D9 round-reset clear
+   stays unasserted** — pinning it needs a SCRIPTED KILL (rounds only cycle on deaths), a separate
+   escalation. Deferral reason: the reset code is code-reviewed AND the glacier session crosses a
+   round reset BENIGNLY (it incidentally resets once and surfaces behave through the crossing), so
+   the D9 path is exercised end-to-end even though no assertion pins the clear itself.
    The one real bug of the increment (the spire Y-float) is now pinned e2e by assertion (5).
 
    ~~The gate only casts firebolt, so `Trail` painting, `on_surface` gate/snap/CONSUME, and the spire
@@ -45,11 +47,22 @@ conditioned on filing these — the coverage gap must not live only in the SDD l
 7. Cache one `ForwardDecalMaterial` per surface type — BOTH copies: the arena's
    `client/surfaces.rs` AND the editor's `skill/preview/surfaces.rs::attach_patch_visuals`
    (same per-patch `materials.add` pattern; flagged again by the editor increment's final review).
+   ✅ **ARENA HALF DONE 2026-07-11** (Task 2) — `client/surfaces.rs::attach_surface_visuals` now
+   keys a `Local<HashMap<surface_id, Handle<ForwardDecalMaterial>>>` cache (one material per surface
+   TYPE; the static-registry assumption + the hot-reload-invalidation caveat are commented at the
+   use site). The EDITOR half (`skill/preview/surfaces.rs::attach_patch_visuals`, in
+   `bevy_modal_editor`) is **Task 3** — NOT done here.
 8. Decal projection depth (`Y scale 1.0`) vs elevated patches — a torso-hit/air-fuse burning
    patch can out-range the projection box (gameplay unaffected; `SURFACE_Y_TOLERANCE` covers
    standers). Grow the box or ground-snap paint positions.
+   ✅ **ARENA HALF DONE 2026-07-11** (Task 2) — grew the box: the decal child's Y scale is now
+   `y_span = (pos.y.abs() * 2.0 + 1.0).max(1.0)`, so an elevated patch's ±half-Y box still spans
+   down to the floor (+1 m margin). The EDITOR preview's matching `attach_patch_visuals` grows the
+   same way in **Task 3** — NOT done here.
 9. `python3 -m py_compile crates/arena_game/tools/net-test/summarize.py` on the next
    python3-capable run (edited in lockstep with the jq gate but unexecuted in this shell).
+   **DEFERRED — python3 = CI-only.** This dev shell is python3-free, so the jq `check_*.sh` gates
+   are the local verdict and `summarize.py` gets compiled/run on the next (CI) python3-capable run.
 9b. Editor increment's final-review small items: `StagedPaints` dedup-on-push guard (duplicate
     palette clicks accumulate identical entries — benign, merge-dedup collapses them);
     de-fragilize `stage_reset_rezeroes_surface_and_spawn_streams`' geometry-dependent
@@ -61,5 +74,10 @@ conditioned on filing these — the coverage gap must not live only in the SDD l
     determinism test locks reproducibility, not behavior).
 11. Cross-OBSERVER burst-evict residual (same-tick OnEnd/PaintSurface paints at cap are
     snapshot-blind; the system path is guarded).
+    **DEFERRED** — a real fix needs a shared-tick-scratch design decision (dedup across observers
+    within one tick), not yet made; the system path is already guarded, so this is a latent edge,
+    not a live bug.
 12. `SurfaceRemoveReason` has no wire mapping (Debug-only) — hand-map if a client ever needs
     removal REASONS rather than despawns.
+    **DEFERRED (YAGNI)** — no consumer needs removal REASONS on the wire today; add the hand-map
+    only when one does.

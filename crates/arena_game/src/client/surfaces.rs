@@ -58,6 +58,10 @@ fn attach_surface_visuals(
     registry: Option<Res<SurfaceRegistry>>,
     asset_server: Res<AssetServer>,
     mut decal_materials: ResMut<Assets<ForwardDecalMaterial<StandardMaterial>>>,
+    // Per-surface-type decal material cache (see the attach loop for the static-registry caveat).
+    mut material_cache: Local<
+        std::collections::HashMap<String, Handle<ForwardDecalMaterial<StandardMaterial>>>,
+    >,
     vfx: Option<Res<bevy_vfx::VfxLibrary>>,
     mut commands: Commands,
 ) {
@@ -82,11 +86,14 @@ fn attach_surface_visuals(
             .entity(e)
             .insert((Transform::from_translation(pos.0), Visibility::default()));
 
-        let decal = commands
-            .spawn((
-                Name::new(format!("SurfaceDecal({})", p.surface)),
-                ForwardDecal,
-                MeshMaterial3d(decal_materials.add(ForwardDecalMaterial {
+        // One ForwardDecal material per surface TYPE, not per patch: a surface's registry visuals
+        // are STATIC at runtime, so every patch of a given surface shares one handle. NOTE: a future
+        // hot-reload of the surface TOMLs would mutate a type's visuals and MUST invalidate this
+        // cache (drop the changed surface's entry) — there is no reload path today.
+        let material = material_cache
+            .entry(p.surface.clone())
+            .or_insert_with(|| {
+                decal_materials.add(ForwardDecalMaterial {
                     base: StandardMaterial {
                         base_color: color,
                         base_color_texture: Some(asset_server.load(&texture)),
@@ -97,10 +104,22 @@ fn attach_surface_visuals(
                     extension: ForwardDecalMaterialExt {
                         depth_fade_factor: 1.0,
                     },
-                })),
+                })
+            })
+            .clone();
+
+        // Elevated patches (torso-hit scorch, air fuse) must still project to the floor: the
+        // decal box spans ±half the Y scale around the patch, so grow it to cover |y| + margin.
+        let y_span = (pos.0.y.abs() * 2.0 + 1.0).max(1.0);
+
+        let decal = commands
+            .spawn((
+                Name::new(format!("SurfaceDecal({})", p.surface)),
+                ForwardDecal,
+                MeshMaterial3d(material),
                 // ForwardDecal's unit quad projects within its scaled box: XZ = diameter,
-                // Y = projection depth (enough to catch gentle slopes / spire bases).
-                Transform::from_scale(Vec3::new(p.radius * 2.0, 1.0, p.radius * 2.0)),
+                // Y = `y_span` (reaches the floor even for elevated patches — see above).
+                Transform::from_scale(Vec3::new(p.radius * 2.0, y_span, p.radius * 2.0)),
             ))
             .id();
         commands.entity(e).add_child(decal);
