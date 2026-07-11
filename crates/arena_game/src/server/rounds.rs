@@ -399,6 +399,12 @@ pub(crate) fn run_round_machine(
                 round.needs_round_reset = false;
                 // Spec D9: a new round starts on clean ground — despawn every surface patch
                 // (replication mirrors the despawn to clients; frost fuel + scorches all reset).
+                // Trace the clear (count > 0) so the glacier gate can assert D9 fired e2e — a
+                // mid-session reset actually wiped painted ground (see check_glacier_session.sh (8)).
+                let cleared = surface_patches.iter().count();
+                if cleared > 0 {
+                    trace::event("surfaces_reset_cleared", json!({ "count": cleared }));
+                }
                 for patch in &surface_patches {
                     commands.entity(patch).despawn();
                 }

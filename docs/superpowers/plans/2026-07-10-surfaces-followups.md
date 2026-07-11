@@ -15,12 +15,15 @@ conditioned on filing these — the coverage gap must not live only in the SDD l
    plus ≥2 `rolling_glacier` casts. 10/10 repeatable (jq gate; no summarize.py twin — python3-free).
    The **`burning_ground_tick`** coverage (a victim standing in a scorch) was folded into the FIREBOLT
    gate instead (Task 1 — `check_session.sh` assertions (9)/(10)), where the firebolt_explosion already
-   paints `burning` under the target. REMAINING (deliberately deferred): the **D9 round-reset clear
-   stays unasserted** — pinning it needs a SCRIPTED KILL (rounds only cycle on deaths), a separate
-   escalation. Deferral reason: the reset code is code-reviewed AND the glacier session crosses a
-   round reset BENIGNLY (it incidentally resets once and surfaces behave through the crossing), so
-   the D9 path is exercised end-to-end even though no assertion pins the clear itself.
-   The one real bug of the increment (the spire Y-float) is now pinned e2e by assertion (5).
+   paints `burning` under the target. **D9 round-reset clear** ✅ **DONE 2026-07-11** (closeout Task 2):
+   the glacier session is now LETHAL — the roll marches +X and clips the stationary target for 28×2 (a
+   round-1 kill), which cycles a mid-session round reset. `server/rounds.rs::run_round_machine` now
+   traces `surfaces_reset_cleared{count}` when the reset's patch-clear loop actually wipes patches, and
+   the glacier gate asserts it (`check_glacier_session.sh` (8): ≥1) alongside the chain-damage guard
+   ((7): ≥1 `server_net_damage_resolved` caster→target). The 1:1 roll:spire rotation was retuned 3:1
+   (roll-heavy) so a two-hit kill reliably lands in round 1's clear-lane window before a frost_spire's
+   own spire walls off the lane — verified damage≥2 & reset_clears≥1 across runs; glacier gate PASS ×2.
+   The one real bug of the increment (the spire Y-float) is pinned e2e by assertion (5).
 
    ~~The gate only casts firebolt, so `Trail` painting, `on_surface` gate/snap/CONSUME, and the spire
    eruption have no automated runtime coverage — the one real bug of the increment (the spire Y-float)
@@ -80,9 +83,12 @@ conditioned on filing these — the coverage gap must not live only in the SDD l
     obelisk-bevy `1dc2a12`.
 11. Cross-OBSERVER burst-evict residual (same-tick OnEnd/PaintSurface paints at cap are
     snapshot-blind; the system path is guarded).
-    **DEFERRED** — a real fix needs a shared-tick-scratch design decision (dedup across observers
-    within one tick), not yet made; the system path is already guarded, so this is a latent edge,
-    not a live bug.
+    ✅ **DONE 2026-07-11** (closeout Task 2 bump) — obelisk-bevy `e2b2ffcd` (the tick-scratch rev)
+    lands the shared per-tick paint scratch — the dedup-across-observers-within-one-tick design
+    decision #11 was waiting on — so the same-tick OnEnd/PaintSurface-at-cap eviction is resolved at
+    the obelisk source rather than only guarded arena-side. Pulled into arena via
+    `cargo update -p obelisk-bevy` (`cd860e2` → `e2b2ffcd`, additive: `cargo test -p arena_game`
+    green + both net-test gates PASS — firebolt + glacier).
 12. `SurfaceRemoveReason` has no wire mapping (Debug-only) — hand-map if a client ever needs
     removal REASONS rather than despawns.
     **DEFERRED (YAGNI)** — no consumer needs removal REASONS on the wire today; add the hand-map

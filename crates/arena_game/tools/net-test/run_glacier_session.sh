@@ -3,11 +3,12 @@
 #
 # A second scripted session (sibling to run_session.sh's firebolt gate) that exercises the
 # obelisk SURFACES pipeline end-to-end over the wire: paint -> gate -> consume -> ground-flush
-# erupt. It equips `potted_spring` on BOTH observers and scripts observer-0 to ALTERNATE
-# `rolling_glacier` (a ballistic lob that lands and ROLLS, painting a `frost` Trail) and
-# `frost_spire` (a GroundPoint cast whose `on_surface: frost` acquisition gate must land on a
-# trail patch — snapping to + CONSUMING it — then erupting a ground-flush spire). The gate is
-# check_glacier_session.sh (jq); this script only PRODUCES the session dir.
+# erupt. It equips `potted_spring` on BOTH observers and scripts observer-0 to rotate 3:1 (roll-heavy)
+# `rolling_glacier` (a ballistic lob that lands and ROLLS, painting a `frost` Trail — AND clips the
+# stationary target for a kill) and `frost_spire` (a GroundPoint cast whose `on_surface: frost`
+# acquisition gate must land on a trail patch — snapping to + CONSUMING it — then erupting a
+# ground-flush spire). The gate is check_glacier_session.sh (jq); this script only PRODUCES the
+# session dir.
 #
 # What check_glacier_session.sh then asserts over the merged per-process JSONL:
 #   - the roll painted the frost trail server-side (surface_painted{frost}) AND it replicated to
@@ -16,7 +17,9 @@
 #     matched a trail patch), which CONSUMED its fuel (surface_removed{frost, reason:Consumed});
 #   - the spire erupted GROUND-FLUSH (spire_erupted anchor |y| <= 0.25 — the Task-4 float-above-
 #     the-floor regression's e2e pin);
-#   - the chain ran (>= 2 rolling_glacier casts).
+#   - the chain ran (>= 2 rolling_glacier casts);
+#   - the chain DAMAGED the target (>= 1 server_net_damage_resolved — the roll reached the target);
+#   - a mid-session round reset CLEARED the frost (>= 1 surfaces_reset_cleared — D9, a death occurred).
 #
 # GEOMETRY (why the default params close the chain — arena_flat, floor top Y=0):
 #   - caster (observer-0, slot 0) stands at (-4, 0.59, 0) facing +X (ARENA_CAM_YAW=-pi/2); eye at
@@ -35,15 +38,23 @@
 #
 # PULSE TIMING (why the default DURATION is 24, not 14 — tuned against real runs): autocast pulses
 # the rotation every ARENA_AUTOCAST_PERIOD (1.2s), but the tap->cast edge DROPS ~50% of the time
-# around the lobby->match transition + 3s countdown + mid-cast windows (sub-tick input jitter). With
-# the alternation even-pulse=rolling_glacier / odd-pulse=frost_spire, the trail is only laid once the
-# first rolling_glacier edge SURVIVES (~+6 s), and only the FEW frost_spire pulses AFTER that can hit
-# it. At duration 14 those were just p5/p7/p9 — a run that dropped all three accepted zero spires and
-# FAILED (~50% flake). At 24 s the session spans a round reset (the roll clips the stationary target
-# for a kill ~once) into a SECOND round of cycles, so several more frost_spire-after-trail pulses fire
-# — 10/10 tuning runs accepted 3 spires (consumed 3, all ground-flush). The frost trail persists
-# 180 s, so every later frost_spire that lands on it succeeds regardless of the drops. Tune the
-# SESSION (period/duration), NEVER the assertions.
+# around the lobby->match transition + 3s countdown + mid-cast windows (sub-tick input jitter). The
+# trail is only laid once the first rolling_glacier edge SURVIVES (~+3 s into the round), and only the
+# frost_spire pulses AFTER that can hit it. At 24 s the session spans a round reset (see DAMAGE below)
+# into a SECOND round of cycles, so several frost_spire-after-trail pulses fire — tuning runs accept
+# 2-3 spires (consumed, all ground-flush). The frost trail persists 180 s, so every later frost_spire
+# that lands on it succeeds regardless of the drops. Tune the SESSION (period/duration), NEVER the
+# assertions.
+#
+# DAMAGE + D9 (why the rotation is 3:1 roll:spire, and why the gate now asserts damage + reset-clears):
+# the roll marches +X the whole lane (frost painted from x~-1.6 out past +43) and clips the STATIONARY
+# target at (+4,·,0) for 28 cold — two hits kill (target 50 hp) -> EntityDied -> a round reset that
+# CLEARS the frost trail (D9, trace surfaces_reset_cleared). BUT a frost_spire lands its spire ON the
+# roll's z-line (~x -1, z 0.32); settle_spires freezes it Static and every later roll bursts on it ~1 m
+# out, so damage only lands in round 1's CLEAR-LANE window BEFORE the first spire. The old 1:1
+# alternation fit only ~2 rolls there, and a single dropped cast starved the two-hit kill (and two drops
+# -> the zero-damage session the closeout investigated). The 3:1 ratio fits enough clear-window rolls to
+# reliably land two -> a round-1 kill -> the D9 reset — verified damage>=2 & reset_clears>=1 across runs.
 #
 # NO summarize.py twin: this shell has no python3 (see the arena net-test memory) and, more to the
 # point, summarize.py encodes the FIREBOLT contract — running it here would assert the wrong gate.
@@ -134,7 +145,13 @@ trap cleanup EXIT INT TERM
     #   slot 0, frost_spire slot 1). Lobby-gated server-side; ARENA_AUTOEQUIP also PACES the host's
     #   ARENA_AUTOSTART (the host holds its start until its own equip round-trips), so it is set on
     #   BOTH observers (whichever the server elected host must pace its own equip).
-    # ARENA_AUTOCAST_SKILL rotates one entry per pulse: rolling_glacier, then frost_spire, then …
+    # ARENA_AUTOCAST_SKILL rotates one entry per pulse: THREE rolling_glacier, then frost_spire, then …
+    #   The 3:1 roll:spire ratio is the DAMAGE-RELIABILITY lever (see the DAMAGE + D9 note below): a
+    #   frost_spire lands its spire ON the roll's z-line (~x -1, z 0.32) and settle_spires freezes it
+    #   into Static terrain that later rolls burst on ~1 m out — so damage only lands in round 1's
+    #   CLEAR-LANE window before the first spire. A kill needs two 28-dmg roll hits (target 50 hp);
+    #   3 rolls per spire fits enough clear-window rolls to reliably land two (a 1:1 alternation fit
+    #   only ~2 and a single dropped cast starved the kill — the zero-damage flake this gate now pins).
     # ARENA_AUTOCAST_PERIOD 1.2: slow enough that a roll lays trail before the next spire pulse.
     # ARENA_TEST_PITCH -0.35: autocast stamps yaw+pitch onto the input stream itself, so the caster
     #   aims correctly WITHOUT ARENA_AUTOMOVE — and a STATIONARY caster keeps the trail (and the
@@ -143,7 +160,7 @@ trap cleanup EXIT INT TERM
     # ARENA_AUTOSTART_LEVEL (BOTH observers): the elected host requests arena_flat once both players
     #   stand in the lobby (AND its own equip has round-tripped); the non-host's hook no-ops.
     ARENA_HEADLESS=1 ARENA_CLIENT_ID=1 ARENA_AUTOCAST=1 ARENA_AUTOCAST_PERIOD=1.2 \
-    ARENA_AUTOCAST_SKILL="rolling_glacier,frost_spire" \
+    ARENA_AUTOCAST_SKILL="rolling_glacier,rolling_glacier,rolling_glacier,frost_spire" \
     ARENA_AUTOEQUIP=potted_spring \
     ARENA_AUTOSTART_LEVEL=arena_flat \
     ARENA_CAM_YAW="-1.5707963" ARENA_TEST_PITCH="-0.35" \

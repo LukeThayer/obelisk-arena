@@ -8,6 +8,10 @@
 #   (4) the accepted cast CONSUMED its fuel patch.
 #   (5) the spire erupted GROUND-FLUSH (anchor |y| <= 0.25 — the Task-4 float regression's e2e pin).
 #   (6) the glacier chain ran (>= 2 rolling_glacier casts).
+#   (7) the chain actually DAMAGED the target (>= 1 server_net_damage_resolved caster->target — guards
+#       against a silently pacifist session: the roll must reach the stationary target, not just paint).
+#   (8) D9: a mid-session round reset CLEARED painted ground (>= 1 surfaces_reset_cleared) — proof that
+#       a death happened and the reset wiped the frost (see server/rounds.rs::run_round_machine).
 #
 # This jq script IS the contract: there is NO summarize.py twin for the glacier gate (this shell is
 # python3-free, and summarize.py encodes the firebolt contract). Keep the assertions; tune only the
@@ -51,7 +55,13 @@ ok=$(jq -s '[.[] | select(.kind=="spire_erupted")] | length' "$server")
 # (6) the glacier chain's trigger causality fired (roll damage or burst — proves the chain ran).
 n=$(jq -s --arg c "$caster" '[.[] | select(.kind=="server_net_cast_began" and .skill_id=="rolling_glacier" and .caster==$c)] | length' "$server")
 [[ "$n" -ge 2 ]] || note "fewer than 2 rolling_glacier casts"
+# (7) the glacier chain actually damages the target (guards against a silently pacifist session).
+damage=$(jq -s --arg c "$caster" --arg t "$target" '[.[] | select(.kind=="server_net_damage_resolved" and .caster==$c and .target==$t)] | length' "$server")
+[[ "$damage" -ge 1 ]] || note "the glacier chain dealt no damage (session regressed to pacifist)"
+# (8) D9: a mid-session round reset cleared the painted ground.
+reset_clears=$(jq -s '[.[] | select(.kind=="surfaces_reset_cleared")] | length' "$server")
+[[ "$reset_clears" -ge 1 ]] || note "no round reset cleared surfaces (D9 unproven — did anyone die?)"
 
-echo "caster=$caster target=$target frost_paints=$paints spire_accepted=$accepted consumed=$consumed spires=$ok off_ground=$bad"
+echo "caster=$caster target=$target frost_paints=$paints spire_accepted=$accepted consumed=$consumed spires=$ok off_ground=$bad damage=$damage reset_clears=$reset_clears"
 if [[ "$fail" -ne 0 ]]; then echo FAIL; exit 1; fi
 echo PASS
