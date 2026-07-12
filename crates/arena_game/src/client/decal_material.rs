@@ -20,6 +20,10 @@
 //!
 //! Registered `MaterialPlugin::<DepthTestedDecalMaterial>` in `client/app_windowed.rs` (windowed-only,
 //! exactly like the stock guarded decal plugin add); `client/surfaces.rs` builds the decal on it.
+//!
+//! TWIN: `bevy_modal_editor/src/skill/preview/decal_material.rs` is the editor preview's
+//! byte-identical copy (against its bevy 0.18.0 — decal source byte-identical to 0.18.1). Any
+//! change here (or any bevy bump that touches `decal/forward.rs`) must be re-mirrored there.
 
 use bevy::pbr::decal::ForwardDecalMaterialExtUniform;
 use bevy::pbr::{
