@@ -23,12 +23,14 @@ use crate::net::{default_server_addr, ProtocolPlugin, NETCODE_KEY, PROTOCOL_ID, 
 use crate::trace;
 
 /// Replication send rate (Hz). The per-client `ReplicationSender` flushes component updates at this
-/// cadence. 30 Hz (33 ms): nothing is interpolated any more (both players are PREDICTED — design
-/// WS1), so this no longer sets a visual delay; it sets (a) how fast a mispredict is detected +
-/// rolled back and (b) the staleness bound on the `NetworkedHealth`/`NetworkedCastState`/
-/// `PlayerCustomization` mirrors. Bandwidth at 2 players is trivial. (lightyear's own examples use
-/// 100 ms — a demo-bandwidth default, not a feel choice.)
-const REPLICATION_SEND_HZ: u32 = 30;
+/// cadence. 30 Hz (33 ms): PLAYERS are not interpolated (both are PREDICTED — design WS1), so this no
+/// longer sets a visual delay for them; it sets (a) how fast a mispredict is detected + rolled back
+/// and (b) the staleness bound on the `NetworkedHealth`/`NetworkedCastState`/`PlayerCustomization`
+/// mirrors. Bandwidth at 2 players is trivial. (lightyear's own examples use 100 ms — a demo-bandwidth
+/// default, not a feel choice.) Skill-object VISUALS *do* interpolate — `client/skill_objects.rs`
+/// renders replicated skill objects `1.5 × 1/REPLICATION_SEND_HZ` (~50 ms) behind the newest state,
+/// so it reads this to size its render delay (hence `pub` — value unchanged).
+pub const REPLICATION_SEND_HZ: u32 = 30;
 
 /// Plugin: server-side lightyear net stack — `ServerPlugins` + `ProtocolPlugin` + trace, spawns the
 /// netcode server entity bound to `ServerBind`, and attaches a `ReplicationSender` per client link.
