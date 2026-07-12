@@ -88,13 +88,22 @@ struct SkillObjectVisualsAttached;
 #[derive(Component)]
 struct SkillObjectVisual;
 
-/// How many replicated pose samples to keep per skill object. With [`SkillObjectInterp::push`]'s
-/// value-dedup each retained sample is a REAL value change — the ball's raw `Changed<Position>` stream
-/// is 60 Hz (avian solver writeback, see [`buffer_skill_object_poses`]) but dedups down to the ~30 Hz
-/// snapshot cadence — so with value-dedup ≈4 snapshots ≈ 100 ms of history, comfortably deeper than the
-/// [`INTERP_DELAY_SECS`] (~50 ms) render lag: the delayed render time is always bracketed by two real
-/// samples. (Without the dedup the 60 Hz flood collapsed the same 4-cap window to ~67 ms.)
-const POSE_BUFFER_CAP: usize = 4;
+/// How many replicated pose samples to keep per skill object. The buffer must span COMFORTABLY MORE
+/// than the [`INTERP_DELAY_SECS`] (~50 ms) render lag, so that `render_at = now − 50ms` lands in the
+/// MIDDLE of the history (bracketed by two real samples) and we interpolate — not at the oldest edge,
+/// which degrades to a jittery clamp-to-oldest (the raw/steppy look; the `interp-inert` investigation).
+///
+/// MEASURED (windowed client, rolling ball, the `interp-inert` probe): after [`SkillObjectInterp::push`]'s
+/// value-dedup the RETAINED stream is ~40 Hz of distinct values — NOT the 30 Hz snapshot cadence an
+/// earlier version of this comment assumed. avian re-marks the ball's Kinematic-mirror `Position`
+/// `Changed` at 60 Hz (`buffer_skill_object_poses`), and the dedup rejects only the ~20 Hz that are
+/// EXACT re-marks; the other ~40 Hz are real replication + sub-snapshot solver/depenetration jitter,
+/// each above the 0.1 mm dedup epsilon and so un-rejectable. At ~40 Hz a 4-cap window spanned only
+/// ~64 ms ≈ the render lag, pinning the render time to the oldest sample (clamp 1-in-6 frames). Cap 8
+/// spans ~130–175 ms — render_at sits ~80 ms above the oldest sample, solidly mid-buffer. (Deepening
+/// the buffer adds NO latency: the render point is always 50 ms behind newest; the extra samples are
+/// older history the render point never reaches unless the stream stalls.)
+const POSE_BUFFER_CAP: usize = 8;
 
 /// Snapshot-interpolation state for one skill object, on the REPLICATED ROOT (despawns with it; the
 /// mesh child despawns recursively with the root). Holds the mesh child it drives + the recent pose
@@ -126,9 +135,10 @@ impl SkillObjectInterp {
     /// Append the newest sample, dropping the oldest once the cap is hit. VALUE-DEDUPED: a sample whose
     /// `(pos, rot)` is within epsilon of the last buffered one is DROPPED (the timestamp is NOT
     /// refreshed) — avian's `writeback_solver_bodies` re-marks the ball's Kinematic mirror `Position` as
-    /// `Changed` every 60 Hz tick even when the VALUE only advances on a 30 Hz snapshot, so an un-deduped
-    /// buffer floods with duplicates and the 4-cap window collapses to ~67 ms. Deduping keeps one sample
-    /// per real value change, restoring the ~100 ms designed depth ([`POSE_BUFFER_CAP`]).
+    /// `Changed` every 60 Hz tick, so an un-deduped buffer floods with EXACT-duplicate re-marks. Deduping
+    /// keeps one sample per real value change — but the retained stream is still ~40 Hz (real replication
+    /// + sub-snapshot solver jitter above the epsilon), NOT the 30 Hz an earlier design assumed, so the
+    /// dedup alone is not enough to reach the render depth: [`POSE_BUFFER_CAP`] carries that.
     fn push(&mut self, recv: f32, pos: Vec3, rot: Quat) {
         if let Some(last) = self.samples.last() {
             if pos.distance_squared(last.pos) < POSE_DEDUP_DIST_SQ
@@ -631,8 +641,10 @@ mod tests {
     #[test]
     fn push_evicts_oldest_past_cap_and_dedups_by_value() {
         let mut interp = SkillObjectInterp::new(Entity::PLACEHOLDER);
-        // Five DISTINCT positions → cap-4: oldest dropped, newest kept, order preserved.
-        for i in 0..5 {
+        // (CAP + 1) DISTINCT positions (x = 0..=CAP) → capped: oldest dropped, newest kept, order
+        // preserved. Cap-relative so it pins the eviction behaviour at whatever POSE_BUFFER_CAP is.
+        let last_x = POSE_BUFFER_CAP as f32;
+        for i in 0..=POSE_BUFFER_CAP {
             interp.push(i as f32, Vec3::new(i as f32, 0.0, 0.0), Quat::IDENTITY);
         }
         assert_eq!(interp.samples.len(), POSE_BUFFER_CAP, "cap not enforced");
@@ -643,13 +655,13 @@ mod tests {
         );
         assert_eq!(
             interp.samples.last().unwrap().pos,
-            Vec3::new(4.0, 0.0, 0.0),
+            Vec3::new(last_x, 0.0, 0.0),
             "newest not kept"
         );
 
         // Value-dedup: re-pushing the SAME value (an avian solver-writeback re-mark) does NOT grow the
         // buffer and does NOT re-timestamp the last sample.
-        interp.push(99.0, Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY);
+        interp.push(99.0, Vec3::new(last_x, 0.0, 0.0), Quat::IDENTITY);
         assert_eq!(
             interp.samples.len(),
             POSE_BUFFER_CAP,
@@ -657,23 +669,24 @@ mod tests {
         );
         assert_eq!(
             interp.samples.last().unwrap().recv,
-            4.0,
+            last_x,
             "duplicate push re-timestamped the last sample"
         );
 
         // A MOVED sample IS accepted (evicting the oldest to stay at cap).
-        interp.push(100.0, Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY);
+        let moved_x = last_x + 1.0;
+        interp.push(100.0, Vec3::new(moved_x, 0.0, 0.0), Quat::IDENTITY);
         assert_eq!(interp.samples.len(), POSE_BUFFER_CAP);
         assert_eq!(
             interp.samples.last().unwrap().pos,
-            Vec3::new(5.0, 0.0, 0.0),
+            Vec3::new(moved_x, 0.0, 0.0),
             "moved sample not appended"
         );
 
         // The dedup is an AND: a ROTATION-ONLY change (position identical) must still record —
         // a ball spinning in place keeps its rotation history.
         let spun = Quat::from_rotation_y(0.5);
-        interp.push(101.0, Vec3::new(5.0, 0.0, 0.0), spun);
+        interp.push(101.0, Vec3::new(moved_x, 0.0, 0.0), spun);
         assert_eq!(
             interp.samples.last().unwrap().recv,
             101.0,
