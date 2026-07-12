@@ -18,6 +18,16 @@
 #       death cycle, not just match start.
 #  (10) the rolling boulder actually spawned (>= 2 skill_object_spawned{glacier_ball} — the roll's
 #       visible physical companion; server/verbs.rs spawns one per roll window in lockstep with it).
+#  (11) the client mirror was never DRIVEN subfloor by replicated velocity (ZERO client_ball_subfloor on
+#       either observer). The mirror is RigidBody::Kinematic and avian integrates any replicated
+#       LinearVelocity into Position with no client gravity/contacts to oppose it, so a settling residual
+#       sank the ball under the floor ("sinks then pops"). The witness (client/net.rs) fires only when a
+#       live glacier ball is subfloor (y<0.25) AND still CARRYING velocity (|LinearVelocity|>0.05) — the
+#       integration signature. Post-fix the ball replicates POSE ONLY (velocity per-entity excluded,
+#       server/verbs.rs), so the mirror carries ~0 velocity and follows Position alone -> zero. (The
+#       velocity gate is required: arena_flat's floor is ±20 but the roll marches past +43, so the ball
+#       legitimately rolls off the edge and falls deep subfloor ON THE SERVER; the faithful pose-only
+#       mirror reflects that authoritative position with ~0 velocity, and the gate correctly ignores it.)
 #
 # This jq script IS the contract: there is NO summarize.py twin for the glacier gate (this shell is
 # python3-free, and summarize.py encodes the firebolt contract). Keep the assertions; tune only the
@@ -73,7 +83,10 @@ deaths=$(jq -s '[.[] | select(.kind=="server_net_entity_died")] | length' "$serv
 # (10) the rolling boulder spawned (>= 2 glacier_ball skill objects — the roll's visible companion).
 balls=$(jq -s '[.[] | select(.kind=="skill_object_spawned" and .object_kind=="glacier_ball")] | length' "$server")
 [[ "$balls" -ge 2 ]] || note "no rolling boulder spawned (glacier_ball skill objects missing)"
+# (11) the replicated ball NEVER sank subfloor — ZERO client_ball_subfloor across BOTH observers.
+subfloor=$(jq -s '[.[] | select(.kind=="client_ball_subfloor")] | length' "$obs0" "$obs1")
+[[ "$subfloor" -eq 0 ]] || note "replicated ball sank subfloor (kinematic mirror integrating velocity?)"
 
-echo "caster=$caster target=$target frost_paints=$paints spire_accepted=$accepted consumed=$consumed spires=$ok off_ground=$bad damage=$damage reset_clears=$reset_clears deaths=$deaths balls=$balls"
+echo "caster=$caster target=$target frost_paints=$paints spire_accepted=$accepted consumed=$consumed spires=$ok off_ground=$bad damage=$damage reset_clears=$reset_clears deaths=$deaths balls=$balls subfloor=$subfloor"
 if [[ "$fail" -ne 0 ]]; then echo FAIL; exit 1; fi
 echo PASS

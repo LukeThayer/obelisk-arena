@@ -15,8 +15,9 @@
 //!
 //! Everything spawned here is a [`super::skill_objects`] object (limits/lifetime/replication).
 
-use avian3d::prelude::{Collider, Position, RigidBody};
+use avian3d::prelude::{AngularVelocity, Collider, LinearVelocity, Position, RigidBody};
 use bevy::prelude::*;
+use lightyear::prelude::ComponentReplicationOverrides;
 use obelisk_bevy::events::{CueEvent, CueKind, HitboxWorldHit};
 use obelisk_bevy::prelude::charge_mult;
 use obelisk_bevy::spatial::Hitbox;
@@ -322,9 +323,22 @@ pub(crate) fn skill_verbs_on_cue(
                 Some(GLACIER_BALL_LIFETIME),
                 Some((RigidBody::Dynamic, Collider::sphere(GLACIER_BALL_RADIUS))),
             );
-            commands
-                .entity(ball)
-                .insert(ball_physics_bundle(launch, flight_hitbox));
+            commands.entity(ball).insert((
+                ball_physics_bundle(launch, flight_hitbox),
+                // POSE-ONLY replication (THE SINK FIX): the ball's avian Position/Rotation ride the
+                // wire, but its LinearVelocity/AngularVelocity are per-entity EXCLUDED here. The client
+                // mirror is a `RigidBody::Kinematic` copy (glacier_ball.rs::client_ball_mirror_bundle),
+                // and avian INTEGRATES a kinematic body's LinearVelocity into Position every tick with
+                // NO client gravity/contacts to oppose it — so the rolling ball's velocity replicated
+                // straight into the mirror, driving it under the floor between 30Hz Position snapshots
+                // ("sinks over 3-4s then pops"). Disabling velocity replication for THIS entity ONLY
+                // (players keep it — their prediction depends on it) makes the mirror follow the
+                // replicated Position alone. lightyear's per-entity override
+                // (`ComponentReplicationOverrides<C>::disable_all()` — the same mechanism lightyear uses
+                // internally to keep `Controlled` off the wire); portals/spires are untouched.
+                ComponentReplicationOverrides::<LinearVelocity>::default().disable_all(),
+                ComponentReplicationOverrides::<AngularVelocity>::default().disable_all(),
+            ));
             // Back-link the flight hitbox to its ball (mirrors the `PinnedBall` forward-link in the
             // bundle) so `end_orphaned_glacier_hitboxes` can gracefully burst this window if the
             // ball is evicted mid-flight before it ever lands.

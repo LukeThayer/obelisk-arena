@@ -130,8 +130,19 @@ pub(crate) fn ball_physics_bundle(launch: Vec3, flight_hitbox: Entity) -> impl B
 
 /// The client's LOCAL mirror of the ball: a `RigidBody::Kinematic` sphere with the IDENTICAL
 /// collider + layers, so predicted Dynamic players physically collide with it (the shove doesn't
-/// rubber-band). Driven by the replicated `Position` (AvianReplicationMode::Position). Gameplay
-/// parity — attached on EVERY client (headless included), unlike the windowed-only visuals.
+/// rubber-band). Driven SOLELY by the replicated `Position` (AvianReplicationMode::Position) —
+/// velocity is deliberately NOT on the wire (per-entity excluded at the ball's spawn site,
+/// `server/verbs.rs`: a Kinematic body integrates any replicated `LinearVelocity` and sinks under
+/// the floor — the "sinks then pops" bug).
+///
+/// SHOVE PARITY (the accepted approximation): with no replicated velocity, this mirror's contact
+/// solver rests on POSITION-STEPPED KINEMATIC DEPENETRATION alone — it carries no ball momentum into
+/// the contact, so it only pushes a predicted player OUT of overlap, not along the ball's travel.
+/// That is deliberate and correct: the shove's authoritative outcome is the SERVER's Dynamic-body
+/// collision, which reaches the predicted player as a rollback/correction (momentum included); the
+/// local mirror's whole job is to stop the player clipping THROUGH the ball between corrections, and
+/// position-stepped depenetration does exactly that. Gameplay parity — attached on EVERY client
+/// (headless included), unlike the windowed-only visuals.
 pub(crate) fn client_ball_mirror_bundle() -> impl Bundle {
     (
         RigidBody::Kinematic,

@@ -187,6 +187,10 @@ impl Plugin for ClientNetPlayerPlugin {
                     // in the windowed-only visuals plugin) precisely so the headless observer gets
                     // the collider too — gameplay parity, not a visual.
                     attach_glacier_ball_collider,
+                    // The sink-bug WITNESS (headless too): trace whenever a live glacier-ball mirror
+                    // dips subfloor. ZERO such events is gate assertion (11) — the ball must replicate
+                    // pose ONLY (velocity is per-entity excluded server-side; see server/verbs.rs).
+                    trace_ball_subfloor,
                     trace_remote_input_once,
                     send_customization,
                     trace_customize_updates,
@@ -219,6 +223,52 @@ fn attach_glacier_ball_collider(
             GlacierBallMirror,
             crate::server::glacier_ball::client_ball_mirror_bundle(),
         ));
+    }
+}
+
+/// The sink-bug WITNESS (design: this fix's RED→GREEN gate). The client mirror is a `RigidBody::Kinematic`
+/// copy, and avian INTEGRATES a kinematic body's `LinearVelocity` into `Position` every tick with no
+/// client gravity/contacts to oppose it — so a replicated settling residual (vy≈−0.167) DROVE the mirror
+/// ~0.17 m/s subfloor between 30Hz Position snapshots ("sinks over 3-4s then pops"). Fire
+/// `client_ball_subfloor` when a live glacier-ball mirror is subfloor (avian `Position.y < 0.25`; on
+/// `arena_flat` the floor top is y=0 and a resting ball's center sits at [`GLACIER_BALL_RADIUS`] = 0.32)
+/// AND is CARRYING velocity (`|LinearVelocity| > VEL_EPS`) — i.e. the mirror is being DRIVEN under the
+/// floor by the very velocity the bug replicated. Post-fix, velocity is per-entity excluded from the
+/// ball's replication (`server/verbs.rs`), so the Kinematic mirror's `LinearVelocity` stays ~0 and it
+/// follows the replicated `Position` alone — it can no longer be driven subfloor.
+///
+/// The velocity gate is load-bearing, NOT decoration: `arena_flat`'s floor is only ±20 but the roll
+/// marches "past +43", so the ball genuinely ROLLS OFF THE EDGE and falls deep subfloor ON THE SERVER;
+/// the faithful post-fix mirror (velocity ~0) correctly reflects that authoritative position. Gating on
+/// velocity excludes those legit roll-off frames (a pose-only mirror carries no velocity) while still
+/// catching every integration frame (a sinking mirror is carrying the residual it integrates). Throttled
+/// once per ball per second. `check_glacier_session.sh` asserts ZERO events (assertion 11). Runs on EVERY
+/// client, headless observers included.
+fn trace_ball_subfloor(
+    time: Res<Time>,
+    balls: Query<(Entity, &Position, Option<&LinearVelocity>, &NetworkedSkillObject)>,
+    mut last_emit: Local<std::collections::HashMap<Entity, f32>>,
+) {
+    /// Below this the mirror carries no meaningful velocity — a pose-only faithful mirror (post-fix,
+    /// incl. a legitimately-subfloor ball that rolled off the edge). The integration residual is ≈0.167.
+    const VEL_EPS: f32 = 0.05;
+    let now = time.elapsed_secs();
+    for (e, pos, vel, obj) in &balls {
+        if obj.kind != crate::server::skill_objects::KIND_GLACIER_BALL {
+            continue;
+        }
+        let vlen = vel.map(|v| v.0.length()).unwrap_or(0.0);
+        if pos.0.y < 0.25 && vlen > VEL_EPS {
+            // Throttle: once per ball per second (the sink is a multi-tick drift, not a one-off).
+            let last = last_emit.get(&e).copied().unwrap_or(f32::NEG_INFINITY);
+            if now - last >= 1.0 {
+                last_emit.insert(e, now);
+                crate::trace::event(
+                    "client_ball_subfloor",
+                    serde_json::json!({ "y": pos.0.y, "vlen": vlen }),
+                );
+            }
+        }
     }
 }
 
