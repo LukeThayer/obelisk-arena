@@ -88,9 +88,12 @@ struct SkillObjectVisualsAttached;
 #[derive(Component)]
 struct SkillObjectVisual;
 
-/// How many replicated pose samples to keep per skill object. At the 30 Hz send cadence 4 samples
-/// span ~100 ms of history — comfortably deeper than the [`INTERP_DELAY_SECS`] (~50 ms) render lag,
-/// so the delayed render time is always bracketed by two real samples.
+/// How many replicated pose samples to keep per skill object. With [`SkillObjectInterp::push`]'s
+/// value-dedup each retained sample is a REAL value change — the ball's raw `Changed<Position>` stream
+/// is 60 Hz (avian solver writeback, see [`buffer_skill_object_poses`]) but dedups down to the ~30 Hz
+/// snapshot cadence — so with value-dedup ≈4 snapshots ≈ 100 ms of history, comfortably deeper than the
+/// [`INTERP_DELAY_SECS`] (~50 ms) render lag: the delayed render time is always bracketed by two real
+/// samples. (Without the dedup the 60 Hz flood collapsed the same 4-cap window to ~67 ms.)
 const POSE_BUFFER_CAP: usize = 4;
 
 /// Snapshot-interpolation state for one skill object, on the REPLICATED ROOT (despawns with it; the
@@ -104,6 +107,14 @@ struct SkillObjectInterp {
     samples: Vec<PoseSample>,
 }
 
+/// Squared-distance epsilon (m²) below which a new sample's position counts as UNCHANGED from the last
+/// buffered one. (1e-4 m)² — three orders under a real snapshot's motion (~23 cm/snapshot for a rolling
+/// ball), so only avian's solver-writeback re-marks (which advance `Position` by ~0) are rejected.
+const POSE_DEDUP_DIST_SQ: f32 = 1e-8;
+/// Angle epsilon (radians) below which a new sample's rotation counts as UNCHANGED — the rotational twin
+/// of [`POSE_DEDUP_DIST_SQ`] (~0.006°, far under any real per-snapshot spin).
+const POSE_DEDUP_ANGLE: f32 = 1e-4;
+
 impl SkillObjectInterp {
     fn new(visual: Entity) -> Self {
         Self {
@@ -112,8 +123,20 @@ impl SkillObjectInterp {
         }
     }
 
-    /// Append the newest sample, dropping the oldest once the cap is hit.
+    /// Append the newest sample, dropping the oldest once the cap is hit. VALUE-DEDUPED: a sample whose
+    /// `(pos, rot)` is within epsilon of the last buffered one is DROPPED (the timestamp is NOT
+    /// refreshed) — avian's `writeback_solver_bodies` re-marks the ball's Kinematic mirror `Position` as
+    /// `Changed` every 60 Hz tick even when the VALUE only advances on a 30 Hz snapshot, so an un-deduped
+    /// buffer floods with duplicates and the 4-cap window collapses to ~67 ms. Deduping keeps one sample
+    /// per real value change, restoring the ~100 ms designed depth ([`POSE_BUFFER_CAP`]).
     fn push(&mut self, recv: f32, pos: Vec3, rot: Quat) {
+        if let Some(last) = self.samples.last() {
+            if pos.distance_squared(last.pos) < POSE_DEDUP_DIST_SQ
+                && rot.angle_between(last.rot) < POSE_DEDUP_ANGLE
+            {
+                return; // unchanged value (a solver-writeback re-mark) — don't flood the buffer
+            }
+        }
         if self.samples.len() == POSE_BUFFER_CAP {
             self.samples.remove(0);
         }
@@ -423,11 +446,15 @@ fn mirror_skill_object_pose(
 }
 
 /// Record each newly-replicated skill-object pose (with its receive time) into the interp buffer.
-/// `Changed<Position>` fires when a replication snapshot lands — and ONLY then: the ball's velocity is
-/// per-entity excluded (`server/verbs.rs`) so its Kinematic mirror carries no `LinearVelocity` for
-/// avian to integrate, and the spire has no client body at all, so nothing re-marks `Position` between
-/// snapshots. One sample per 30 Hz snapshot at its true arrival time — exactly the history snapshot
-/// interpolation needs. Only ball/spire roots carry a `SkillObjectInterp` (portals/unknowns don't).
+/// `Changed<Position>` LOOKS like it fires once per 30 Hz snapshot — but it DOESN'T for the glacier
+/// ball. avian's `writeback_solver_bodies` (SolverSystems::Finalize, every fixed tick) does
+/// `pos.0 += delta` / `*rot = delta·rot` through `&mut` for EVERY body carrying a `SolverBody` (Dynamic
+/// OR Kinematic) with no zero-delta guard and no `bypass_change_detection`, so the ball's client
+/// Kinematic mirror (attached to THIS same root, `client/net.rs`) has its `Position` re-marked `Changed`
+/// at 60 Hz even though the VALUE only advances on a 30 Hz snapshot. [`SkillObjectInterp::push`]
+/// VALUE-DEDUPS to compensate, so the buffer still holds one sample per real value change. (The frost
+/// spire has no client body → no `SolverBody` → genuine 30 Hz `Changed`; the dedup is a no-op for it.)
+/// Only ball/spire roots carry a `SkillObjectInterp` (portals/unknowns don't).
 fn buffer_skill_object_poses(
     time: Res<Time>,
     mut q: Query<(&Position, &Rotation, &mut SkillObjectInterp), Changed<Position>>,
@@ -578,6 +605,69 @@ mod tests {
             p,
             Vec3::new(10.0, 0.0, 0.0),
             "a teleport pair must snap to the destination, not lerp to (5,0,0)"
+        );
+    }
+
+    #[test]
+    fn sample_lerps_within_a_middle_pair_of_four() {
+        // Four samples; query a time landing in the INTERIOR pair [1]-[2] — exercises the bracketing
+        // binary search (`partition_point`) beyond the trivial two-element buffer, pinning that it picks
+        // the interior pair, not an endpoint. Consecutive steps are < POSE_SNAP_DISTANCE (2 m) so no pair
+        // reads as a teleport.
+        let buf = [
+            s(0.0, Vec3::ZERO),
+            s(1.0, Vec3::new(1.0, 0.0, 0.0)),
+            s(2.0, Vec3::new(1.0, 1.0, 0.0)),
+            s(3.0, Vec3::new(1.0, 1.0, 1.0)),
+        ];
+        // t = 1.5 → halfway between sample[1] (1,0,0) and sample[2] (1,1,0) → (1,0.5,0).
+        let (p, _) = sample_pose_at(&buf, 1.5).unwrap();
+        assert!(
+            (p - Vec3::new(1.0, 0.5, 0.0)).length() < 1e-6,
+            "middle-pair lerp got {p:?}"
+        );
+    }
+
+    #[test]
+    fn push_evicts_oldest_past_cap_and_dedups_by_value() {
+        let mut interp = SkillObjectInterp::new(Entity::PLACEHOLDER);
+        // Five DISTINCT positions → cap-4: oldest dropped, newest kept, order preserved.
+        for i in 0..5 {
+            interp.push(i as f32, Vec3::new(i as f32, 0.0, 0.0), Quat::IDENTITY);
+        }
+        assert_eq!(interp.samples.len(), POSE_BUFFER_CAP, "cap not enforced");
+        assert_eq!(
+            interp.samples.first().unwrap().pos,
+            Vec3::new(1.0, 0.0, 0.0),
+            "oldest not dropped"
+        );
+        assert_eq!(
+            interp.samples.last().unwrap().pos,
+            Vec3::new(4.0, 0.0, 0.0),
+            "newest not kept"
+        );
+
+        // Value-dedup: re-pushing the SAME value (an avian solver-writeback re-mark) does NOT grow the
+        // buffer and does NOT re-timestamp the last sample.
+        interp.push(99.0, Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY);
+        assert_eq!(
+            interp.samples.len(),
+            POSE_BUFFER_CAP,
+            "duplicate push grew the buffer"
+        );
+        assert_eq!(
+            interp.samples.last().unwrap().recv,
+            4.0,
+            "duplicate push re-timestamped the last sample"
+        );
+
+        // A MOVED sample IS accepted (evicting the oldest to stay at cap).
+        interp.push(100.0, Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY);
+        assert_eq!(interp.samples.len(), POSE_BUFFER_CAP);
+        assert_eq!(
+            interp.samples.last().unwrap().pos,
+            Vec3::new(5.0, 0.0, 0.0),
+            "moved sample not appended"
         );
     }
 
