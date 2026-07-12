@@ -96,9 +96,12 @@ struct SkillObjectVisual;
 /// MEASURED (windowed client, rolling ball, the `interp-inert` probe): after [`SkillObjectInterp::push`]'s
 /// value-dedup the RETAINED stream is ~40 Hz of distinct values — NOT the 30 Hz snapshot cadence an
 /// earlier version of this comment assumed. avian re-marks the ball's Kinematic-mirror `Position`
-/// `Changed` at 60 Hz (`buffer_skill_object_poses`), and the dedup rejects only the ~20 Hz that are
-/// EXACT re-marks; the other ~40 Hz are real replication + sub-snapshot solver/depenetration jitter,
-/// each above the 0.1 mm dedup epsilon and so un-rejectable. At ~40 Hz a 4-cap window spanned only
+/// `Changed` at 60 Hz (`buffer_skill_object_poses`); the dedup rejects the value-exact re-marks, and
+/// ~40 Hz of distinct values survive. The decomposition of that 40 Hz is NOT fully attributed
+/// (replication-apply timing granularity is the leading suspect; velocity is excluded from the ball's
+/// replication, so between-snapshot integration should be value-exact) — the MEASURED RATE is the
+/// load-bearing fact, and the cap carries a ~3× margin over it rather than trusting any assumed
+/// cadence (this comment has been wrong about the cadence three times). At ~40 Hz a 4-cap window spanned only
 /// ~64 ms ≈ the render lag, pinning the render time to the oldest sample (clamp 1-in-6 frames). Cap 8
 /// spans ~130–175 ms — render_at sits ~80 ms above the oldest sample, solidly mid-buffer. (Deepening
 /// the buffer adds NO latency: the render point is always 50 ms behind newest; the extra samples are
