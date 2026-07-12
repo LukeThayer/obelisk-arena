@@ -31,6 +31,9 @@ use crate::portals_shared::{
     portal_camera_transform, PortalPose, KIND_PORTAL_BLUE, KIND_PORTAL_ORANGE, PORTAL_RADIUS,
     PORTAL_THICKNESS,
 };
+// The shared physical radius (server body + client Kinematic mirror), so the icy sphere renders
+// exactly the size it collides.
+use crate::server::glacier_ball::GLACIER_BALL_RADIUS;
 
 use super::controller::FollowCamera;
 
@@ -44,7 +47,6 @@ impl Plugin for SkillObjectVisualsPlugin {
             (
                 attach_skill_object_visuals,
                 mirror_skill_object_pose,
-                spin_glacier_balls,
                 update_portal_cameras,
                 cleanup_orphan_portal_cameras,
             )
@@ -99,39 +101,6 @@ fn portal_texture_size(window: &Window) -> (u32, u32) {
             ((h as f32) * scale).round().max(1.0) as u32,
         )
     }
-}
-
-/// Radius of the glacier boulder — matches `assets/skills/glacier_roll.cast.ron`'s
-/// `Sphere(radius: 0.32)` and the server collider (`server/verbs.rs::GLACIER_BALL_RADIUS`).
-const GLACIER_BALL_RADIUS: f32 = 0.32;
-
-/// A rolling glacier boulder root: caches its last replicated position so the visual mesh CHILD can
-/// be spun by the per-frame travel delta (the root pose itself stays [`mirror_skill_object_pose`]'s).
-#[derive(Component)]
-struct RollingBall {
-    prev: Vec3,
-}
-
-/// The boulder's spun mesh child (parented to the replicated root). Its LOCAL rotation accumulates
-/// the rolling spin; the root owns translation (from the replicated `Position`).
-#[derive(Component)]
-struct BallMesh;
-
-/// Pure no-slip rolling spin: from this frame's world-space position `delta` and the ball `radius`,
-/// the `(axis, angle)` that rolls the ball FORWARD along its travel. Axis = `Vec3::Y × dir`
-/// (horizontal, perpendicular to travel); angle = arc length / radius = `|delta| / radius`.
-/// `None` for a ~zero (or purely vertical) delta — nothing to roll.
-pub(crate) fn roll_spin(delta: Vec3, radius: f32) -> Option<(Dir3, f32)> {
-    if radius <= 0.0 {
-        return None;
-    }
-    let dist = delta.length();
-    let dir = delta.try_normalize()?;
-    // `Vec3::Y × dir` is horizontal and perpendicular to travel; for +X travel it is `-Z`, and a
-    // positive rotation about `-Z` carries the top point (+Y) toward +X — a forward roll. A purely
-    // vertical delta makes the cross product zero → `Dir3::new` errs → `None` (nothing to roll).
-    let axis = Dir3::new(Vec3::Y.cross(dir)).ok()?;
-    Some((axis, dist / radius))
 }
 
 /// The per-kind visual recipe for NON-portal kinds (portals take the material+camera path).
@@ -217,34 +186,36 @@ fn attach_skill_object_visuals(
             continue;
         }
 
-        // --- Glacier boulder: the icy mesh lives on a spun CHILD so it can roll independently of
-        // the replicated root pose (which `mirror_skill_object_pose` overwrites every frame). The
-        // root carries the replicated Position; `spin_glacier_balls` rotates the child. ---
+        // --- Glacier boulder (THE AUTHORITY FLIP): the icy mesh + wisp material + point light live
+        // on the REPLICATED ROOT. The server's ball is a real Dynamic body, so its `Rotation`
+        // replicates real rolling — `mirror_skill_object_pose` (and the Kinematic mirror's avian
+        // sync) drive the root Transform, so the sphere visibly rolls with NO cosmetic spin helper.
+        // Wisp `glacier_ball.body.ron` material + light, verbatim. ---
         if obj.kind == "glacier_ball" {
-            // Tinted to the frost-blue family (the new frost patch tint is ~(0.25, 0.55, 1.0)).
-            let child = commands
-                .spawn((
-                    Name::new("GlacierBall-Mesh"),
-                    BallMesh,
-                    Mesh3d(meshes.add(Sphere::new(GLACIER_BALL_RADIUS))),
-                    MeshMaterial3d(materials.add(StandardMaterial {
-                        base_color: Color::srgb(0.35, 0.6, 1.0),
-                        emissive: LinearRgba::rgb(0.12, 0.3, 0.55),
-                        perceptual_roughness: 0.2,
-                        ..Default::default()
-                    })),
-                    Transform::default(),
-                    Visibility::default(),
-                ))
-                .id();
             let mut ec = commands.entity(e);
             ec.insert((
                 SkillObjectVisual,
-                RollingBall { prev: pos.0 },
+                Mesh3d(meshes.add(Sphere::new(GLACIER_BALL_RADIUS))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    // wisp: base_color (0.55, 0.85, 1.0), emissive (0.5, 1.1, 1.8) (HDR — bevy's
+                    // emissive glows for values > 1), roughness 0.15.
+                    base_color: Color::srgb(0.55, 0.85, 1.0),
+                    emissive: LinearRgba::rgb(0.5, 1.1, 1.8),
+                    perceptual_roughness: 0.15,
+                    ..Default::default()
+                })),
                 base_tf,
                 Visibility::default(),
             ));
-            ec.add_child(child);
+            // wisp's cold point light (color (0.55, 0.85, 1.0), intensity 28000, range 9), shadows
+            // off — a rolling ball of light.
+            ec.insert(PointLight {
+                color: Color::srgb(0.55, 0.85, 1.0),
+                intensity: 28_000.0,
+                range: 9.0,
+                shadows_enabled: false,
+                ..Default::default()
+            });
             // Optional designer dressing on the root (the kind→vfx pattern; no preset authored now).
             if let Some(system) = vfx
                 .as_deref()
@@ -288,28 +259,6 @@ fn mirror_skill_object_pose(
     for (pos, rot, mut tf) in &mut q {
         tf.translation = pos.0;
         tf.rotation = rot.0;
-    }
-}
-
-/// Roll each glacier boulder's mesh child by its replicated travel delta (no-slip forward roll).
-/// The root pose stays [`mirror_skill_object_pose`]'s (translation from the replicated `Position`);
-/// only the child's LOCAL rotation accumulates, so the sphere visibly rolls along its heading.
-fn spin_glacier_balls(
-    mut balls: Query<(&Position, &mut RollingBall, &Children)>,
-    mut mesh_tf: Query<&mut Transform, With<BallMesh>>,
-) {
-    for (pos, mut ball, children) in &mut balls {
-        let delta = pos.0 - ball.prev;
-        ball.prev = pos.0;
-        let Some((axis, angle)) = roll_spin(delta, GLACIER_BALL_RADIUS) else {
-            continue;
-        };
-        let spin = Quat::from_axis_angle(*axis, angle);
-        for &child in children {
-            if let Ok(mut tf) = mesh_tf.get_mut(child) {
-                tf.rotate(spin);
-            }
-        }
     }
 }
 
@@ -382,22 +331,3 @@ fn cleanup_orphan_portal_cameras(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roll_spin_rolls_forward_not_backspin() {
-        // Travel +X: the returned axis+angle must swing the ball's TOP point (+Y) toward +X (the
-        // direction of travel) — a FORWARD roll (no-slip), never a backspin.
-        let (axis, angle) =
-            roll_spin(Vec3::X * 0.1, GLACIER_BALL_RADIUS).expect("a nonzero delta produces a spin");
-        let top = Quat::from_axis_angle(*axis, angle) * Vec3::Y;
-        assert!(
-            top.x > 0.0,
-            "the top of the ball must roll toward +X (forward), got {top:?}",
-        );
-        // A ~zero delta yields no rotation — there is nothing to roll.
-        assert!(roll_spin(Vec3::ZERO, GLACIER_BALL_RADIUS).is_none());
-    }
-}

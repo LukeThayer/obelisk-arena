@@ -35,6 +35,7 @@ use crate::portals_shared::{
 };
 use crate::trace;
 
+use super::glacier_ball::PinnedBall;
 use super::skill_objects::SkillObject;
 
 /// Per-traveler teleport state: previous tick position (crossing segments) + the exit-portal
@@ -116,11 +117,14 @@ pub(crate) fn refresh_portal_passthrough(
 /// The authoritative teleport. Players: wisp's virtual transform (emerge in front of the exit,
 /// wall→floor exits stand the capsule on the disc) + velocity through the pair rotation.
 /// Projectiles: position/heading/`Projectile.velocity` remapped, `LastHitboxPos` reset so the
-/// next world-hit segment doesn't span the warp. FixedUpdate, after the physics step + obelisk
-/// projectile motion.
+/// next world-hit segment doesn't span the warp. Glacier balls (real Dynamic bodies): `Position` +
+/// `LinearVelocity` remapped like a projectile — no `Hitbox.aim` (the pin drags the obelisk hitbox
+/// through, so the frost trail continues out of the exit). FixedUpdate, after the physics step +
+/// obelisk projectile motion. The `portals` query EXCLUDES balls (`Without<PinnedBall>`) so the
+/// `balls` query can take them mutably; balls are never portals, so the pair set is unchanged.
 #[allow(clippy::type_complexity)]
 pub(crate) fn portal_teleport(
-    portals: Query<(&SkillObject, &Position, &Rotation)>,
+    portals: Query<(&SkillObject, &Position, &Rotation), Without<PinnedBall>>,
     mut players: Query<
         (
             Entity,
@@ -140,9 +144,15 @@ pub(crate) fn portal_teleport(
         ),
         Without<SkillObject>,
     >,
+    // Glacier balls (Step 6): `With<PinnedBall>` uniquely selects the boulders and `With<SkillObject>`
+    // keeps this structurally disjoint from the player/projectile queries (both `Without<SkillObject>`);
+    // `Without<PinnedBall>` on `portals` keeps it disjoint from the disc query.
+    mut balls: Query<(Entity, &mut Position, &mut LinearVelocity), (With<PinnedBall>, With<SkillObject>)>,
     mut travelers: ResMut<PortalTravelers>,
 ) {
-    let pairs = live_pairs(&portals);
+    // Balls are excluded from `portals`, so compute the pairs inline (collect_pairs ignores
+    // non-portal kinds anyway).
+    let pairs = collect_pairs(portals.iter().map(|(o, p, r)| (o.owner, o.kind, p.0, r.0)));
 
     // --- Players ---
     for (e, mut pos, mut vel, action) in &mut players {
@@ -234,6 +244,45 @@ pub(crate) fn portal_teleport(
                 trace::event(
                     "portal_teleport",
                     json!({ "traveler": "projectile",
+                            "to": [out_pos.x, out_pos.y, out_pos.z] }),
+                );
+                done = true;
+                break;
+            }
+        }
+    }
+
+    // --- Glacier balls (Step 6): real Dynamic bodies. Same crossing math as a projectile on the
+    // ball's Position segment; remap Position + LinearVelocity through the pair. NO Hitbox.aim
+    // remap — the pin drags the obelisk hitbox through next tick, so the frost trail + contact
+    // damage simply continue on the far side. ---
+    for (e, mut pos, mut vel) in &mut balls {
+        let prev = travelers.prev.insert(e, pos.0).unwrap_or(pos.0);
+        if let Some(exit_pos) = travelers.lockout.get(&e).copied() {
+            if (pos.0 - exit_pos).length() > LOCKOUT_RADIUS {
+                travelers.lockout.remove(&e);
+            } else {
+                continue;
+            }
+        }
+        let mut done = false;
+        for (orange, blue) in &pairs {
+            if done {
+                break;
+            }
+            for (entry, exit) in [(orange, blue), (blue, orange)] {
+                let Some(basis) = projectile_crossing(prev, pos.0, entry) else {
+                    continue;
+                };
+                let rot = velocity_rotation(entry, exit);
+                let out_pos = map_through_pair(basis, entry, exit);
+                pos.0 = out_pos;
+                vel.0 = rot * vel.0;
+                travelers.lockout.insert(e, exit.position);
+                travelers.prev.insert(e, out_pos);
+                trace::event(
+                    "portal_teleport",
+                    json!({ "traveler": "glacier_ball",
                             "to": [out_pos.x, out_pos.y, out_pos.z] }),
                 );
                 done = true;

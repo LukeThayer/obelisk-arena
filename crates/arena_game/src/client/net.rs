@@ -25,7 +25,7 @@ use crate::client::parts::PartSelection;
 use crate::net::input::ArenaInput;
 use crate::net::protocol::{
     CustomizeMessage, NetworkOwner, NetworkedCastState, NetworkedId, NetworkedPlayer,
-    PlayerCustomization, RequestChannel,
+    NetworkedSkillObject, PlayerCustomization, RequestChannel,
 };
 use crate::shared_controller::{apply_arena_movement, apply_arena_yaw};
 use arena_sim::tuning::{PLAYER_CAPSULE_LENGTH, PLAYER_CAPSULE_RADIUS};
@@ -181,6 +181,12 @@ impl Plugin for ClientNetPlayerPlugin {
                 Update,
                 (
                     materialize_predicted_players,
+                    // THE AUTHORITY FLIP: mirror the server's Dynamic glacier boulder as a LOCAL
+                    // Kinematic collider on EVERY client (headless included) so predicted players
+                    // collide with it in lockstep and the shove doesn't rubber-band. Runs here (not
+                    // in the windowed-only visuals plugin) precisely so the headless observer gets
+                    // the collider too — gameplay parity, not a visual.
+                    attach_glacier_ball_collider,
                     trace_remote_input_once,
                     send_customization,
                     trace_customize_updates,
@@ -188,6 +194,31 @@ impl Plugin for ClientNetPlayerPlugin {
                     trace_remote_cast_phase,
                 ),
             );
+    }
+}
+
+/// Marker: the local Kinematic collider mirror is attached to this replicated glacier ball.
+#[derive(Component)]
+struct GlacierBallMirror;
+
+/// Attach the LOCAL Kinematic collider mirror to each replicated glacier boulder. The server's ball
+/// is a Dynamic body whose shove is authoritative; giving the replicated copy the IDENTICAL collider
+/// + layers (the shared `server/glacier_ball.rs` recipe — a mismatch desyncs the shove) makes
+/// predicted Dynamic players collide with it LOCALLY, so the knockback is predicted in lockstep
+/// rather than arriving only as a rubber-banding server correction. Driven by the replicated
+/// `Position` (AvianReplicationMode::Position). Windowed visuals are separate (client/skill_objects.rs).
+fn attach_glacier_ball_collider(
+    new: Query<(Entity, &NetworkedSkillObject), Without<GlacierBallMirror>>,
+    mut commands: Commands,
+) {
+    for (e, obj) in &new {
+        if obj.kind != crate::server::skill_objects::KIND_GLACIER_BALL {
+            continue;
+        }
+        commands.entity(e).insert((
+            GlacierBallMirror,
+            crate::server::glacier_ball::client_ball_mirror_bundle(),
+        ));
     }
 }
 

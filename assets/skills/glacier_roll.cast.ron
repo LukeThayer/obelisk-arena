@@ -1,17 +1,19 @@
 // Glacier Roll (potted-spring port, stage 2 of 3, TRIGGERED-ONLY): the grounded roll.
-// Executes at rolling_glacier's ground-impact point (CastPoint = the trigger payload position).
-// motion_direction: Horizontal flattens the inherited direction — the trigger inherits the
-// ball's DESCENDING impact velocity, and flattening keeps the roll hugging the ground instead
-// of burying itself. No Follow trail: the roll's visual IS the frost trail this window PAINTS
-// itself (paints: Trail — surfaces core); the old server poller (drop_glacier_trail) is gone. It
-// ends at a wall (on_impact) or the 6.5s fuse (on_expire) -> glacier_burst (rules).
+// Executes at rolling_glacier's ground-impact point (CastPoint = the world-hit the landing detector
+// fired). THE AUTHORITY FLIP (glacier-physics-ball): the same avian `RigidBody::Dynamic` ball that
+// flew here now ROLLS under its own physics; this "roll" window is `Static` and PINNED to that ball
+// (server/glacier_ball.rs writes the ball's avian Position into this hitbox's Transform each tick,
+// BEFORE obelisk's overlap + paint sets), so the frost Trail this window PAINTS (paints: Trail —
+// surfaces core) and its contact damage follow the ball's REAL rolling path (bank shots included).
+// No self-propulsion (`motion: Static`, not Linear), no wall detector: the roll ends ONLY at the
+// 6.5s fuse (on_expire) -> glacier_burst (rules) — wisp parity (its 6.5s fuse is the only end).
 (
   skill_id: "glacier_roll",
   phase_durations: ( windup: 0.0, active: 0.05, recovery: 0.0 ),
   collision_windows: [
     ( id: "roll", spawn: Scheduled( phase: Active, offset: 0.0 ), anchor: CastPoint,
       anchor_offset: (0.0, 0.35, 0.0), active_duration: 6.5,
-      shape: Sphere( radius: 0.32 ), motion: Linear( speed: 7.0 ), motion_direction: Horizontal,
+      shape: Sphere( radius: 0.32 ), motion: Static,
       hit_filter: Enemies, hit_mode: OncePerTarget,
       paints: Some(( surface: "frost", radius: 0.45, mode: Trail( step: 0.8 ) )) ),
   ],

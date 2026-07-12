@@ -26,11 +26,15 @@ mod cast_pipeline;
 mod controller;
 mod customize;
 mod equip;
+// pub(crate): the client mirror (client/net.rs) imports the shared ball collider/layers recipe so
+// the server body + client Kinematic copy can never drift.
+pub(crate) mod glacier_ball;
 mod levels;
 mod mirrors;
 mod portals;
 mod rounds;
-mod skill_objects;
+// pub(crate): the client collider mirror (client/net.rs) references `KIND_GLACIER_BALL`.
+pub(crate) mod skill_objects;
 mod spawn;
 pub(crate) mod surfaces;
 mod verbs;
@@ -112,6 +116,24 @@ impl Plugin for ArenaServerPlugin {
                 portals::portal_teleport
                     .after(avian3d::prelude::PhysicsSystems::StepSimulation)
                     .after(obelisk_bevy::prelude::ObeliskSet::Projectiles),
+            )
+            // The glacier boulder (server/glacier_ball.rs): the avian Dynamic ball owns its
+            // trajectory; its (Static) obelisk windows are PINNED to it. The pin writes the ball's
+            // avian Position into the pinned hitbox's Transform in the PROVEN slot — after the
+            // physics step + obelisk projectile motion, before obelisk's overlap + trail sets
+            // (identical to `refresh_spatial_pipeline_pre_detect`) — so `detect_overlaps` (contact
+            // damage) and `paint_surfaces` (the frost Trail) read the ball's live path. The landing
+            // detector fires the genuine `HitboxWorldHit` on the ball's first ground contact, which
+            // ends the flight hitbox (HitWorld → OnImpact) and chains glacier_roll.
+            .add_systems(
+                FixedUpdate,
+                (
+                    glacier_ball::pin_glacier_hitboxes,
+                    glacier_ball::detect_glacier_landing,
+                )
+                    .after(avian3d::prelude::PhysicsSystems::StepSimulation)
+                    .after(obelisk_bevy::prelude::ObeliskSet::Projectiles)
+                    .before(obelisk_bevy::prelude::ObeliskSet::ResolveHits),
             )
             .init_resource::<portals::PortalTravelers>()
             // The verb observer: obelisk CueEvents -> arena game verbs (portal placement, spire

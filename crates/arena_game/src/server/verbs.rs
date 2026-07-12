@@ -9,8 +9,9 @@
 //! |--------------------------|--------------------------|-------------------------------------|
 //! | `portal_orange`/`_blue`  | `on_window_portal_mark`  | place/replace that portal slot      |
 //! | `frost_spire`            | `on_window_spike`        | erupt a ground-snapped spire at the cue position |
-//! | `glacier_roll`           | `on_window_roll`         | spawn the kinematic ice boulder (lockstep with the roll) |
-//! | `glacier_roll`           | `on_end_roll`            | despawn that boulder where the roll stops (wall / fuse) |
+//! | `rolling_glacier`        | `on_window_flight`       | spawn the ONE avian Dynamic boulder + pin the flight hitbox to it |
+//! | `glacier_roll`           | `on_window_roll`         | RE-PIN that boulder to the roll hitbox (no new ball) |
+//! | `glacier_roll`           | `on_end_roll`            | despawn the boulder at the roll's fuse |
 //!
 //! Everything spawned here is a [`super::skill_objects`] object (limits/lifetime/replication).
 
@@ -23,6 +24,10 @@ use serde_json::json;
 
 use crate::trace;
 
+use super::glacier_ball::{
+    ball_physics_bundle, ball_spawn_pos, flat_launch, BallPhase, PinnedBall, GLACIER_BALL_LIFETIME,
+    GLACIER_BALL_RADIUS, GLACIER_BALL_THROW_SPEED,
+};
 use super::skill_objects::{
     spawn_skill_object, SkillObject, KIND_FROST_SPIRE, KIND_GLACIER_BALL, KIND_PORTAL_BLUE,
     KIND_PORTAL_ORANGE,
@@ -48,27 +53,18 @@ const SPIRE_LIFETIME: f32 = 180.0;
 /// [`spire_eruption_anchor`].
 const WINDOW_ANCHOR_OFFSET_Y: f32 = 0.8;
 
-// --- Rolling-glacier boulder tuning. The ball is a kinematic COMPANION to the authoritative
-// obelisk roll hitbox (same origin, same heading, same speed), so these mirror glacier_roll's
-// authored roll window in `assets/skills/glacier_roll.cast.ron`. ---
+// --- Rolling-glacier boulder VERB tuning. THE AUTHORITY FLIP: the ball is a REAL avian Dynamic
+// body now (wisp physics + lifetime in `server/glacier_ball.rs`); it owns its own trajectory and
+// obelisk's (Static) windows are PINNED to it. The flight verb spawns it at cast, the roll verb
+// RE-PINS it, the end verb despawns it. Only the cue-correlation radii live here. ---
 
-/// Ball collider radius — mirrors the roll window's `shape: Sphere(radius: 0.32)`.
-const GLACIER_BALL_RADIUS: f32 = 0.32;
-/// Ball travel BASE speed — mirrors the roll window's `motion: Linear(speed: 7.0)`. The ball and
-/// the roll hitbox stay in lockstep because BOTH scale this same base by the originating cast's
-/// `charge_mult` (obelisk on the hitbox at advance.rs's projectile advance; the ball at spawn,
-/// below) — a tap charge is ≈1.0×, a charged cast speeds both up identically.
-const GLACIER_BALL_SPEED: f32 = 7.0;
-/// The roll window's authored `active_duration` (its fuse). The ball's lifetime is this + a small
-/// margin, so the `on_end_roll` cue despawns it FIRST; the fuse only reaps a ball whose end cue was
-/// dropped (evicted by the cap, or the cue lost).
-const ROLL_FUSE_SECS: f32 = 6.5;
-const GLACIER_BALL_LIFETIME: f32 = ROLL_FUSE_SECS + 0.5;
-/// Correlate the just-spawned roll hitbox to its `on_window_roll` cue: the hitbox is AT the cue
-/// (spawn) position, so a live `glacier_roll` hitbox for this caster within this radius is it.
+/// Correlate a just-spawned obelisk hitbox to its OPEN cue: the hitbox is AT the cue (spawn)
+/// position, so a live hitbox for this caster+skill within this radius is it — the flight hitbox at
+/// the casting hand, the roll hitbox at the landing point.
 const GLACIER_BALL_CORRELATE_RADIUS: f32 = 1.0;
-/// Despawn the boulder nearest the roll's end position within this radius (lockstep travel ⇒ it is
-/// standing on the end point). None in range = the end cue is a clean no-op.
+/// Re-pin (roll open) / despawn (roll end) the boulder nearest the cue position within this radius.
+/// Slightly larger than the correlate radius to absorb the tick or two the ball rolls between the
+/// landing world-hit and the roll cue firing (lockstep travel ⇒ it stands near the point).
 const GLACIER_BALL_DESPAWN_RADIUS: f32 = 1.5;
 
 // --- Portal tuning: lives in `crate::portals_shared` (shared with the client's predicted
@@ -100,13 +96,6 @@ pub(crate) fn spire_eruption_anchor(cue_pos: Vec3, ground_hit: Option<f32>) -> V
     Vec3::new(cue_pos.x, y, cue_pos.z)
 }
 
-/// Flatten a direction onto the XZ (ground) plane and normalize; `None` if it was purely vertical.
-/// The roll's `Hitbox.aim` is already flat (its window authors `motion_direction: Horizontal`), so
-/// this is a no-op on it; only the fallback look direction (which carries pitch) truly needs it.
-fn flatten_xz(v: Vec3) -> Option<Vec3> {
-    Vec3::new(v.x, 0.0, v.z).try_normalize()
-}
-
 /// THE verb observer: match `(skill_id, cue_id)` on every server-side obelisk `CueEvent` and run
 /// the arena action. Cues were designed as the presentation channel; they are equally the
 /// gameplay-verb channel because they carry exactly what a verb needs (author-named id, world
@@ -122,7 +111,7 @@ pub(crate) fn skill_verbs_on_cue(
     spatial: avian3d::prelude::SpatialQuery,
     children: Query<&Children>,
     players: Query<Entity, With<crate::net::protocol::NetworkedPlayer>>,
-    hitboxes: Query<(&Hitbox, &Transform)>,
+    hitboxes: Query<(Entity, &Hitbox, &Transform)>,
     actions: Query<&lightyear::prelude::input::native::ActionState<crate::net::input::ArenaInput>>,
     mut commands: Commands,
 ) {
@@ -284,61 +273,99 @@ pub(crate) fn skill_verbs_on_cue(
             );
         }
 
-        // --- Rolling glacier: the roll window OPENED — spawn a kinematic ice boulder that travels
-        // in lockstep with the (authoritative) obelisk roll hitbox: same origin (the cue position),
-        // same heading, same 7.0 speed. The boulder is purely the roll's VISIBLE body; the obelisk
-        // hitbox stays the sole damage/paint authority. The roll's `on_end_roll` cue stops it.
-        ("glacier_roll", "on_window_roll") => {
-            // Heading: the roll inherits its parent ball's DESCENDING impact direction and flattens
-            // it (the window authors `motion_direction: Horizontal`) — NOT the caster's current
-            // look. obelisk stamps that flattened heading onto the just-spawned roll `Hitbox.aim`;
-            // correlate the hitbox by caster + skill nearest the cue (spawn) position and read its
-            // aim (flatten again = a no-op). Fallback (no hitbox found): the caster's live look
-            // flattened, with a trace note.
-            let heading = hitboxes
+        // --- Rolling glacier: the FLIGHT window OPENED (at the casting hand) — spawn the ONE real
+        // avian Dynamic boulder (wisp physics, server/glacier_ball.rs) and PIN this flight hitbox to
+        // it. The ball owns its trajectory: launched FLAT at 9·charge along the aim (wisp `up: 0.0` —
+        // the hand height drops it, NOT the pitched eye ray). obelisk keeps damage/chain through the
+        // pinned Static hitbox; on the ball's first ground contact the landing detector fires the
+        // world-hit → obelisk chains glacier_roll. The `skill_object_spawned{glacier_ball}` trace
+        // (gate assertion 10) rides `spawn_skill_object`.
+        ("rolling_glacier", "on_window_flight") => {
+            // Correlate the flight hitbox obelisk just spawned AT the hand for this cast, and read
+            // its aim. No hitbox ⇒ nothing to pin — skip (rare; a dropped window cue).
+            let Some((_, flight_hitbox, aim)) = hitboxes
                 .iter()
-                .filter(|(hb, _)| hb.caster == ev.source && hb.skill_id == ev.skill_id)
-                .filter_map(|(hb, tf)| {
+                .filter(|(_, hb, _)| hb.caster == ev.source && hb.skill_id == ev.skill_id)
+                .filter_map(|(e, hb, tf)| {
                     let d = tf.translation.distance(ev.position);
-                    (d <= GLACIER_BALL_CORRELATE_RADIUS).then_some((d, hb.aim))
+                    (d <= GLACIER_BALL_CORRELATE_RADIUS).then_some((d, e, hb.aim))
                 })
                 .min_by(|a, b| a.0.total_cmp(&b.0))
-                .and_then(|(_, aim)| flatten_xz(aim));
-            let dir = heading.unwrap_or_else(|| {
-                let look = actions
-                    .get(ev.source)
-                    .map(|a| crate::net::aim_dir(a.0.yaw, a.0.pitch))
-                    .unwrap_or(Vec3::NEG_Z);
-                trace::event(
-                    "glacier_ball_dir_fallback",
-                    json!({ "owner": owner_id, "reason": "no roll hitbox near cue position" }),
-                );
-                flatten_xz(look).unwrap_or(Vec3::X)
-            });
-            // Kinematic sphere at the roll origin, moving at the roll's speed. The spawn trace
-            // (`skill_object_spawned{object_kind:"glacier_ball"}`) rides `spawn_skill_object`.
+            else {
+                trace::event("glacier_ball_no_flight_hitbox", json!({ "owner": owner_id }));
+                return;
+            };
+            // Flat launch heading: the flight hitbox's aim flattened to XZ (fallback: the caster's
+            // live look flattened, then +X).
+            let dir = flat_launch(aim)
+                .or_else(|| {
+                    let look = actions
+                        .get(ev.source)
+                        .map(|a| crate::net::aim_dir(a.0.yaw, a.0.pitch))
+                        .unwrap_or(Vec3::NEG_Z);
+                    flat_launch(look)
+                })
+                .unwrap_or(Vec3::X);
+            // charge_mult(ev.charge): a held lob throws the ball faster/further (wisp).
+            let launch = dir * GLACIER_BALL_THROW_SPEED * charge_mult(ev.charge);
+            // Spawn nudged forward of the hand so the mass-6 sphere clears the caster capsule
+            // instead of shoving the caster at spawn.
+            let spawn_pos = ball_spawn_pos(ev.position, dir);
             let ball = spawn_skill_object(
                 &mut commands,
                 &objects,
                 now,
                 KIND_GLACIER_BALL,
                 owner_id,
-                ev.position,
+                spawn_pos,
                 Quat::IDENTITY,
                 Some(GLACIER_BALL_LIFETIME),
-                Some((RigidBody::Kinematic, Collider::sphere(GLACIER_BALL_RADIUS))),
+                Some((RigidBody::Dynamic, Collider::sphere(GLACIER_BALL_RADIUS))),
             );
-            // CollisionLayers::NONE (no memberships, no filters) makes the boulder collide with
-            // NOTHING: no membership means it is invisible to EVERY SpatialQuery ray regardless of
-            // the query's mask (world-hit / portal-passthrough / grounded / decal ground-snap), and
-            // it generates no contacts — it never pushes a player, and no projectile bursts on it.
-            commands.entity(ball).insert((
-                // charge_mult(ev.charge) — obelisk scales the roll HITBOX's launch speed the same
-                // way (advance.rs's `speed * charge_mult(charge)`), so a charged roll and its
-                // visible ball stay in lockstep (matches client/cosmetics.rs's cue-follow scaling).
-                avian3d::prelude::LinearVelocity(dir * GLACIER_BALL_SPEED * charge_mult(ev.charge)),
-                avian3d::prelude::CollisionLayers::NONE,
-            ));
+            commands
+                .entity(ball)
+                .insert(ball_physics_bundle(launch, flight_hitbox));
+        }
+
+        // --- Rolling glacier: the roll window OPENED (obelisk chained it at the landing world-hit,
+        // spawning the roll hitbox AT the landing point). RE-PIN the existing ball (the one that
+        // flew here) to this new roll hitbox — NO new ball — so the pin drags the roll hitbox
+        // through the ball's REAL rolling path (frost Trail + contact damage continue on the far
+        // side of bank shots). The roll's 6.5 s fuse (`on_end_roll`) is the only end (wisp parity).
+        ("glacier_roll", "on_window_roll") => {
+            // The roll hitbox: this caster's glacier_roll hitbox nearest the cue (spawn = landing).
+            let Some(roll_hitbox) = hitboxes
+                .iter()
+                .filter(|(_, hb, _)| hb.caster == ev.source && hb.skill_id == ev.skill_id)
+                .filter_map(|(e, _, tf)| {
+                    let d = tf.translation.distance(ev.position);
+                    (d <= GLACIER_BALL_CORRELATE_RADIUS).then_some((d, e))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, e)| e)
+            else {
+                trace::event("glacier_roll_no_hitbox", json!({ "owner": owner_id }));
+                return;
+            };
+            // The ball to re-pin: this owner's glacier_ball nearest the landing cue.
+            match objects
+                .iter()
+                .filter(|(_, o)| o.kind == KIND_GLACIER_BALL && o.owner == owner_id)
+                .filter_map(|(e, _)| {
+                    let d = positions.get(e).ok()?.0.distance(ev.position);
+                    (d <= GLACIER_BALL_DESPAWN_RADIUS).then_some((d, e))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, e)| e)
+            {
+                Some(ball) => {
+                    commands.entity(ball).insert(PinnedBall {
+                        hitbox: roll_hitbox,
+                        phase: BallPhase::Rolling,
+                    });
+                }
+                None => trace::event("glacier_roll_no_ball", json!({ "owner": owner_id })),
+            }
         }
 
         // --- Rolling glacier: the roll ENDED (wall `on_impact` / 6.5 s `on_expire`). obelisk fires

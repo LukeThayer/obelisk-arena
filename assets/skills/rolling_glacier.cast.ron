@@ -1,14 +1,21 @@
-// Rolling Glacier (potted-spring port, stage 1 of 3): a chargeable ballistic snow-ball lob.
-// Causality is rules-side (config/skills/rolling_glacier.toml): ground impact -> glacier_roll
-// executes at the landing point; mid-air fuse -> glacier_burst. OncePerTarget: a direct player
-// clip damages but does NOT end the ball (it flies on and still lands). `on_end_ball` is the
-// Follow-trail TEARDOWN trigger (vfx_cues only, no binding) — same pattern as firebolt.
+// Rolling Glacier (potted-spring port, stage 1 of 3) — THE AUTHORITY FLIP (glacier-physics-ball):
+// the cast spawns a REAL avian `RigidBody::Dynamic` ice boulder (server/glacier_ball.rs, wisp physics
+// verbatim) that owns its own trajectory from the CAST moment — launched FLAT at 9·charge along the
+// aim. obelisk keeps 100% of damage/trail/chain by PINNING this "flight" window to the ball: the
+// window is `Static` (the pin is the sole mover), and its OPEN cue `on_window_flight` is the VERB
+// slot that spawns the one ball (server/verbs.rs). Causality is rules-side
+// (config/skills/rolling_glacier.toml): ground impact (a landing detector fires the genuine
+// `HitboxWorldHit` on this pinned hitbox) -> glacier_roll executes at the landing point; mid-air fuse
+// (never landed) -> glacier_burst. OncePerTarget: a direct player clip damages but does NOT end the
+// ball (it flies on and still lands). `on_window_flight` is listed in `vfx_cues` (that is what makes
+// obelisk EMIT it — the verb channel) but deliberately NOT bound in `cues` — the physical ball is the
+// visual now, so the old cosmetic Follow projectile lane is gone.
 (
   skill_id: "rolling_glacier",
   phase_durations: ( windup: 0.35, active: 0.1, recovery: 0.25 ),
   collision_windows: [
-    ( id: "ball", spawn: Scheduled( phase: Active, offset: 0.0 ), active_duration: 2.0,
-      shape: Sphere( radius: 0.32 ), motion: Ballistic( speed: 9.0, gravity: 9.8 ),
+    ( id: "flight", spawn: Scheduled( phase: Active, offset: 0.0 ), active_duration: 2.0,
+      shape: Sphere( radius: 0.32 ), motion: Static,
       hit_filter: Enemies, hit_mode: OncePerTarget ),
   ],
   acquisition: Aim,
@@ -24,14 +31,12 @@
   ],
   vfx_cues: {
     "on_cast": "on_cast",
-    "on_window_ball": "on_window_ball",
+    "on_window_flight": "on_window_flight",
     "on_hit": "on_hit",
-    "on_end_ball": "on_end_ball",
   },
   cues: {
     "on_cast": ( effect: Some("blizzard_frost"), attach: Bone( socket: "R_wrist_joint", offset: (0.0, 0.05, 0.0) ), anim: None,
       params: [ ( param: "scale", source: Charge ) ], duration: Some(0.3) ),
-    "on_window_ball": ( effect: Some("blizzard_frost"), attach: Follow, anim: None, params: [] ),
     "on_hit": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],
       duration: Some(0.3) ),
   },

@@ -31,9 +31,10 @@ pub(crate) struct SkillObject {
 /// Kind ids (the cross-layer contract: server behavior, client visuals, trace fields).
 pub(crate) use crate::portals_shared::{KIND_PORTAL_BLUE, KIND_PORTAL_ORANGE};
 pub(crate) const KIND_FROST_SPIRE: &str = "frost_spire";
-/// The rolling-glacier boulder: a kinematic ice sphere spawned by `glacier_roll`'s roll-window
-/// verb, travelling in lockstep with the (authoritative) obelisk roll hitbox and despawned by the
-/// roll's end cue. Client visuals key off this string in `client/skill_objects.rs`.
+/// The rolling-glacier boulder: THE AUTHORITY FLIP — a REAL avian `RigidBody::Dynamic` ice sphere
+/// (wisp physics, `server/glacier_ball.rs`) spawned by `rolling_glacier`'s FLIGHT-window verb at the
+/// CAST moment; it owns its own trajectory and obelisk's (Static) windows are PINNED to it, then the
+/// roll's end cue despawns it. Client visuals + the Kinematic collider mirror key off this string.
 pub(crate) const KIND_GLACIER_BALL: &str = "glacier_ball";
 
 /// Per-kind instance cap (GLOBAL, wisp semantics: portals are shared world state, one per slot;
@@ -42,9 +43,12 @@ fn max_instances(kind: &str) -> usize {
     match kind {
         KIND_PORTAL_ORANGE | KIND_PORTAL_BLUE => 1,
         KIND_FROST_SPIRE => 12,
-        // A roll lasts up to 6.5 s; the gate's 3:1 rotation can leave ~3 rolls (hence balls) alive
-        // per caster at once. Cap 4, replace-oldest — a stale orphan (missed end cue) is evicted.
-        KIND_GLACIER_BALL => 4,
+        // THE AUTHORITY FLIP: the ball is a real Dynamic body spawned at CAST and living through its
+        // whole flight+roll. Effectively 1 live ball per caster (the newest glacier supersedes the
+        // old — replace-oldest), matching the portal-slot idiom; a stale orphan (missed end cue) is
+        // evicted by the next cast. (Global cap like the other kinds — precise per-caster capping is
+        // the same latent single-caster simplification the portal cap carries.)
+        KIND_GLACIER_BALL => 1,
         _ => 32,
     }
 }

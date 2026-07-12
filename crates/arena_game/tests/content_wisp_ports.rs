@@ -4,7 +4,7 @@
 //! their own unit tests; here we prove the CONTENT parses as v2, carries the authored trigger
 //! chain, and keeps the cue slots the arena verb layer matches on.
 use bevy::prelude::App;
-use obelisk_bevy::assets::{Acquisition, CastTimeline, MotionDirection, VolumeMotion, WindowAnchor};
+use obelisk_bevy::assets::{Acquisition, CastTimeline, VolumeMotion, WindowAnchor};
 use obelisk_bevy::prelude::{ObeliskConfigExt, SkillRegistry, SkillSource};
 
 fn read(rel: &str) -> String {
@@ -20,21 +20,34 @@ fn timeline(id: &str) -> CastTimeline {
 
 #[test]
 fn glacier_timelines_parse_and_chain_hugs_the_ground() {
+    // THE AUTHORITY FLIP (glacier-physics-ball): a real avian `RigidBody::Dynamic` boulder owns the
+    // ball's trajectory from the CAST moment; obelisk keeps 100% of damage/trail/chain by PINNING
+    // its collision windows to the ball. So BOTH windows are now `Static` (the pin is the sole mover,
+    // NOT obelisk's own projectile motion) and the flight window's OPEN cue is a VERB slot that
+    // spawns the one Dynamic ball — listed in `vfx_cues` (emitted), unbound in `cues` (the ball is
+    // the visual; the cosmetic Follow lane is gone).
     let ball = timeline("rolling_glacier");
     assert!(matches!(ball.acquisition, Acquisition::Aim));
-    assert!(matches!(
-        ball.collision_windows[0].motion,
-        VolumeMotion::Ballistic { .. }
-    ));
-    assert!(ball.chargeable, "a held lob flies flatter/further");
+    assert!(
+        matches!(ball.collision_windows[0].motion, VolumeMotion::Static),
+        "the flight window is Static — the avian ball moves, the pin drags the hitbox along",
+    );
+    assert!(ball.chargeable, "a held lob throws the ball faster/further");
+    assert!(
+        ball.vfx_cues.contains_key("on_window_flight"),
+        "the flight-window OPEN cue is the verb slot that spawns the Dynamic ball (server/verbs.rs)",
+    );
 
-    // The roll executes at the ball's ground-impact point and must FLATTEN the inherited
-    // (descending) direction — Horizontal is the whole reason the variant exists.
+    // The roll executes at the ball's ground-impact point. Its window is Static too — the avian ball
+    // carries the roll's motion and the pin drags this hitbox along, so the frost Trail + contact
+    // damage follow the ball's REAL rolling path (bank shots included).
     let roll = timeline("glacier_roll");
     let w = &roll.collision_windows[0];
     assert!(matches!(w.anchor, WindowAnchor::CastPoint));
-    assert!(matches!(w.motion, VolumeMotion::Linear { .. }));
-    assert!(matches!(w.motion_direction, MotionDirection::Horizontal));
+    assert!(
+        matches!(w.motion, VolumeMotion::Static),
+        "the roll window is Static — pinned to the avian ball, not self-propelled",
+    );
     // The tile trail is now the authored surfaces painter (spec §8) — the old ARENA poller
     // (drop_glacier_trail) is deleted; painting is a window PROPERTY, so it composes without
     // the Template-lifecycle trap that forced the poller.
