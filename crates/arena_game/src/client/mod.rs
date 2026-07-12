@@ -21,6 +21,7 @@ pub mod charge_cues;
 pub mod controller;
 pub mod cosmetics;
 pub mod customization;
+pub mod decal_material;
 mod harness;
 pub mod level;
 pub mod portals;

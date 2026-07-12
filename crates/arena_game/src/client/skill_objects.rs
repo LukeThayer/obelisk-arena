@@ -251,14 +251,46 @@ fn attach_skill_object_visuals(
     }
 }
 
-/// Mirror the replicated pose into the render Transform (spires rise; portals are static but a
-/// re-placed disc replicates a new entity anyway).
+/// Visual pose-smoothing rate: the per-frame lerp factor is `1 - exp(-dt * POSE_SMOOTH_RATE)`, an
+/// exponential approach that converges ~90% in ~115 ms at 60 fps. This hides the 30 Hz replication
+/// ALIASING of the glacier ball's landing micro-bounce — the Step-0 evidence showed NO solver
+/// penetration (per-tick landing minimum center Y 0.3178, settle band 0.3124–0.3476 around the 0.32
+/// rest = a 35 mm restitution bounce), so raw snapping of those 30 Hz samples was the whole sink-pop.
+/// Steady-state lag for a constant-velocity target is `v / POSE_SMOOTH_RATE` (~5 cm at the ~1 m/s
+/// settle where it matters; a mild uniform lag during fast flight, which reads as smooth, not a pop).
+/// Tune here if the flight lag wants trimming.
+const POSE_SMOOTH_RATE: f32 = 20.0;
+
+/// A replicated-pose jump beyond this is a TELEPORT (a portal warp — the glacier ball traverses
+/// portals — or a round-reset re-placement), not motion: snap so the visual doesn't glide across the
+/// arena. Mirrors `harness::snap_large_corrections`'s 2 m teleport threshold for predicted players.
+const POSE_SNAP_DISTANCE: f32 = 2.0;
+
+/// Mirror the replicated pose into the render Transform, SMOOTHED. Each rendered frame the visual
+/// Transform lerps (position) / slerps (rotation) toward the latest replicated `Position`/`Rotation`
+/// instead of snapping, so the 30 Hz-replicated glacier-ball landing bounce reads as a smooth settle
+/// (the reported sink-pop) and the spire's rise is smoother too. Two cases still SNAP:
+///   * the very first pose — `attach_skill_object_visuals` (chained before this) seeds the Transform
+///     to the spawn pose, so on the add frame `tf ≈ pos`, the lerp is a no-op, and the > 2 m guard is
+///     also false: an effective spawn snap with no extra per-entity state;
+///   * a teleport (> `POSE_SNAP_DISTANCE` position jump: a portal warp / round-reset re-placement) —
+///     snap position AND rotation so the ball doesn't glide the width of the arena.
+/// RENDER-ONLY: collision reads the replicated avian `Position` directly (the ball's Kinematic mirror,
+/// `client/net.rs`), so the physical shove stays in prediction lockstep — this smoothing never
+/// touches it. Unknown-kind objects carry no `Transform` (see `attach_…`), so the query skips them.
 fn mirror_skill_object_pose(
+    time: Res<Time>,
     mut q: Query<(&Position, &Rotation, &mut Transform), With<NetworkedSkillObject>>,
 ) {
+    let alpha = 1.0 - (-time.delta_secs() * POSE_SMOOTH_RATE).exp();
     for (pos, rot, mut tf) in &mut q {
-        tf.translation = pos.0;
-        tf.rotation = rot.0;
+        if tf.translation.distance(pos.0) > POSE_SNAP_DISTANCE {
+            tf.translation = pos.0;
+            tf.rotation = rot.0;
+        } else {
+            tf.translation = tf.translation.lerp(pos.0, alpha);
+            tf.rotation = tf.rotation.slerp(rot.0, alpha);
+        }
     }
 }
 

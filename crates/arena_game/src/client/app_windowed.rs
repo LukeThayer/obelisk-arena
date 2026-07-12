@@ -134,7 +134,16 @@ pub fn run_windowed_client() {
     app.add_plugins(radial::RadialWheelPlugin);
     // Replicated skill-object visuals (wisp weapon ports: portals, frost tiles, spires).
     app.add_plugins(skill_objects::SkillObjectVisualsPlugin);
-    // Replicated surface-patch visuals (spec §6/D10: tinted ForwardDecal + optional looping vfx
+    // Depth-TESTED forward-decal material — the arena fork of bevy's `ForwardDecalMaterialExt` minus
+    // the `depth_compare = Always` override (`client/decal_material.rs`), so the frost ground no
+    // longer draws THROUGH the rolling boulder. Windowed-only, exactly like the stock guarded decal
+    // plugin add; registered BEFORE `SurfaceVisualsPlugin` builds decals on it. PbrPlugin already
+    // supplies the `ForwardDecal` quad-mesh hook + the `bevy_pbr::decal::forward` shader library this
+    // extension reuses, so nothing else is needed here.
+    app.add_plugins(
+        bevy::pbr::MaterialPlugin::<crate::client::decal_material::DepthTestedDecalMaterial>::default(),
+    );
+    // Replicated surface-patch visuals (spec §6/D10: tinted forward decal + optional looping vfx
     // per NetworkedSurfacePatch). Windowed-only — decals need PbrPlugin's render infra + the
     // camera DepthPrepass (added in scene.rs); the headless observer never renders.
     app.add_plugins(crate::client::surfaces::SurfaceVisualsPlugin);

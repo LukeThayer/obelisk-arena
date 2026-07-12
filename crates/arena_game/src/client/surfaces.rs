@@ -2,11 +2,16 @@
 //! (both client roots register it — the net-test asserts replication reached every observer) and
 //! the windowed-only visuals plugin (`SurfaceVisualsPlugin`: decals + optional looping vfx).
 use avian3d::prelude::{RigidBody, SpatialQuery, SpatialQueryFilter};
-use bevy::pbr::decal::{ForwardDecal, ForwardDecalMaterial, ForwardDecalMaterialExt};
+// `ForwardDecal` is kept for its MATERIAL-AGNOSTIC quad-mesh on-add hook (bevy_pbr 0.18.1
+// `decal/forward.rs::forward_decal_set_mesh` only sets the shared rotated-`Rectangle` `ForwardDecalMesh`
+// on the entity — it never touches the material type), so it drives the mesh for our forked material
+// unchanged. The MATERIAL itself is the arena fork (`decal_material.rs`) — see the ground-snap block.
+use bevy::pbr::decal::ForwardDecal;
 use bevy::prelude::*;
 use obelisk_bevy::surfaces::SurfaceRegistry;
 use serde_json::json;
 
+use crate::client::decal_material::{DepthTestedDecalExt, DepthTestedDecalMaterial};
 use crate::net::protocol::NetworkedSurfacePatch;
 use crate::trace;
 
@@ -25,21 +30,18 @@ pub(crate) fn trace_replicated_patches(
 /// lightyear's despawn replication (decay/consume/evict/round reset) recursively removes the
 /// visuals with the patch, so neither child carries its own lifetime.
 ///
-/// Registered in `app_windowed.rs` ONLY: `ForwardDecal` needs `PbrPlugin`'s render infra — the
-/// `Assets<ForwardDecalMaterial<StandardMaterial>>` store + the camera depth prepass — which the
-/// headless client / observer never add.
+/// Registered in `app_windowed.rs` ONLY: decals need `PbrPlugin`'s render infra — the camera depth
+/// prepass + the `ForwardDecal` quad-mesh hook — plus the arena's `DepthTestedDecalMaterial`
+/// `MaterialPlugin` (registered alongside this plugin in `app_windowed.rs`), none of which the
+/// headless client / observer add.
 pub struct SurfaceVisualsPlugin;
 
 impl Plugin for SurfaceVisualsPlugin {
     fn build(&self, app: &mut App) {
-        // `PbrPlugin` already registers `MaterialPlugin::<ForwardDecalMaterial<StandardMaterial>>`
-        // (via its `ForwardDecalPlugin`, bevy_pbr 0.18.1), which also inserts the unit-quad
-        // `ForwardDecalMesh` the `ForwardDecal` on-add hook requires. This guarded add is therefore
-        // a defensive no-op under the current bevy — kept idempotent so a future PbrPlugin that
-        // drops the auto-registration doesn't silently break decals.
-        if !app.is_plugin_added::<MaterialPlugin<ForwardDecalMaterial<StandardMaterial>>>() {
-            app.add_plugins(MaterialPlugin::<ForwardDecalMaterial<StandardMaterial>>::default());
-        }
+        // The `MaterialPlugin::<DepthTestedDecalMaterial>` this system's decals need is registered in
+        // `app_windowed.rs` (windowed-only), and PbrPlugin's `ForwardDecalPlugin` supplies both the
+        // camera-depth-prepass infra and the shared `ForwardDecalMesh` the `ForwardDecal` marker's
+        // on-add hook installs — so this plugin only adds the attach system.
         app.add_systems(Update, attach_surface_visuals);
     }
 }
@@ -58,11 +60,9 @@ fn attach_surface_visuals(
     >,
     registry: Option<Res<SurfaceRegistry>>,
     asset_server: Res<AssetServer>,
-    mut decal_materials: ResMut<Assets<ForwardDecalMaterial<StandardMaterial>>>,
+    mut decal_materials: ResMut<Assets<DepthTestedDecalMaterial>>,
     // Per-surface-type decal material cache (see the attach loop for the static-registry caveat).
-    mut material_cache: Local<
-        std::collections::HashMap<String, Handle<ForwardDecalMaterial<StandardMaterial>>>,
-    >,
+    mut material_cache: Local<std::collections::HashMap<String, Handle<DepthTestedDecalMaterial>>>,
     vfx: Option<Res<bevy_vfx::VfxLibrary>>,
     // Ground-snap the decals (see the attach block): a downward ray onto STATIC level geometry.
     spatial: SpatialQuery,
@@ -97,7 +97,7 @@ fn attach_surface_visuals(
         let material = material_cache
             .entry(p.surface.clone())
             .or_insert_with(|| {
-                decal_materials.add(ForwardDecalMaterial {
+                decal_materials.add(DepthTestedDecalMaterial {
                     base: StandardMaterial {
                         base_color: color,
                         base_color_texture: Some(asset_server.load(&texture)),
@@ -105,7 +105,10 @@ fn attach_surface_visuals(
                         perceptual_roughness: 1.0,
                         ..default()
                     },
-                    extension: ForwardDecalMaterialExt {
+                    // The arena fork: identical to bevy's `ForwardDecalMaterialExt` but the pipeline
+                    // keeps its STANDARD depth test, so nearer opaque geometry (the glacier boulder)
+                    // occludes the frost instead of the decal drawing over it.
+                    extension: DepthTestedDecalExt {
                         depth_fade_factor: 1.0,
                     },
                 })
@@ -113,13 +116,15 @@ fn attach_surface_visuals(
             .clone();
 
         // Ground-snap the decal (+ vfx) to the floor. bevy 0.18 `ForwardDecal` is a FLAT +Y quad:
-        // scale.y is INERT (there is no Y extent to grow — the old `y_span` scale did nothing),
-        // depth_compare is `Always` (never occluded), and `depth_fade_factor` bounds the projection
-        // (1.0 => ~1 m). An ELEVATED quad therefore floats, parallax-smears at grazing view angles,
-        // and draws OVER characters standing in it. So snap the VISUAL flush to the ground — then
-        // only sub-1m receivers (the floor, feet) catch it. The patch entity keeps its authored
-        // `Position` Y (gameplay is server-side `SURFACE_Y_TOLERANCE`-based); this offset lives on
-        // the render child alone.
+        // scale.y is INERT (there is no Y extent to grow — the old `y_span` scale did nothing) and
+        // `depth_fade_factor` bounds the projection (1.0 => ~1 m). The material is now the arena
+        // DEPTH-TESTED fork (`decal_material.rs`), so unlike stock `ForwardDecal` the quad IS
+        // occluded by nearer opaque geometry (the rolling boulder no longer shows frost through it) —
+        // which makes flush ground-snapping doubly important: an ELEVATED quad would float,
+        // parallax-smear at grazing angles, AND now z-fight / vanish against the floor. Snapping the
+        // VISUAL flush to the ground keeps only sub-1m receivers (the floor, feet) catching it. The
+        // patch entity keeps its authored `Position` Y (gameplay is server-side
+        // `SURFACE_Y_TOLERANCE`-based); this offset lives on the render child alone.
         let patch_pos = pos.0;
         let origin = patch_pos + Vec3::Y * 2.0;
         let ground_y = spatial
@@ -143,6 +148,9 @@ fn attach_surface_visuals(
             // Flat-stage fallback: the arena_flat floor's top face is world Y = 0 (level data).
             .unwrap_or(0.0);
         // Child-LOCAL Y that lands the child's WORLD Y on the ground + a 1 cm bias off the floor.
+        // With the depth-tested fork, that +0.01 m ALSO doubles as the depth-test-winning z-offset:
+        // the decal sits just in front of the floor plane so the standard depth comparison lets it
+        // draw OVER the floor (no z-fight) while still being occluded by taller geometry above it.
         let visual_y = ground_y - patch_pos.y + 0.01;
 
         let decal = commands
