@@ -37,8 +37,9 @@ pub(crate) const KIND_FROST_SPIRE: &str = "frost_spire";
 /// roll's end cue despawns it. Client visuals + the Kinematic collider mirror key off this string.
 pub(crate) const KIND_GLACIER_BALL: &str = "glacier_ball";
 
-/// Per-kind instance cap (GLOBAL, wisp semantics: portals are shared world state, one per slot;
-/// tiles/spires are capped to keep long matches bounded). Exceeding the cap despawns the OLDEST.
+/// Per-kind instance cap (GLOBAL for most kinds — wisp semantics: portals are shared world
+/// state, one per slot; spires capped to keep long matches bounded — but OWNER-SCOPED for the
+/// glacier ball, see `spawn_skill_object`). Exceeding the cap despawns the OLDEST.
 fn max_instances(kind: &str) -> usize {
     match kind {
         KIND_PORTAL_ORANGE | KIND_PORTAL_BLUE => 1,
