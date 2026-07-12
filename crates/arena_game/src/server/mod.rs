@@ -130,7 +130,13 @@ impl Plugin for ArenaServerPlugin {
                 (
                     glacier_ball::pin_glacier_hitboxes,
                     glacier_ball::detect_glacier_landing,
+                    // The orphan watchdog: end any pinned window whose ball despawned (per-caster
+                    // cap eviction / lifetime reap) via the SAME `HitboxWorldHit`, so an evicted
+                    // flight chains the roll + an evicted roll bursts — no phantom damage sphere
+                    // frozen to its fuse. `.chain()` so it reads the pin's just-written pose.
+                    glacier_ball::end_orphaned_glacier_hitboxes,
                 )
+                    .chain()
                     .after(avian3d::prelude::PhysicsSystems::StepSimulation)
                     .after(obelisk_bevy::prelude::ObeliskSet::Projectiles)
                     .before(obelisk_bevy::prelude::ObeliskSet::ResolveHits),

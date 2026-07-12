@@ -5,8 +5,10 @@
 // (server/glacier_ball.rs writes the ball's avian Position into this hitbox's Transform each tick,
 // BEFORE obelisk's overlap + paint sets), so the frost Trail this window PAINTS (paints: Trail —
 // surfaces core) and its contact damage follow the ball's REAL rolling path (bank shots included).
-// No self-propulsion (`motion: Static`, not Linear), no wall detector: the roll ends ONLY at the
-// 6.5s fuse (on_expire) -> glacier_burst (rules) — wisp parity (its 6.5s fuse is the only end).
+// No self-propulsion (`motion: Static`, not Linear), no wall detector: the roll ends ONLY at its
+// 6.5s fuse (on_expire) -> glacier_burst (rules). Fuse-only-end is the wisp PARITY point (wisp's
+// roll also ends solely on a timeout); the 6.5s VALUE is the arena's own tune, NOT wisp's — wisp
+// authors `OnTimeout(secs: 8.0)`.
 (
   skill_id: "glacier_roll",
   phase_durations: ( windup: 0.0, active: 0.05, recovery: 0.0 ),
@@ -19,10 +21,11 @@
   ],
   acquisition: SelfPoint,
   // on_window_roll / on_end_roll are the ROLLING-BOULDER verb channel (server/verbs.rs): the roll
-  // window's open cue SPAWNS the kinematic ice ball (lockstep with the roll), its end cue DESPAWNS
-  // it where the roll stops (wall / fuse). Listing them in vfx_cues is what makes obelisk EMIT
-  // them; they are deliberately NOT bound in `cues:` below — the ball itself is the visual, so the
-  // client leaves them cosmetically unbound (a one-time `cue_unbound` warn each, by design).
+  // window's open cue RE-PINS the airborne Dynamic ball (spawned at CAST by rolling_glacier) to
+  // this roll hitbox, its end cue DESPAWNS it where the roll fuses out. Listing them in vfx_cues is
+  // what makes obelisk EMIT them; they are deliberately NOT bound in `cues:` below — the ball itself
+  // is the visual, so the client leaves them cosmetically unbound (a one-time `cue_unbound` warn
+  // each, by design).
   vfx_cues: { "on_hit": "on_hit", "on_window_roll": "on_window_roll", "on_end_roll": "on_end_roll" },
   cues: {
     "on_hit": ( effect: Some("blizzard_frost"), attach: World, anim: None, params: [],

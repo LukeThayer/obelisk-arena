@@ -93,6 +93,18 @@ pub(crate) enum BallPhase {
     Rolling,
 }
 
+/// The BACK-link (ball ← hitbox): stamped on a PINNED obelisk hitbox, naming the glacier ball that
+/// drags it — the mirror of [`PinnedBall::hitbox`]. It exists ONLY so [`end_orphaned_glacier_hitboxes`]
+/// (the watchdog) can still find a hitbox whose ball is GONE: `PinnedBall` lives ON the ball and
+/// despawns WITH it (cap eviction / lifetime reap), so the forward link vanishes the instant the ball
+/// dies — but this back-link rides the (still-live, sole-mover-gone) hitbox and survives. Stamped at
+/// BOTH pin sites (`server/verbs.rs`: flight spawn + roll re-pin), right alongside the `PinnedBall`
+/// write; obelisk despawns the hitbox on end, taking this with it (normal fuse-end never orphans).
+#[derive(Component)]
+pub(crate) struct PinnedHitbox {
+    pub ball: Entity,
+}
+
 // --- Bundles (shared spawn recipes) -------------------------------------------------------------
 
 /// wisp's full Dynamic physics for a freshly-spawned ball (the `RigidBody::Dynamic` + `Collider`
@@ -207,6 +219,45 @@ pub(crate) fn detect_glacier_landing(
         trace::event(
             "glacier_ball_landed",
             json!({ "pos": [pos.0.x, pos.0.y, pos.0.z] }),
+        );
+    }
+}
+
+/// The ORPHAN WATCHDOG — the guarantee that a pinned window can NEVER outlive its ball. A ball can
+/// vanish while its (`motion: Static`, sole-mover-gone) obelisk hitbox is still live: evicted by the
+/// per-caster cap (your OWN recast supersedes the previous boulder) or reaped by the lifetime cap. If
+/// nothing acts, that hitbox freezes as an INVISIBLE damage sphere (`Enemies`/`OncePerTarget`) that
+/// `detect_overlaps` keeps processing until its own fuse (up to 6.5 s of phantom damage from nothing).
+///
+/// Instead, for every pinned hitbox whose ball no longer exists, fire the SAME `HitboxWorldHit` the
+/// landing detector uses — at the LAST pinned pose (the hitbox `Transform` the pin wrote the tick
+/// before the ball died = the eviction point). obelisk ends the window `HitWorld → on_impact`, so an
+/// evicted FLIGHT hitbox chains `glacier_roll` and an evicted ROLL hitbox fires `glacier_burst`: a
+/// graceful burst at the eviction point, never a phantom. Then clear the back-link (exactly once;
+/// obelisk despawns the hitbox the same tick, so the removal is belt-and-suspenders).
+///
+/// Runs in the pin's own FixedUpdate slot (`.after(Projectiles).before(ResolveHits)`) right after
+/// [`pin_glacier_hitboxes`] + [`detect_glacier_landing`] — the proven slot for firing `HitboxWorldHit`
+/// (the landing detector chains from exactly here). A ball that is merely mid-handoff (alive, its
+/// `PinnedBall.hitbox` momentarily pointing at a despawning flight hitbox) is left ALONE — the guard
+/// keys off the ball's existence, not on which hitbox it currently names.
+pub(crate) fn end_orphaned_glacier_hitboxes(
+    balls: Query<(), With<PinnedBall>>,
+    orphans: Query<(Entity, &Transform, &PinnedHitbox), With<Hitbox>>,
+    mut commands: Commands,
+) {
+    for (hitbox, tf, link) in &orphans {
+        if balls.contains(link.ball) {
+            continue; // ball alive — the pin is dragging this hitbox; not orphaned
+        }
+        commands.trigger(obelisk_bevy::events::HitboxWorldHit {
+            hitbox,
+            position: tf.translation,
+        });
+        commands.entity(hitbox).remove::<PinnedHitbox>();
+        trace::event(
+            "glacier_ball_orphan_ended",
+            json!({ "pos": [tf.translation.x, tf.translation.y, tf.translation.z] }),
         );
     }
 }

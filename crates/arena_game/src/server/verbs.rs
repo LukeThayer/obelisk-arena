@@ -17,7 +17,7 @@
 
 use avian3d::prelude::{Collider, Position, RigidBody};
 use bevy::prelude::*;
-use obelisk_bevy::events::{CueEvent, CueKind};
+use obelisk_bevy::events::{CueEvent, CueKind, HitboxWorldHit};
 use obelisk_bevy::prelude::charge_mult;
 use obelisk_bevy::spatial::Hitbox;
 use serde_json::json;
@@ -25,8 +25,8 @@ use serde_json::json;
 use crate::trace;
 
 use super::glacier_ball::{
-    ball_physics_bundle, ball_spawn_pos, flat_launch, BallPhase, PinnedBall, GLACIER_BALL_LIFETIME,
-    GLACIER_BALL_RADIUS, GLACIER_BALL_THROW_SPEED,
+    ball_physics_bundle, ball_spawn_pos, flat_launch, BallPhase, PinnedBall, PinnedHitbox,
+    GLACIER_BALL_LIFETIME, GLACIER_BALL_RADIUS, GLACIER_BALL_THROW_SPEED,
 };
 use super::skill_objects::{
     spawn_skill_object, SkillObject, KIND_FROST_SPIRE, KIND_GLACIER_BALL, KIND_PORTAL_BLUE,
@@ -325,6 +325,10 @@ pub(crate) fn skill_verbs_on_cue(
             commands
                 .entity(ball)
                 .insert(ball_physics_bundle(launch, flight_hitbox));
+            // Back-link the flight hitbox to its ball (mirrors the `PinnedBall` forward-link in the
+            // bundle) so `end_orphaned_glacier_hitboxes` can gracefully burst this window if the
+            // ball is evicted mid-flight before it ever lands.
+            commands.entity(flight_hitbox).insert(PinnedHitbox { ball });
         }
 
         // --- Rolling glacier: the roll window OPENED (obelisk chained it at the landing world-hit,
@@ -363,8 +367,23 @@ pub(crate) fn skill_verbs_on_cue(
                         hitbox: roll_hitbox,
                         phase: BallPhase::Rolling,
                     });
+                    // Back-link the roll hitbox to the ball (mirrors the PinnedBall forward-link)
+                    // so the watchdog can burst this window if the ball is later evicted mid-roll.
+                    commands.entity(roll_hitbox).insert(PinnedHitbox { ball });
                 }
-                None => trace::event("glacier_roll_no_ball", json!({ "owner": owner_id })),
+                None => {
+                    // No ball to drag this fresh roll hitbox — the flight ball was evicted before it
+                    // landed, so the chain fired but its boulder is gone. Leaving the roll hitbox
+                    // unpinned would freeze it as a phantom damage sphere (Static, no mover) until
+                    // its own 6.5 s fuse — the exact orphan the watchdog closes. End it NOW via the
+                    // landing detector's world-hit at the chain-landing cue: obelisk ends it
+                    // HitWorld → on_impact → glacier_burst (a graceful burst where the chain landed).
+                    trace::event("glacier_roll_no_ball", json!({ "owner": owner_id }));
+                    commands.trigger(HitboxWorldHit {
+                        hitbox: roll_hitbox,
+                        position: ev.position,
+                    });
+                }
             }
         }
 

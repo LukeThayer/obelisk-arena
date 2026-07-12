@@ -44,10 +44,11 @@ fn max_instances(kind: &str) -> usize {
         KIND_PORTAL_ORANGE | KIND_PORTAL_BLUE => 1,
         KIND_FROST_SPIRE => 12,
         // THE AUTHORITY FLIP: the ball is a real Dynamic body spawned at CAST and living through its
-        // whole flight+roll. Effectively 1 live ball per caster (the newest glacier supersedes the
-        // old — replace-oldest), matching the portal-slot idiom; a stale orphan (missed end cue) is
-        // evicted by the next cast. (Global cap like the other kinds — precise per-caster capping is
-        // the same latent single-caster simplification the portal cap carries.)
+        // whole flight+roll. Cap 1 PER CASTER — the eviction filter in `spawn_skill_object` scopes
+        // this kind to `owner`, so each duelist owns one live boulder: your OWN recast supersedes
+        // (and gracefully bursts, via `glacier_ball::end_orphaned_glacier_hitboxes`) your previous
+        // ball, while an opponent's cast can never evict yours. The lifetime cap reaps a stale orphan
+        // whose end cue was lost.
         KIND_GLACIER_BALL => 1,
         _ => 32,
     }
@@ -67,11 +68,17 @@ pub(crate) fn spawn_skill_object(
     lifetime: Option<f32>,
     physics: Option<(RigidBody, Collider)>,
 ) -> Entity {
-    // Replace-oldest: despawn enough of this kind that the new one fits the cap.
+    // Replace-oldest: despawn enough of this kind that the new one fits the cap. The glacier ball
+    // caps PER CASTER (`per_owner` — each duelist owns one live boulder; your OWN recast evicts and,
+    // via `glacier_ball::end_orphaned_glacier_hitboxes`, gracefully BURSTS your previous ball, while
+    // an opponent's cast can never steal yours). Portals/spires stay GLOBAL (shared world state — one
+    // portal per color per slot); portal per-caster capping is a separate, pre-existing question (its
+    // global 1-per-color is intentional wisp slot semantics, left untouched here).
     let cap = max_instances(kind);
+    let per_owner = kind == KIND_GLACIER_BALL;
     let mut same_kind: Vec<(Entity, f32)> = existing
         .iter()
-        .filter(|(_, o)| o.kind == kind)
+        .filter(|(_, o)| o.kind == kind && (!per_owner || o.owner == owner))
         .map(|(e, o)| (e, o.spawned_at))
         .collect();
     if same_kind.len() + 1 > cap {
