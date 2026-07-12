@@ -669,6 +669,17 @@ mod tests {
             Vec3::new(5.0, 0.0, 0.0),
             "moved sample not appended"
         );
+
+        // The dedup is an AND: a ROTATION-ONLY change (position identical) must still record —
+        // a ball spinning in place keeps its rotation history.
+        let spun = Quat::from_rotation_y(0.5);
+        interp.push(101.0, Vec3::new(5.0, 0.0, 0.0), spun);
+        assert_eq!(
+            interp.samples.last().unwrap().recv,
+            101.0,
+            "rotation-only change was wrongly deduped"
+        );
+        assert_eq!(interp.samples.last().unwrap().rot, spun);
     }
 
     #[test]
