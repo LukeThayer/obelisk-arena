@@ -27,10 +27,12 @@ use crate::trace;
 /// longer sets a visual delay for them; it sets (a) how fast a mispredict is detected + rolled back
 /// and (b) the staleness bound on the `NetworkedHealth`/`NetworkedCastState`/`PlayerCustomization`
 /// mirrors. Bandwidth at 2 players is trivial. (lightyear's own examples use 100 ms — a demo-bandwidth
-/// default, not a feel choice.) Skill-object VISUALS *do* interpolate — `client/skill_objects.rs`
-/// renders replicated skill objects `1.5 × 1/REPLICATION_SEND_HZ` (~50 ms) behind the newest state,
-/// so it reads this to size its render delay (hence `pub` — value unchanged).
-pub const REPLICATION_SEND_HZ: u32 = 30;
+/// default, not a feel choice.) Skill-object VISUALS interpolate against this cadence too, but
+/// ADAPTIVELY (wisp's law: render one measured inter-sample span behind — `client/skill_objects.rs`
+/// derives nothing from this constant), so this stays the deliberate global knob for mispredict
+/// cadence + mirror staleness. Raising it toward 60 Hz is the named lever if skill-object motion
+/// needs denser samples at impacts/bounces.
+const REPLICATION_SEND_HZ: u32 = 30;
 
 /// Plugin: server-side lightyear net stack — `ServerPlugins` + `ProtocolPlugin` + trace, spawns the
 /// netcode server entity bound to `ServerBind`, and attaches a `ReplicationSender` per client link.

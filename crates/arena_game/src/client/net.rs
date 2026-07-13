@@ -182,10 +182,11 @@ impl Plugin for ClientNetPlayerPlugin {
                 (
                     materialize_predicted_players,
                     // THE AUTHORITY FLIP: mirror the server's Dynamic glacier boulder as a LOCAL
-                    // Kinematic collider on EVERY client (headless included) so predicted players
+                    // Static collider on EVERY client (headless included) so predicted players
                     // collide with it in lockstep and the shove doesn't rubber-band. Runs here (not
                     // in the windowed-only visuals plugin) precisely so the headless observer gets
-                    // the collider too — gameplay parity, not a visual.
+                    // the collider too — gameplay parity, not a visual. (Static, not Kinematic —
+                    // wisp parity: no SolverBody, so avian never re-marks/integrates its pose.)
                     attach_glacier_ball_collider,
                     // The sink-bug WITNESS (headless too): trace whenever a live glacier-ball mirror
                     // dips subfloor. ZERO such events is gate assertion (11) — the ball must replicate
@@ -201,11 +202,11 @@ impl Plugin for ClientNetPlayerPlugin {
     }
 }
 
-/// Marker: the local Kinematic collider mirror is attached to this replicated glacier ball.
+/// Marker: the local Static collider mirror is attached to this replicated glacier ball.
 #[derive(Component)]
 struct GlacierBallMirror;
 
-/// Attach the LOCAL Kinematic collider mirror to each replicated glacier boulder. The server's ball
+/// Attach the LOCAL Static collider mirror to each replicated glacier boulder. The server's ball
 /// is a Dynamic body whose shove is authoritative; giving the replicated copy the IDENTICAL collider
 /// + layers (the shared `server/glacier_ball.rs` recipe — a mismatch desyncs the shove) makes
 /// predicted Dynamic players collide with it LOCALLY, so the knockback is predicted in lockstep
@@ -226,16 +227,18 @@ fn attach_glacier_ball_collider(
     }
 }
 
-/// The sink-bug WITNESS (design: this fix's RED→GREEN gate). The client mirror is a `RigidBody::Kinematic`
-/// copy, and avian INTEGRATES a kinematic body's `LinearVelocity` into `Position` every tick with no
-/// client gravity/contacts to oppose it — so a replicated settling residual (vy≈−0.167) DROVE the mirror
-/// ~0.17 m/s subfloor between 30Hz Position snapshots ("sinks over 3-4s then pops"). Fire
-/// `client_ball_subfloor` when a live glacier-ball mirror is subfloor (avian `Position.y < 0.25`; on
-/// `arena_flat` the floor top is y=0 and a resting ball's center sits at [`GLACIER_BALL_RADIUS`] = 0.32)
-/// AND is CARRYING velocity (`|LinearVelocity| > VEL_EPS`) — i.e. the mirror is being DRIVEN under the
-/// floor by the very velocity the bug replicated. Post-fix, velocity is per-entity excluded from the
-/// ball's replication (`server/verbs.rs`), so the Kinematic mirror's `LinearVelocity` stays ~0 and it
-/// follows the replicated `Position` alone — it can no longer be driven subfloor.
+/// The sink-bug WITNESS (design: this fix's RED→GREEN gate). HISTORICAL bug: the client mirror
+/// WAS a `RigidBody::Kinematic` copy, and avian INTEGRATES a kinematic body's `LinearVelocity`
+/// into `Position` every tick with no client gravity/contacts to oppose it — a replicated settling
+/// residual (vy≈−0.167) DROVE the mirror ~0.17 m/s subfloor between 30Hz Position snapshots
+/// ("sinks over 3-4s then pops"). Fire `client_ball_subfloor` when a live glacier-ball mirror is
+/// subfloor (avian `Position.y < 0.25`; on `arena_flat` the floor top is y=0 and a resting ball's
+/// center sits at [`GLACIER_BALL_RADIUS`] = 0.32) AND is CARRYING velocity
+/// (`|LinearVelocity| > VEL_EPS`) — i.e. the mirror is being DRIVEN under the floor by the very
+/// velocity the bug replicated. Post-fix, velocity is per-entity excluded from the ball's
+/// replication (`server/verbs.rs`) AND the mirror is `RigidBody::Static` (no SolverBody — avian
+/// neither integrates nor writes it), so the tripwire condition is structurally impossible; it
+/// fires again only if someone reintroduces a SolverBody-bearing mirror with replicated velocity.
 ///
 /// The velocity gate is load-bearing, NOT decoration: `arena_flat`'s floor is only ±20 but the roll
 /// marches "past +43", so the ball genuinely ROLLS OFF THE EDGE and falls deep subfloor ON THE SERVER;

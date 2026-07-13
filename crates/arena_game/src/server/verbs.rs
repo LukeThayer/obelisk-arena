@@ -325,15 +325,16 @@ pub(crate) fn skill_verbs_on_cue(
             );
             commands.entity(ball).insert((
                 ball_physics_bundle(launch, flight_hitbox),
-                // POSE-ONLY replication (THE SINK FIX): the ball's avian Position/Rotation ride the
-                // wire, but its LinearVelocity/AngularVelocity are per-entity EXCLUDED here. The client
-                // mirror is a `RigidBody::Kinematic` copy (glacier_ball.rs::client_ball_mirror_bundle),
-                // and avian INTEGRATES a kinematic body's LinearVelocity into Position every tick with
-                // NO client gravity/contacts to oppose it — so the rolling ball's velocity replicated
-                // straight into the mirror, driving it under the floor between 30Hz Position snapshots
-                // ("sinks over 3-4s then pops"). Disabling velocity replication for THIS entity ONLY
-                // (players keep it — their prediction depends on it) makes the mirror follow the
-                // replicated Position alone. lightyear's per-entity override
+                // POSE-ONLY replication (THE SINK FIX; also wisp parity — wisp never sends prop
+                // velocity): the ball's avian Position/Rotation ride the wire, but its
+                // LinearVelocity/AngularVelocity are per-entity EXCLUDED here. Historical bug: the
+                // client mirror WAS `RigidBody::Kinematic` (now Static — no SolverBody, nothing to
+                // integrate), and avian INTEGRATES a kinematic body's LinearVelocity into Position
+                // every tick with NO client gravity/contacts to oppose it — the rolling ball's
+                // velocity replicated straight into the mirror, driving it under the floor between
+                // 30Hz Position snapshots ("sinks over 3-4s then pops"). Disabling velocity
+                // replication for THIS entity ONLY (players keep it — their prediction depends on
+                // it) makes the mirror follow the replicated Position alone. lightyear's per-entity override
                 // (`ComponentReplicationOverrides<C>::disable_all()` — the same mechanism lightyear uses
                 // internally to keep `Controlled` off the wire); portals/spires are untouched.
                 ComponentReplicationOverrides::<LinearVelocity>::default().disable_all(),
