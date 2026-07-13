@@ -1,10 +1,11 @@
 //! Client visuals for replicated skill objects (portals, frost tiles, frost spires, the glacier
 //! boulder — the wisp weapon ports). The server replicates `NetworkedSkillObject { kind, owner }` +
 //! avian `Position`/`Rotation`; this module builds the visual per `kind`. The glacier ball + spire
-//! carry their mesh on a SNAPSHOT-INTERPOLATED child (rendered ~50 ms behind the newest replicated
-//! state so the boulder rolls smoothly between the 30 Hz steps instead of jumping ~23 cm per
-//! snapshot); the root Transform stays pinned to the raw replicated pose (avian / `mirror_…`) and the
-//! child's local transform counter-corrects it (`child_local_for`). Windowed-only.
+//! carry their mesh on a SNAPSHOT-INTERPOLATED child (wisp's pure snapshot interpolation: rendered one
+//! inter-sample span behind the newest replicated state so the boulder rolls smoothly between the
+//! 30 Hz steps instead of jumping ~23 cm per snapshot); the root Transform stays pinned to the raw
+//! replicated pose (avian / `mirror_…`) and the child's local transform counter-corrects it
+//! (`child_local_for`). Windowed-only.
 //!
 //! PORTALS are true see-through windows (wisp's `spells/portal.rs` rig, Coding-Adventure
 //! style): each disc gets a [`PortalMaterial`] whose texture is rendered by a dedicated
@@ -34,7 +35,7 @@ use crate::portals_shared::{
     portal_camera_transform, PortalPose, KIND_PORTAL_BLUE, KIND_PORTAL_ORANGE, PORTAL_RADIUS,
     PORTAL_THICKNESS,
 };
-// The shared physical radius (server body + client Kinematic mirror), so the icy sphere renders
+// The shared physical radius (server body + client Static mirror), so the icy sphere renders
 // exactly the size it collides.
 use crate::server::glacier_ball::GLACIER_BALL_RADIUS;
 
@@ -88,25 +89,16 @@ struct SkillObjectVisualsAttached;
 #[derive(Component)]
 struct SkillObjectVisual;
 
-/// How many replicated pose samples to keep per skill object. The buffer must span COMFORTABLY MORE
-/// than the [`INTERP_DELAY_SECS`] (~50 ms) render lag, so that `render_at = now − 50ms` lands in the
-/// MIDDLE of the history (bracketed by two real samples) and we interpolate — not at the oldest edge,
-/// which degrades to a jittery clamp-to-oldest (the raw/steppy look; the `interp-inert` investigation).
-///
-/// MEASURED (windowed client, rolling ball, the `interp-inert` probe): after [`SkillObjectInterp::push`]'s
-/// value-dedup the RETAINED stream is ~40 Hz of distinct values — NOT the 30 Hz snapshot cadence an
-/// earlier version of this comment assumed. avian re-marks the ball's Kinematic-mirror `Position`
-/// `Changed` at 60 Hz (`buffer_skill_object_poses`); the dedup rejects the value-exact re-marks, and
-/// ~40 Hz of distinct values survive. The decomposition of that 40 Hz is NOT fully attributed
-/// (replication-apply timing granularity is the leading suspect; velocity is excluded from the ball's
-/// replication, so between-snapshot integration should be value-exact) — the MEASURED RATE is the
-/// load-bearing fact, and the cap carries a ~3× margin over it rather than trusting any assumed
-/// cadence (this comment has been wrong about the cadence three times). At ~40 Hz a 4-cap window spanned only
-/// ~64 ms ≈ the render lag, pinning the render time to the oldest sample (clamp 1-in-6 frames). Cap 8
-/// spans ~130–175 ms — render_at sits ~80 ms above the oldest sample, solidly mid-buffer. (Deepening
-/// the buffer adds NO latency: the render point is always 50 ms behind newest; the extra samples are
-/// older history the render point never reaches unless the stream stalls.)
-const POSE_BUFFER_CAP: usize = 8;
+/// How many replicated pose samples to keep per skill object — wisp's prev/cur PAIR (two). wisp holds
+/// exactly two samples (`~/src/wisp` `src/net/replication.rs`: `prev_*`/`cur_*`) and renders between
+/// them under the adaptive-span delay ([`render_pose_at`]). Two suffice because the sample stream is
+/// now CLEAN: the ball's client mirror is `RigidBody::Static` (`server/glacier_ball.rs`), which has no
+/// `SolverBody`, so avian never re-marks its `Position` between snapshots — one `Changed` per real
+/// ~30 Hz snapshot, and the newest two always bracket `render_at = now − last_span`. (The deep cap-8
+/// buffer + value-dedup this replaces existed ONLY to survive the Kinematic mirror's 60 Hz re-mark
+/// flood — MEASURED ~41 Hz of distinct samples after dedup; the Static flip deletes the flood, so both
+/// the deep cap and the dedup are gone.)
+const POSE_BUFFER_CAP: usize = 2;
 
 /// Snapshot-interpolation state for one skill object, on the REPLICATED ROOT (despawns with it; the
 /// mesh child despawns recursively with the root). Holds the mesh child it drives + the recent pose
@@ -115,17 +107,9 @@ const POSE_BUFFER_CAP: usize = 8;
 struct SkillObjectInterp {
     /// The mesh-child entity whose LOCAL transform is counter-corrected each frame.
     visual: Entity,
-    /// `(recv_secs, pos, rot)` history, oldest→newest, capped at [`POSE_BUFFER_CAP`].
+    /// `(recv_secs, pos, rot)` history, oldest→newest, capped at [`POSE_BUFFER_CAP`] (= 2, wisp's pair).
     samples: Vec<PoseSample>,
 }
-
-/// Squared-distance epsilon (m²) below which a new sample's position counts as UNCHANGED from the last
-/// buffered one. (1e-4 m)² — three orders under a real snapshot's motion (~23 cm/snapshot for a rolling
-/// ball), so only avian's solver-writeback re-marks (which advance `Position` by ~0) are rejected.
-const POSE_DEDUP_DIST_SQ: f32 = 1e-8;
-/// Angle epsilon (radians) below which a new sample's rotation counts as UNCHANGED — the rotational twin
-/// of [`POSE_DEDUP_DIST_SQ`] (~0.006°, far under any real per-snapshot spin).
-const POSE_DEDUP_ANGLE: f32 = 1e-4;
 
 impl SkillObjectInterp {
     fn new(visual: Entity) -> Self {
@@ -135,21 +119,11 @@ impl SkillObjectInterp {
         }
     }
 
-    /// Append the newest sample, dropping the oldest once the cap is hit. VALUE-DEDUPED: a sample whose
-    /// `(pos, rot)` is within epsilon of the last buffered one is DROPPED (the timestamp is NOT
-    /// refreshed) — avian's `writeback_solver_bodies` re-marks the ball's Kinematic mirror `Position` as
-    /// `Changed` every 60 Hz tick, so an un-deduped buffer floods with EXACT-duplicate re-marks. Deduping
-    /// keeps one sample per real value change — but the retained stream is still ~40 Hz (real replication
-    /// + sub-snapshot solver jitter above the epsilon), NOT the 30 Hz an earlier design assumed, so the
-    /// dedup alone is not enough to reach the render depth: [`POSE_BUFFER_CAP`] carries that.
+    /// Append the newest replicated sample, evicting the oldest once the cap ([`POSE_BUFFER_CAP`] = 2,
+    /// wisp's prev/cur pair) is hit. NO value-dedup: the Static client mirror gives one
+    /// `Changed<Position>` per real snapshot (`buffer_skill_object_poses`), so every push is a genuine
+    /// new sample and there is nothing to dedup.
     fn push(&mut self, recv: f32, pos: Vec3, rot: Quat) {
-        if let Some(last) = self.samples.last() {
-            if pos.distance_squared(last.pos) < POSE_DEDUP_DIST_SQ
-                && rot.angle_between(last.rot) < POSE_DEDUP_ANGLE
-            {
-                return; // unchanged value (a solver-writeback re-mark) — don't flood the buffer
-            }
-        }
         if self.samples.len() == POSE_BUFFER_CAP {
             self.samples.remove(0);
         }
@@ -275,7 +249,7 @@ fn attach_skill_object_visuals(
         // --- Glacier boulder (THE AUTHORITY FLIP): the icy mesh + wisp material + point light ride a
         // spawned mesh CHILD, snapshot-interpolated (`interpolate_skill_object_visuals`) so the sphere
         // ROLLS between real 30 Hz states instead of stepping ~23 cm per snapshot. The REPLICATED ROOT
-        // keeps the kinematic collider mirror (`client/net.rs`) + replicated `Position`/`Rotation`
+        // keeps the static collider mirror (`client/net.rs`) + replicated `Position`/`Rotation`
         // (avian pins the root Transform to that raw pose; the child counter-corrects it). Wisp
         // `glacier_ball.body.ron` material + light, verbatim. ---
         if obj.kind == "glacier_ball" {
@@ -364,15 +338,9 @@ fn attach_skill_object_visuals(
 /// glacier ball traverses portals — or a round-reset re-placement), not motion: [`sample_pose_at`]
 /// SNAPS across such a pair (no blend) so the visual doesn't glide across the arena. Mirrors
 /// `harness::snap_large_corrections`'s 2 m teleport threshold for predicted players (the sink-round
-/// precedent).
+/// precedent). wisp's own teleport threshold is 3.0 m (`~/src/wisp` `src/net/replication.rs:131`);
+/// ours predates it at 2.0 m for portal warps and stays 2.0.
 const POSE_SNAP_DISTANCE: f32 = 2.0;
-
-/// Render skill-object visuals this far behind the newest replicated state — classic snapshot
-/// interpolation. `1.5 × 1/REPLICATION_SEND_HZ` (30 Hz → 33 ms ⇒ ~50 ms): far enough behind that the
-/// render time is always bracketed by two REAL samples, so we interpolate and NEVER extrapolate. A
-/// constant ~50 ms visual lag is imperceptible on a rolling boulder, and players are unaffected —
-/// they are predicted (`client/net.rs`), only these cosmetic skill-object meshes lag.
-const INTERP_DELAY_SECS: f32 = 1.5 / crate::net::server::REPLICATION_SEND_HZ as f32;
 
 /// One buffered replicated pose: its receive time (`Time::elapsed_secs` seconds — the interp clock)
 /// and the raw avian pose. Snapshot-interpolation history for the smooth visual.
@@ -415,6 +383,25 @@ fn sample_pose_at(samples: &[PoseSample], t: f32) -> Option<(Vec3, Quat)> {
     }
 }
 
+/// wisp's inter-sample-gap floor — `(cur_time − prev_time).max(1e-3)` (`~/src/wisp`
+/// `src/net/replication.rs:182`): a degenerate zero-span pair (two samples stamped the same instant)
+/// can't divide the render fraction, so the delay never drops below 1 ms.
+const WISP_SPAN_FLOOR: f32 = 1e-3;
+
+/// Render pose at wall-clock `now` under wisp's ADAPTIVE-span delay (`~/src/wisp`
+/// `src/net/replication.rs:182-184`, verbatim): the render delay IS the newest inter-sample span, so
+/// `render_at = now − span` sits exactly one real gap behind the newest sample and the lerp sweeps
+/// 0→1 in lockstep with sample arrival — no fixed delay to tune; it self-synchronizes with the 30 Hz
+/// stream. Delegates the bracket + lerp/slerp + teleport-snap to [`sample_pose_at`] (which never
+/// extrapolates). `None` iff the buffer is empty.
+fn render_pose_at(samples: &[PoseSample], now: f32) -> Option<(Vec3, Quat)> {
+    let span = match samples {
+        [.., prev, newest] => (newest.recv - prev.recv).max(WISP_SPAN_FLOOR),
+        _ => WISP_SPAN_FLOOR,
+    };
+    sample_pose_at(samples, now - span)
+}
+
 /// The mesh child's LOCAL transform such that, parented to a root at (`parent_pos`, `parent_rot`),
 /// its WORLD pose is exactly (`target_pos`, `target_rot`). Counter-corrects the stepping root: avian
 /// pins a physics-body root's Transform to the raw, 30Hz-stepped replicated Position, so the smoothly
@@ -446,7 +433,7 @@ fn child_local_for(
 /// only `Position`, and nothing else moves its Transform (without this it stays buried). REDUNDANT but
 /// harmless for the glacier ball (avian pins the root to this same `Position` — same value, last write
 /// wins) and portals (placed once, static — the spawn `base_tf` already suffices). RENDER-ONLY:
-/// collision + the shove read the replicated `Position` on the ROOT directly (the ball's Kinematic
+/// collision + the shove read the replicated `Position` on the ROOT directly (the ball's Static
 /// mirror + the subfloor witness, `client/net.rs`) — never this Transform. Portals and unknown kinds
 /// keep the mesh on the root; the ball and spire carry it on a child that this pose parents.
 fn mirror_skill_object_pose(
@@ -458,16 +445,15 @@ fn mirror_skill_object_pose(
     }
 }
 
-/// Record each newly-replicated skill-object pose (with its receive time) into the interp buffer.
-/// `Changed<Position>` LOOKS like it fires once per 30 Hz snapshot — but it DOESN'T for the glacier
-/// ball. avian's `writeback_solver_bodies` (SolverSystems::Finalize, every fixed tick) does
-/// `pos.0 += delta` / `*rot = delta·rot` through `&mut` for EVERY body carrying a `SolverBody` (Dynamic
-/// OR Kinematic) with no zero-delta guard and no `bypass_change_detection`, so the ball's client
-/// Kinematic mirror (attached to THIS same root, `client/net.rs`) has its `Position` re-marked `Changed`
-/// at 60 Hz even though the VALUE only advances on a 30 Hz snapshot. [`SkillObjectInterp::push`]
-/// VALUE-DEDUPS to compensate, so the buffer still holds one sample per real value change. (The frost
-/// spire has no client body → no `SolverBody` → genuine 30 Hz `Changed`; the dedup is a no-op for it.)
-/// Only ball/spire roots carry a `SkillObjectInterp` (portals/unknowns don't).
+/// Record each newly-replicated skill-object pose (with its receive time) into the interp buffer, once
+/// per real snapshot. `Changed<Position>` fires when replication applies a new `Position` — and with the
+/// ball's client mirror now `RigidBody::Static` (`server/glacier_ball.rs`), avian's
+/// `writeback_solver_bodies` has no `SolverBody` to write, so it never re-marks the mirror between
+/// snapshots: a CLEAN ~30 Hz stream (the bodyless frost spire was always clean). That clean stream is
+/// exactly what lets the 2-sample buffer + adaptive-span delay ([`render_pose_at`]) reproduce wisp's
+/// smoothing. A Kinematic mirror instead re-marked `Position` at 60 Hz (MEASURED ~41 Hz of distinct
+/// samples survived the old value-dedup) — the flood that forced the now-deleted cap-8 + dedup
+/// workaround. Only ball/spire roots carry a `SkillObjectInterp` (portals/unknowns don't).
 fn buffer_skill_object_poses(
     time: Res<Time>,
     mut q: Query<(&Position, &Rotation, &mut SkillObjectInterp), Changed<Position>>,
@@ -478,10 +464,11 @@ fn buffer_skill_object_poses(
     }
 }
 
-/// Snapshot-interpolate each skill object's mesh CHILD ~[`INTERP_DELAY_SECS`] behind the newest
-/// replicated state — the boulder ROLLS between real states instead of stepping ~23 cm per 30 Hz
-/// snapshot. The root Transform is pinned to the raw stepped `Position` (avian for the ball,
-/// [`mirror_skill_object_pose`] for the bodyless spire), so we express the smooth pose on the child,
+/// Snapshot-interpolate each skill object's mesh CHILD one inter-sample span behind the newest
+/// replicated state (wisp's adaptive delay, [`render_pose_at`]) — the boulder ROLLS between real states
+/// instead of stepping ~23 cm per 30 Hz snapshot. The root Transform is pinned to the raw stepped
+/// `Position` (avian for the ball, [`mirror_skill_object_pose`] for the bodyless spire), so we express
+/// the smooth pose on the child,
 /// counter-transformed against that stepping root ([`child_local_for`]). RENDER-ONLY: collision +
 /// shove keep reading the raw root `Position`. Before any sample lands the child stays at its spawn
 /// identity (== the root pose). The two queries touch disjoint entities/components (root reads
@@ -491,9 +478,9 @@ fn interpolate_skill_object_visuals(
     roots: Query<(&Position, &Rotation, &SkillObjectInterp)>,
     mut visuals: Query<&mut Transform, With<SkillObjectVisual>>,
 ) {
-    let render_at = time.elapsed_secs() - INTERP_DELAY_SECS;
+    let now = time.elapsed_secs();
     for (pos, rot, interp) in &roots {
-        let Some((target_pos, target_rot)) = sample_pose_at(&interp.samples, render_at) else {
+        let Some((target_pos, target_rot)) = render_pose_at(&interp.samples, now) else {
             continue; // no samples yet — leave the child at its spawn identity (root pose)
         };
         if let Ok(mut tf) = visuals.get_mut(interp.visual) {
@@ -584,6 +571,28 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_delay_renders_the_newest_pair_at_span_offset() {
+        // wisp's adaptive-span law (~/src/wisp `src/net/replication.rs:182-184`): span = newest.recv −
+        // prev.recv; render_at = now − span; t = clamp((render_at − prev.recv)/span). With a fixed pair
+        // span, querying at now = prev.recv + (1 + k)·span puts render_at = prev.recv + k·span, so the
+        // pose lands at fraction k of prev→cur — the lerp sweeps 0→1 in lockstep with sample arrival.
+        // The law depends only on RELATIVE times, so t0 = 0 (exact in f32; a nonzero clock offset only
+        // adds sub-mm f32 cancellation noise — a runtime non-issue on a rolling boulder).
+        let t0 = 0.0;
+        let span = 1.0 / 30.0;
+        let buf = [s(t0, Vec3::ZERO), s(t0 + span, Vec3::new(2.0, 0.0, 0.0))];
+        for k in [0.0_f32, 0.5, 1.0] {
+            let now = t0 + (1.0 + k) * span;
+            let (p, _) = render_pose_at(&buf, now).expect("two samples buffered");
+            let expected = Vec3::new(2.0 * k, 0.0, 0.0);
+            assert!(
+                (p - expected).length() < 1e-5,
+                "k={k}: render_at should land fraction {k} of the pair; got {p:?}, want {expected:?}",
+            );
+        }
+    }
+
+    #[test]
     fn sample_lerps_at_the_exact_midpoint() {
         let buf = [s(0.0, Vec3::ZERO), s(1.0, Vec3::new(2.0, 0.0, 0.0))];
         let (p, _) = sample_pose_at(&buf, 0.5).unwrap();
@@ -642,60 +651,42 @@ mod tests {
     }
 
     #[test]
-    fn push_evicts_oldest_past_cap_and_dedups_by_value() {
+    fn push_keeps_newest_two_and_records_every_sample() {
         let mut interp = SkillObjectInterp::new(Entity::PLACEHOLDER);
-        // (CAP + 1) DISTINCT positions (x = 0..=CAP) → capped: oldest dropped, newest kept, order
-        // preserved. Cap-relative so it pins the eviction behaviour at whatever POSE_BUFFER_CAP is.
-        let last_x = POSE_BUFFER_CAP as f32;
-        for i in 0..=POSE_BUFFER_CAP {
-            interp.push(i as f32, Vec3::new(i as f32, 0.0, 0.0), Quat::IDENTITY);
-        }
-        assert_eq!(interp.samples.len(), POSE_BUFFER_CAP, "cap not enforced");
+        // Cap is 2 (wisp's prev/cur pair): three pushes keep the NEWEST two, oldest evicted, order kept.
+        interp.push(0.0, Vec3::new(0.0, 0.0, 0.0), Quat::IDENTITY);
+        interp.push(1.0, Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY);
+        interp.push(2.0, Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY);
+        assert_eq!(interp.samples.len(), 2, "cap-2 not enforced");
         assert_eq!(
-            interp.samples.first().unwrap().pos,
+            interp.samples[0].pos,
             Vec3::new(1.0, 0.0, 0.0),
-            "oldest not dropped"
+            "oldest of the pair wrong"
         );
         assert_eq!(
-            interp.samples.last().unwrap().pos,
-            Vec3::new(last_x, 0.0, 0.0),
+            interp.samples[1].pos,
+            Vec3::new(2.0, 0.0, 0.0),
             "newest not kept"
         );
 
-        // Value-dedup: re-pushing the SAME value (an avian solver-writeback re-mark) does NOT grow the
-        // buffer and does NOT re-timestamp the last sample.
-        interp.push(99.0, Vec3::new(last_x, 0.0, 0.0), Quat::IDENTITY);
+        // NO value-dedup any more (the Static mirror gives ONE Changed per real snapshot — nothing to
+        // dedup). An IDENTICAL (pos, rot) push STILL records: it advances the pair + re-timestamps it.
+        interp.push(3.0, Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY);
+        assert_eq!(interp.samples.len(), 2);
         assert_eq!(
-            interp.samples.len(),
-            POSE_BUFFER_CAP,
-            "duplicate push grew the buffer"
+            interp.samples[1].recv, 3.0,
+            "an identical value was wrongly dropped/deduped"
         );
         assert_eq!(
-            interp.samples.last().unwrap().recv,
-            last_x,
-            "duplicate push re-timestamped the last sample"
-        );
-
-        // A MOVED sample IS accepted (evicting the oldest to stay at cap).
-        let moved_x = last_x + 1.0;
-        interp.push(100.0, Vec3::new(moved_x, 0.0, 0.0), Quat::IDENTITY);
-        assert_eq!(interp.samples.len(), POSE_BUFFER_CAP);
-        assert_eq!(
-            interp.samples.last().unwrap().pos,
-            Vec3::new(moved_x, 0.0, 0.0),
-            "moved sample not appended"
+            interp.samples[0].recv, 2.0,
+            "the prev slot did not advance on an identical push"
         );
 
-        // The dedup is an AND: a ROTATION-ONLY change (position identical) must still record —
-        // a ball spinning in place keeps its rotation history.
+        // A ROTATION-ONLY change (position identical) records too — trivially, nothing blocks it now.
         let spun = Quat::from_rotation_y(0.5);
-        interp.push(101.0, Vec3::new(moved_x, 0.0, 0.0), spun);
-        assert_eq!(
-            interp.samples.last().unwrap().recv,
-            101.0,
-            "rotation-only change was wrongly deduped"
-        );
-        assert_eq!(interp.samples.last().unwrap().rot, spun);
+        interp.push(4.0, Vec3::new(2.0, 0.0, 0.0), spun);
+        assert_eq!(interp.samples[1].recv, 4.0, "rotation-only change not recorded");
+        assert_eq!(interp.samples[1].rot, spun);
     }
 
     #[test]

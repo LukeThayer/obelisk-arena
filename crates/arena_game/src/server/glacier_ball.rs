@@ -17,7 +17,7 @@
 //! fires. obelisk ends the flight hitbox as `EndReason::HitWorld`, which chains `glacier_roll`
 //! (rules `on_impact`) at the contact point. The `glacier_roll` `on_window_roll` verb then RE-PINS
 //! this ball to the new roll hitbox (NO new ball); the roll's 6.5s fuse (`on_end_roll`) despawns
-//! the ball. Server-only (the client mirror is a Kinematic copy — see `client/net.rs`).
+//! the ball. Server-only (the client mirror is a Static copy — see `client/net.rs`).
 
 use avian3d::prelude::{
     AngularDamping, Collider, CollisionEventsEnabled, CollisionLayers, CollisionStart, Friction,
@@ -65,7 +65,7 @@ const GLACIER_BALL_SPAWN_CLEARANCE: f32 = 0.5;
 /// The ball's collision layers — member `Default`, filters `Ground | Player`: it lands + rolls on
 /// the ground and physically SHOVES players, but is not itself Ground/Player (so it never blocks a
 /// world-hit exemption or collides with another ball). IDENTICAL on the server (the authoritative
-/// Dynamic body) and the client mirror (a Kinematic copy) — a mismatch rubber-bands predicted
+/// Dynamic body) and the client mirror (a Static copy) — a mismatch rubber-bands predicted
 /// players through the shove — so it lives here, shared by both spawn sites.
 pub(crate) fn glacier_ball_layers() -> CollisionLayers {
     CollisionLayers::new(
@@ -128,24 +128,34 @@ pub(crate) fn ball_physics_bundle(launch: Vec3, flight_hitbox: Entity) -> impl B
     )
 }
 
-/// The client's LOCAL mirror of the ball: a `RigidBody::Kinematic` sphere with the IDENTICAL
-/// collider + layers, so predicted Dynamic players physically collide with it (the shove doesn't
-/// rubber-band). Driven SOLELY by the replicated `Position` (AvianReplicationMode::Position) —
-/// velocity is deliberately NOT on the wire (per-entity excluded at the ball's spawn site,
-/// `server/verbs.rs`: a Kinematic body integrates any replicated `LinearVelocity` and sinks under
-/// the floor — the "sinks then pops" bug).
+/// The client's LOCAL mirror of the ball: a `RigidBody::Static` sphere with the IDENTICAL collider +
+/// layers, so predicted Dynamic players physically collide with it (the shove doesn't rubber-band).
+/// Driven SOLELY by the replicated `Position` (AvianReplicationMode::Position); velocity is never on
+/// the wire (per-entity excluded at the spawn site, `server/verbs.rs` — wisp sends no prop velocity
+/// either).
 ///
-/// SHOVE PARITY (the accepted approximation): with no replicated velocity, this mirror's contact
-/// solver rests on POSITION-STEPPED KINEMATIC DEPENETRATION alone — it carries no ball momentum into
-/// the contact, so it only pushes a predicted player OUT of overlap, not along the ball's travel.
-/// That is deliberate and correct: the shove's authoritative outcome is the SERVER's Dynamic-body
-/// collision, which reaches the predicted player as a rollback/correction (momentum included); the
-/// local mirror's whole job is to stop the player clipping THROUGH the ball between corrections, and
-/// position-stepped depenetration does exactly that. Gameplay parity — attached on EVERY client
-/// (headless included), unlike the windowed-only visuals.
+/// STATIC, not Kinematic — wisp's client prop is `RigidBody::Static` too (`~/src/wisp`
+/// `src/net/replication.rs:896`). A Static body has NO `SolverBody`, so avian's
+/// `writeback_solver_bodies` never re-marks its `Position` as `Changed`; a Kinematic mirror got its
+/// `Position` re-marked EVERY 60 Hz solver tick (even when the value was unchanged), polluting the
+/// windowed interp buffer (`client/skill_objects.rs`) with a 60 Hz `Changed` flood (MEASURED ~41 Hz of
+/// distinct samples survived the old dedup). Static yields a CLEAN once-per-snapshot (~30 Hz) sample
+/// stream — the wisp-identical smoothing the buffer needs. Invariant 16 holds: the LAYERS and the
+/// EVERY-CLIENT (headless-included) ATTACH are untouched; only the body type changes.
+///
+/// SHOVE PARITY (the accepted approximation): with no replicated velocity, this mirror's contact solver
+/// rests on POSITION-STEPPED DEPENETRATION alone — it carries no ball momentum into the contact, so it
+/// only pushes a predicted player OUT of overlap, not along the ball's travel. Identical under Static:
+/// the solver pushes the Dynamic player out of overlap with an immovable body (Static and Kinematic are
+/// both infinite-mass obstacles; neither carried momentum, and the mirror never had any). That is
+/// deliberate and correct: the shove's authoritative outcome is the SERVER's Dynamic-body collision,
+/// which reaches the predicted player as a rollback/correction (momentum included); the local mirror's
+/// whole job is to stop the player clipping THROUGH the ball between corrections, and position-stepped
+/// depenetration does exactly that. Gameplay parity — attached on EVERY client (headless included),
+/// unlike the windowed-only visuals.
 pub(crate) fn client_ball_mirror_bundle() -> impl Bundle {
     (
-        RigidBody::Kinematic,
+        RigidBody::Static,
         Collider::sphere(GLACIER_BALL_RADIUS),
         glacier_ball_layers(),
     )
